@@ -49,9 +49,12 @@ def simpleTest():
     )
 
     # Start the network. This will launch all nodes.
-    nat = net.addNAT(name='nat0', connect=True)
+    nat = net.addNAT(name='nat0', connect=False)
 
     net.start()
+    
+    c1 = net.get('c1')
+    net.addLink(nat, c1)
 
     for host in net.hosts:
         host.cmd('ip route add default via 10.0.0.254')
