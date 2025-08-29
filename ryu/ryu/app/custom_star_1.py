@@ -49,7 +49,14 @@ def simpleTest():
     )
 
     # Start the network. This will launch all nodes.
+    nat = net.addNAT(name='nat0', connect=True)
+
     net.start()
+    
+    for host in net.hosts:
+    host.cmd('ip route add default via 10.0.0.254')
+    host.cmd('echo "nameserver 8.8.8.8" > /etc/resolv.conf')
+
 
     # Get references to the hosts and test connectivity.
     print("--- Pinging hosts to test connectivity ---")
