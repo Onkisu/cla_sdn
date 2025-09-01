@@ -53,10 +53,12 @@ def simpleTest():
 
     net.start()
 
-    nat = net.addNAT(name='nat0').configDefault()
+    nat = net.addNAT(name='nat0')
     c1 = net.get('c1')
     net.addLink(nat, c1)
+    nat.configDefault()   # panggil configDefault setelah link dibuat
 
+    # Set default route + DNS
     for host in net.hosts:
         host.cmd('ip route add default via 10.0.0.254')
         host.cmd('echo "nameserver 8.8.8.8" > /etc/resolv.conf')
