@@ -109,12 +109,26 @@ def parse_heuristic(prompt: str) -> Dict[str,Any]:
     # domain-like tokens
     domains = re.findall(r'([a-z0-9\-]+\.(?:com|net|org|io|tv|id))', p)
     targets.extend(domains)
+    bw = parse_bandwidth(p)
     # known app keywords
     for app in APP_DB.get("apps",{}):
         if app in p and app not in targets:
             targets.append(app)
     if not targets: targets=["general"]
-    return {"intent":intent,"targets":targets,"proto":proto,"time_window":None,"bandwidth":None,"priority":None}
+    return {"intent":intent,"targets":targets,"proto":proto,"time_window":None,"bandwidth":bw,"priority":None}
+
+
+def parse_bandwidth(prompt: str):
+    m = re.search(r'(\d+)\s*(kbps|mbps|gbps|bps)', prompt.lower())
+    if not m:
+        return None
+    val = int(m.group(1))
+    unit = m.group(2)
+    factor = {"bps":1, "kbps":1000, "mbps":1000000, "gbps":1000000000}
+    return val * factor[unit]
+
+# contoh: "limit youtube 2mbps" → 2000000 (bps)
+
 
 def resolve_domain(domain:str)->List[str]:
     ips=[]
