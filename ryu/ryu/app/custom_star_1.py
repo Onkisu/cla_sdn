@@ -59,7 +59,7 @@ def simpleTest():
 
     for host in net.hosts:
         host.cmd('ip route add default via 10.0.0.254')
-        host.cmd('echo nameserver 8.8.8.8 >> /etc/resolv.conf')
+        # host.cmd('echo nameserver 8.8.8.8 >> /etc/resolv.conf')
 
 
 
