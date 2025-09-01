@@ -57,8 +57,8 @@ def simpleTest():
     net.addLink(nat, c1)
     nat.configDefault()
 
-    for host in net.hosts:
-        host.cmd('ip route add default via 10.0.0.254')
+    # for host in net.hosts:
+    #     host.cmd('ip route add default via 10.0.0.254')
         # host.cmd('echo nameserver 8.8.8.8 >> /etc/resolv.conf')
 
 
