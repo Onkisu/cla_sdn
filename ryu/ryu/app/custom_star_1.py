@@ -53,14 +53,13 @@ def simpleTest():
 
     net.start()
 
-    # c1 = net.get('c1')
-    # net.addLink(nat, c1)
-    # nat.configDefault()
+    nat = net.addNAT(name='nat0').configDefault()
+    c1 = net.get('c1')
+    net.addLink(nat, c1)
 
-    # for host in net.hosts:
-    #     host.cmd('ip route add default via 10.0.0.254')
-        # host.cmd('echo nameserver 8.8.8.8 >> /etc/resolv.conf')
-
+    for host in net.hosts:
+        host.cmd('ip route add default via 10.0.0.254')
+        host.cmd('echo "nameserver 8.8.8.8" > /etc/resolv.conf')
 
 
     # Get references to the hosts and test connectivity.
