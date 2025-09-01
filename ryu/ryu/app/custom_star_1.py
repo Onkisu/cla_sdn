@@ -35,9 +35,12 @@ def simpleTest():
     nat.configDefault()
 
     # Set route + DNS
+    # Set route + DNS hanya untuk host biasa (skip NAT)
     for host in net.hosts:
-        host.cmd('ip route add default via 10.0.0.254')
-        host.cmd("echo 'nameserver 8.8.8.8' > /etc/resolv.conf")
+        if host.name != 'nat0':
+            host.cmd('ip route replace default via 10.0.0.254')
+            # host.cmd("echo 'nameserver 8.8.8.8' > /etc/resolv.conf")
+
 
     print("--- Test koneksi internal ---")
     h1, h3 = net.get('h1', 'h3')
