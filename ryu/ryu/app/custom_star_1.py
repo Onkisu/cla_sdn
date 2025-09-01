@@ -37,46 +37,41 @@ class StarSwitchTopo(Topo):
             self.addLink(s, c1)
 
 def simpleTest():
-    """
-    This function sets up the Mininet network and connects it to a remote controller.
-    """
-    # Create the network using the custom topology and a remote controller.
+    # Buat topo dan tambahkan NAT sebelum start
+    topo = StarSwitchTopo()
     net = Mininet(
-        topo=StarSwitchTopo(),
+        topo=topo,
         controller=RemoteController,
         switch=OVSSwitch,
-        autoSetMacs=True # Automatically set MAC addresses
+        autoSetMacs=True
     )
 
-    # Start the network. This will launch all nodes.
-    # nat = net.addNAT(name='nat0', connect=False)
-
-    net.start()
-
-    nat = net.addNAT(name='nat0')
+    # Tambahkan NAT node & hubungkan ke central switch
+    nat = net.addNAT(name='nat0', ip='10.0.0.254/24')  # kasih IP NAT
     c1 = net.get('c1')
     net.addLink(nat, c1)
-    nat.configDefault()   # panggil configDefault setelah link dibuat
 
-    # Set default route + DNS
+    # Start network setelah semua node/link ditambahkan
+    net.start()
+    nat.configDefault()
+
+    # Set default route + DNS hanya di namespace host Mininet
     for host in net.hosts:
         host.cmd('ip route add default via 10.0.0.254')
-        host.cmd('echo "nameserver 8.8.8.8" > /etc/resolv.conf')
+        host.cmd("echo 'nameserver 8.8.8.8' > /etc/resolv.conf")
 
-
-    # Get references to the hosts and test connectivity.
-    print("--- Pinging hosts to test connectivity ---")
+    print("--- Test koneksi internal ---")
     h1 = net.get('h1')
     h3 = net.get('h3')
-    # Use h1 to ping h3 to test connectivity through the central switch
-    h1.cmd('ping -c 3 %s' % h3.IP())
+    print(h1.cmd('ping -c 3 %s' % h3.IP()))
 
-    # Start the Mininet CLI for interactive control.
+    print("--- Test koneksi internet dari h1 ---")
+    print(h1.cmd('ping -c 3 8.8.8.8'))
+
     print("--- Starting CLI ---")
     CLI(net)
-
-    # Clean up and stop the network when the CLI is exited.
     net.stop()
+
 
 if __name__ == '__main__':
     simpleTest()
