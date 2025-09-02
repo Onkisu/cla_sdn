@@ -39,12 +39,8 @@ class ComplexTopo(Topo):
         self.addLink(s2, s3)
 
 
-if __name__ == "__main__":
-    net = Mininet(
-        topo=ComplexTopo(),
-        controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
-        link=TCLink
-    )
+if __name__=="__main__":
+    net = Mininet(topo=StarTopo(), switch=OVSSwitch, controller=lambda name: RemoteController(name, ip="127.0.0.1"), link=TCLink)
     net.start()
     print("*** Running CLI")
     CLI(net)
