@@ -5,6 +5,8 @@ from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet, ethernet, arp, ipv4
 from ryu.lib.packet import ether_types
 from ryu.topology import event, api as topo_api
+from ryu.app.gui_topology import gui_topology
+
 
 from collections import defaultdict, deque
 import ipaddress
@@ -27,7 +29,7 @@ class FullRouter(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(FullRouter, self).__init__(*args, **kwargs)
         # host_db: ip -> {'mac':..., 'dpid':..., 'port':...}
-        self.name = "FullRouterApp"   # biar unik, ga bentrok
+        self.name = "FullRouterApp123x"   # biar unik, ga bentrok
         self.host_db = {}
         # adjacency: dpid -> {neighbor_dpid: (out_port, in_port)}
         self.adjacency = defaultdict(dict)
