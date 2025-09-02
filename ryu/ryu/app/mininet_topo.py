@@ -1,9 +1,9 @@
 #!/usr/bin/python3
-from mininet.topo import Topo
 from mininet.net import Mininet
-from mininet.node import RemoteController
-from mininet.cli import CLI
+from mininet.node import RemoteController, OVSSwitch
 from mininet.link import TCLink
+from mininet.topo import Topo
+from mininet.cli import CLI
 
 class ComplexTopo(Topo):
     def build(self):
@@ -39,9 +39,10 @@ class ComplexTopo(Topo):
         self.addLink(s2, s3)
 
 
+
+
 if __name__=="__main__":
     net = Mininet(topo=ComplexTopo(), switch=OVSSwitch, controller=lambda name: RemoteController(name, ip="127.0.0.1"), link=TCLink)
     net.start()
-    print("*** Running CLI")
     CLI(net)
     net.stop()
