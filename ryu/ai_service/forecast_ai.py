@@ -4,7 +4,7 @@ from tensorflow.keras.layers import LSTM, Dense
 
 DB_CONN = "dbname=yourdb user=youruser password=yourpass host=127.0.0.1"
 INTERVAL = 5  # seconds
-SEQ_LEN = 10
+SEQ_LEN = 10 # what 
 
 def get_data(host, app):
     conn = psycopg2.connect(DB_CONN)
