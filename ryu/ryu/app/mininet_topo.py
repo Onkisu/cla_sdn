@@ -40,7 +40,7 @@ class ComplexTopo(Topo):
 
 
 if __name__=="__main__":
-    net = Mininet(topo=StarTopo(), switch=OVSSwitch, controller=lambda name: RemoteController(name, ip="127.0.0.1"), link=TCLink)
+    net = Mininet(topo=ComplexTopo(), switch=OVSSwitch, controller=lambda name: RemoteController(name, ip="127.0.0.1"), link=TCLink)
     net.start()
     print("*** Running CLI")
     CLI(net)
