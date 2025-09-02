@@ -6,15 +6,18 @@ DPIDS = [1,2,3]  # s1,s2,s3
 
 def collect_flows():
     rows=[]
+    mapping={'10.0.0.1':'youtube','10.0.0.2':'netflix','10.0.0.3':'twitch'}
     for dpid in DPIDS:
         res = requests.get(f"{RYU_REST}/stats/flow/{dpid}", timeout=5).json()
         for flow in res.get(str(dpid), []):
             host = flow['match'].get('ipv4_dst','unknown')
+            app = mapping.get(host,'unknown')
             proto = {6:'tcp',17:'udp'}.get(flow['match'].get('ip_proto',0),'any')
             bytes_tx = flow.get('byte_count',0)
             pkts_tx = flow.get('packet_count',0)
-            rows.append((host,'unknown',proto,bytes_tx,bytes_tx,pkts_tx,pkts_tx))
+            rows.append((host,app,proto,bytes_tx,bytes_tx,pkts_tx,pkts_tx))
     return rows
+
 
 def insert_pg(rows):
     conn = psycopg2.connect(DB_CONN)
