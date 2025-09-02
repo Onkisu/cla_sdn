@@ -8,7 +8,7 @@ from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 
 # --- CONFIG ---
-DB_CONN = "dbname=yourdb user=youruser password=yourpass host=127.0.0.1"
+DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 AGG_INTERVAL_SEC = 300  # 5 menit
 SEQ_LEN = 10             # jumlah time steps untuk LSTM
 MODEL_DIR = "./models"   # folder save model/scaler

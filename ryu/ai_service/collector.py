@@ -1,4 +1,4 @@
-import requests, psycopg2, time
+import requests, h4 ping -c 20 h5 &, time
 
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 RYU_REST = "http://127.0.0.1:8080"
