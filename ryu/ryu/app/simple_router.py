@@ -108,6 +108,7 @@ class FullRouter(app_manager.RyuApp):
         return None
 
     # ---------- PacketIn ----------
+    
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in(self, ev):
         msg = ev.msg
@@ -137,10 +138,19 @@ class FullRouter(app_manager.RyuApp):
             # Learn source
             self.host_db[ip_pkt.src] = {'mac': eth.src, 'dpid': dp.id, 'port': in_port}
 
-            # Kalau tujuan belum dikenal, biar host tujuan kirim trafik dulu (atau ARP)
+            # Kalau tujuan belum dikenal → flood untuk memancing respons (ARP/ICMP) sehingga controller bisa learn dst
             if ip_pkt.dst not in self.host_db:
-                # Bisa juga kirim ICMP host unreachable, tapi kita tunggu sampai host dst aktif
+                # Flood the packet so destination host (or its gateway) can reply and controller learns its location
+                ofp = dp.ofproto
+                actions = [parser.OFPActionOutput(ofp.OFPP_FLOOD)]
+                out = parser.OFPPacketOut(datapath=dp,
+                                        buffer_id=msg.buffer_id,
+                                        in_port=in_port,
+                                        actions=actions,
+                                        data=msg.data if msg.buffer_id == dp.ofproto.OFP_NO_BUFFER else None)
+                dp.send_msg(out)
                 return
+
 
             dst_info = self.host_db[ip_pkt.dst]
             path = self.bfs_path(dp.id, dst_info['dpid'])
@@ -153,12 +163,16 @@ class FullRouter(app_manager.RyuApp):
 
             # Kirim packet sekarang (fast path) dari switch sekarang ke next hop
             out_port = self.next_hop_port(path, dp.id)
-            actions = [parser.OFPActionOutput(out_port)]
+            if out_port is None:
+                # same switch (direct host)
+                actions = [parser.OFPActionOutput(dst_info['port'])]
+            else:
+                actions = [parser.OFPActionOutput(out_port)]
             out = parser.OFPPacketOut(datapath=dp,
-                                      buffer_id=msg.buffer_id,
-                                      in_port=in_port,
-                                      actions=actions,
-                                      data=msg.data if msg.buffer_id == dp.ofproto.OFP_NO_BUFFER else None)
+                                    buffer_id=msg.buffer_id,
+                                    in_port=in_port,
+                                    actions=actions,
+                                    data=msg.data if msg.buffer_id == dp.ofproto.OFP_NO_BUFFER else None)
             dp.send_msg(out)
 
     # ---------- ARP ----------
