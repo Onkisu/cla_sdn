@@ -27,6 +27,7 @@ class FullRouter(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(FullRouter, self).__init__(*args, **kwargs)
         # host_db: ip -> {'mac':..., 'dpid':..., 'port':...}
+        self.name = "FullRouterApp"   # biar unik, ga bentrok
         self.host_db = {}
         # adjacency: dpid -> {neighbor_dpid: (out_port, in_port)}
         self.adjacency = defaultdict(dict)
