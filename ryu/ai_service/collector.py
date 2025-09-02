@@ -22,9 +22,12 @@ def collect_flows():
     mapping = {'10.0.0.1': 'youtube', '10.0.0.2': 'netflix', '10.0.0.3': 'twitch'}
 
     for dpid in DPIDS:
+        print(f"Mengumpulkan data dari dpid {dpid}...", file=sys.stderr)
         try:
             # Fetch flow stats from the Ryu controller
             res = requests.get(f"{RYU_REST}/stats/flow/{dpid}", timeout=5).json()
+            # DEBUG: Print the raw response from Ryu to see the flow data
+            print(f"Data mentah dari Ryu (dpid {dpid}):\n{res}", file=sys.stderr)
         except requests.exceptions.RequestException as e:
             # Print an error and continue to the next switch if the request fails
             print(f"Error fetching flow stats for dpid {dpid}: {e}", file=sys.stderr)
@@ -33,7 +36,6 @@ def collect_flows():
         # Iterate through the flows for the current switch
         for flow in res.get(str(dpid), []):
             # Try to get the source and destination IPs from the flow match
-            # This makes the script more resilient as flows can be bi-directional
             src_ip = flow['match'].get('ipv4_src')
             dst_ip = flow['match'].get('ipv4_dst')
 
@@ -49,6 +51,8 @@ def collect_flows():
                 app = mapping.get(dst_ip)
             else:
                 # If neither the source nor destination IP matches, we can't identify the app.
+                # DEBUG: Skip this flow if it doesn't match our criteria
+                # print(f"Melewati flow yang tidak cocok: {flow['match']}", file=sys.stderr)
                 continue
 
             # Map IP protocol numbers to names
@@ -61,7 +65,9 @@ def collect_flows():
 
             # Append the data to the rows list
             rows.append((host, app, proto, bytes_count, bytes_count, pkts_count, pkts_count))
-
+    
+    # DEBUG: Print the final list of rows to be inserted
+    print(f"Total baris yang dikumpulkan: {len(rows)}", file=sys.stderr)
     return rows
 
 
@@ -80,6 +86,7 @@ def insert_pg(rows):
         conn.commit()
         cur.close()
         conn.close()
+        print("Data berhasil dimasukkan ke database.", file=sys.stderr)
     except (Exception, psycopg2.DatabaseError) as error:
         print(f"Database error: {error}", file=sys.stderr)
 
@@ -89,4 +96,6 @@ if __name__ == "__main__":
         rows = collect_flows()
         if rows:
             insert_pg(rows)
+        else:
+            print("Tidak ada data yang dikumpulkan. Memeriksa kembali dalam 5 detik.", file=sys.stderr)
         time.sleep(5)  # Collect every 5 seconds
