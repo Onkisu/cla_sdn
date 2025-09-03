@@ -9,6 +9,8 @@ from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error
+from tensorflow.keras.losses import MeanSquaredError
+
 
 # --- CONFIG ---
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
@@ -63,19 +65,22 @@ def train_or_load_model(host, app, data):
     data_scaled = scaler.fit_transform(data.reshape(-1,1))
 
     if os.path.exists(model_file) and os.path.exists(scaler_file):
+        # load model + scaler
         model = load_model(model_file)
         scaler = joblib.load(scaler_file)
     else:
+        # build model baru
         model = Sequential()
         model.add(LSTM(32, input_shape=(SEQ_LEN,1)))
         model.add(Dense(1))
-        model.compile(optimizer='adam', loss='mse')
+        model.compile(optimizer="adam", loss=MeanSquaredError())
 
         X, Y = prepare_sequences(data, scaler)
         if len(X) > 0:
             model.fit(X, Y, epochs=5, batch_size=8, verbose=0)
             model.save(model_file)
             joblib.dump(scaler, scaler_file)
+
     return model, scaler
 
 # -----------------------------------
