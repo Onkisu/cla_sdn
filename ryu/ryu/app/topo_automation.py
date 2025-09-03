@@ -38,7 +38,7 @@ class ComplexTopo(Topo):
 
         # Link hosts ke switch
         self.addLink(h1, s1, bw=5); self.addLink(h2, s1, bw=5); self.addLink(h3, s1, bw=5)
-        self.addLink(h4, s2, bw=10, delay = '32ms' loss =2); self.addLink(h5, s2, bw=10, delay='47ms',loss =2); self.addLink(h6, s2, bw=10)
+        self.addLink(h4, s2, bw=10, delay = '32ms' ,loss =2); self.addLink(h5, s2, bw=10, delay='47ms',loss =2); self.addLink(h6, s2, bw=10)
         self.addLink(h7, s3, bw=2, delay='50ms', loss=2)
 
         # Link router ke masing-masing switch (gateway tiap subnet)
