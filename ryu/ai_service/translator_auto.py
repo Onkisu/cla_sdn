@@ -15,9 +15,9 @@ with open(APP_DB_FILE,"r") as f:
     APP_DB = yaml.safe_load(f)
 
 LOCAL_MAP = {
-    "youtube.com":"10.0.0.1",
-    "netflix.com":"10.0.0.2",
-    "twitch.tv":"10.0.0.3"
+    "youtube":"10.0.0.1",
+    "netflix":"10.0.0.2",
+    "twitch":"10.0.0.3"
 }
 
 INTENT_LABELS=["block","allow","prioritize","throttle"]
