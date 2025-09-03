@@ -7,13 +7,6 @@ DPIDS = [1,2,3]  # s1,s2,s3
 last_bytes = {}
 last_pkts = {}
 
-# Mapping IP → aplikasi
-APP_MAPPING = {
-    "10.0.0.1": "youtube",
-    "10.0.0.2": "netflix",
-    "10.0.0.3": "twitch"
-}
-
 def measure_latency(dst_ip):
     """Ping ke IP tujuan, return latency dalam ms"""
     try:
@@ -28,12 +21,6 @@ def measure_latency(dst_ip):
     except:
         return None
 
-def resolve_app(ip):
-    """Cocokkan IP ke host & app"""
-    if not ip:
-        return ("unknown", "unknown")
-    return (ip, APP_MAPPING.get(ip, "unknown"))
-
 def collect_flows():
     rows = []
     for dpid in DPIDS:
@@ -46,58 +33,43 @@ def collect_flows():
 
         for f in flows:
             match = f.get("match", {})
+            actions = f.get("actions", [])
             byte_count = f.get("byte_count", 0)
             pkt_count = f.get("packet_count", 0)
 
-            src_ip = match.get("ipv4_src")
-            dst_ip = match.get("ipv4_dst")
-            src_mac = match.get("eth_src")
-            dst_mac = match.get("eth_dst")
-            proto   = {6: "tcp", 17: "udp"}.get(match.get("ip_proto"), "any")
-
-            # Host & App (prioritaskan src_ip, kalau tidak ada pakai dst_ip)
-            if src_ip:
-                host, app = resolve_app(src_ip)
-            else:
-                host, app = resolve_app(dst_ip)
-
-            # Key unik per arah flow
-            key = (dpid, src_ip, dst_ip, proto)
+            key = (dpid, match.get("in_port"), match.get("ipv4_src"), match.get("ipv4_dst"))
 
             # Hitung delta
             delta_bytes = byte_count - last_bytes.get(key, 0)
-            delta_pkts  = pkt_count  - last_pkts.get(key, 0)
+            delta_pkts = pkt_count - last_pkts.get(key, 0)
 
-            # Reset kalau negatif (counter reset/overflow)
+            # Reset jika negatif (counter reset/overflow)
             if delta_bytes < 0:
                 delta_bytes = byte_count
             if delta_pkts < 0:
                 delta_pkts = pkt_count
 
             last_bytes[key] = byte_count
-            last_pkts[key]  = pkt_count
+            last_pkts[key] = pkt_count
 
-            if delta_bytes == 0 and delta_pkts == 0:
-                continue  # skip yang nggak berubah
-
-            # latency (optional)
+            # latency (optional, pakai dst_ip kalau ada)
             latency = None
-            if dst_ip:
-                latency = measure_latency(dst_ip)
-
-            # --- Split TX/RX ---
-            bytes_tx = delta_bytes if src_ip else 0
-            bytes_rx = delta_bytes if dst_ip else 0
-            pkts_tx  = delta_pkts  if src_ip else 0
-            pkts_rx  = delta_pkts  if dst_ip else 0
+            if match.get("ipv4_dst"):
+                latency = measure_latency(match.get("ipv4_dst"))
 
             rows.append((
                 dpid,
-                host, app, proto,
-                src_ip, dst_ip,
-                src_mac, dst_mac,
-                bytes_tx, bytes_rx,
-                pkts_tx, pkts_rx,
+                None,  # host mapping kalau ada
+                None,  # app mapping kalau ada
+                match.get("ip_proto"),
+                match.get("ipv4_src"),
+                match.get("ipv4_dst"),
+                match.get("eth_src"),
+                match.get("eth_dst"),
+                delta_bytes,
+                delta_bytes,  # sementara pakai sama (bisa split TX/RX kalau perlu)
+                delta_pkts,
+                delta_pkts,   # sementara pakai sama
                 latency
             ))
     return rows
@@ -122,5 +94,4 @@ if __name__ == "__main__":
     while True:
         rows = collect_flows()
         insert_rows(rows)
-        print(f"[INFO] Inserted {len(rows)} rows")
         time.sleep(5)  # interval 5 detik
