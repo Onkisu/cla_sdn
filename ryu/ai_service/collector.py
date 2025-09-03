@@ -1,97 +1,124 @@
-import requests, psycopg2, time, subprocess
+#!/usr/bin/python3
+import requests
+import psycopg2
+import time
+import sys
+from datetime import datetime
 
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 RYU_REST = "http://127.0.0.1:8080"
-DPIDS = [1,2,3]  # s1,s2,s3
+DPIDS = [1, 2, 3]
 
+# Cache counter terakhir → untuk delta
 last_bytes = {}
 last_pkts = {}
 
-def measure_latency(dst_ip):
-    """Ping ke IP tujuan, return latency dalam ms"""
-    try:
-        out = subprocess.check_output(
-            ["ping", "-c", "1", "-W", "1", dst_ip],
-            stderr=subprocess.STDOUT,
-            universal_newlines=True
-        )
-        for line in out.split("\n"):
-            if "time=" in line:
-                return float(line.split("time=")[1].split()[0])
-    except:
-        return None
+# Cache ip→mac
+ip_mac_map = {}
 
 def collect_flows():
     rows = []
+    mapping = {'10.0.0.1': 'youtube', '10.0.0.2': 'netflix', '10.0.0.3': 'twitch'}
+
+    ts = datetime.now()
+
     for dpid in DPIDS:
-        url = f"{RYU_REST}/stats/flow/{dpid}"
         try:
-            flows = requests.get(url).json().get(str(dpid), [])
+            t0 = time.time()
+            res = requests.get(f"{RYU_REST}/stats/flow/{dpid}", timeout=5).json()
+            latency_ms = round((time.time() - t0) * 1000, 2)
         except Exception as e:
-            print(f"[ERROR] Get flow dpid={dpid}: {e}")
+            print(f"Error fetch dpid {dpid}: {e}", file=sys.stderr)
             continue
 
-        for f in flows:
-            match = f.get("match", {})
-            actions = f.get("actions", [])
-            byte_count = f.get("byte_count", 0)
-            pkt_count = f.get("packet_count", 0)
+        if str(dpid) not in res:
+            continue
 
-            key = (dpid, match.get("in_port"), match.get("ipv4_src"), match.get("ipv4_dst"))
+        for flow in res.get(str(dpid), []):
+            match = flow.get("match", {})
 
-            # Hitung delta
-            delta_bytes = byte_count - last_bytes.get(key, 0)
-            delta_pkts = pkt_count - last_pkts.get(key, 0)
+            src_ip = match.get("ipv4_src") or match.get("nw_src")
+            dst_ip = match.get("ipv4_dst") or match.get("nw_dst")
+            src_mac = match.get("eth_src")
+            dst_mac = match.get("eth_dst")
 
-            # Reset jika negatif (counter reset/overflow)
-            if delta_bytes < 0:
-                delta_bytes = byte_count
-            if delta_pkts < 0:
-                delta_pkts = pkt_count
+            # update cache ip->mac kalau dapat baru
+            if src_ip and src_mac:
+                ip_mac_map[src_ip] = src_mac
+            if dst_ip and dst_mac:
+                ip_mac_map[dst_ip] = dst_mac
 
-            last_bytes[key] = byte_count
-            last_pkts[key] = pkt_count
+            # fallback kalau mac null
+            if not src_mac and src_ip in ip_mac_map:
+                src_mac = ip_mac_map[src_ip]
+            if not dst_mac and dst_ip in ip_mac_map:
+                dst_mac = ip_mac_map[dst_ip]
 
-            # latency (optional, pakai dst_ip kalau ada)
-            latency = None
-            if match.get("ipv4_dst"):
-                latency = measure_latency(match.get("ipv4_dst"))
+            if not src_ip and not dst_ip:
+                continue
 
-            rows.append((
-                dpid,
-                None,  # host mapping kalau ada
-                None,  # app mapping kalau ada
-                match.get("ip_proto"),
-                match.get("ipv4_src"),
-                match.get("ipv4_dst"),
-                match.get("eth_src"),
-                match.get("eth_dst"),
-                delta_bytes,
-                delta_bytes,  # sementara pakai sama (bisa split TX/RX kalau perlu)
-                delta_pkts,
-                delta_pkts,   # sementara pakai sama
-                latency
-            ))
+            # Identifikasi host & app
+            host, app = "unknown", "unknown"
+            if src_ip in mapping:
+                host, app = src_ip, mapping[src_ip]
+            elif dst_ip in mapping:
+                host, app = dst_ip, mapping[dst_ip]
+
+            # Protokol
+            ip_proto = match.get("ip_proto", 0)
+            proto = {6: "tcp", 17: "udp"}.get(ip_proto, "any")
+
+            # Counter kumulatif
+            bytes_count = flow.get("byte_count", 0)
+            pkts_count = flow.get("packet_count", 0)
+
+            # Key unik delta
+            key = (dpid, src_ip, dst_ip, proto)
+
+            delta_bytes = bytes_count - last_bytes.get(key, 0)
+            delta_pkts = pkts_count - last_pkts.get(key, 0)
+
+            # Update cache counter
+            last_bytes[key] = bytes_count
+            last_pkts[key] = pkts_count
+
+            if delta_bytes > 0 or delta_pkts > 0:
+                rows.append((
+                    ts, dpid, host, app, proto,
+                    src_ip, dst_ip, src_mac, dst_mac,
+                    delta_bytes, delta_bytes, delta_pkts, delta_pkts,
+                    latency_ms
+                ))
+
     return rows
 
-def insert_rows(rows):
-    if not rows:
-        return
-    conn = psycopg2.connect(DB_CONN)
-    cur = conn.cursor()
-    cur.executemany("""
-        INSERT INTO traffic.flow_stats (
-            dpid, host, app, proto, src_ip, dst_ip, src_mac, dst_mac,
-            bytes_tx, bytes_rx, pkts_tx, pkts_rx, latency_ms
-        )
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    """, rows)
-    conn.commit()
-    cur.close()
-    conn.close()
+
+def insert_pg(rows):
+    try:
+        conn = psycopg2.connect(DB_CONN)
+        cur = conn.cursor()
+        for r in rows:
+            cur.execute("""
+            INSERT INTO traffic.flow_stats(
+                timestamp, dpid, host, app, proto,
+                src_ip, dst_ip, src_mac, dst_mac,
+                bytes_tx, bytes_rx, pkts_tx, pkts_rx, latency_ms
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, r)
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"DB error: {e}", file=sys.stderr)
+
 
 if __name__ == "__main__":
     while True:
         rows = collect_flows()
-        insert_rows(rows)
-        time.sleep(5)  # interval 5 detik
+        if rows:
+            insert_pg(rows)
+            print(f"{len(rows)} baris dimasukkan.", file=sys.stderr)
+        else:
+            print("Tidak ada delta baru.", file=sys.stderr)
+        time.sleep(5)
