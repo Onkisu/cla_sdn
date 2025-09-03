@@ -1,20 +1,8 @@
-import requests, psycopg2, time, subprocess, logging
-from logging.handlers import RotatingFileHandler
-
-# --- Logging setup ---
-log_handler = RotatingFileHandler(
-    "collector.log", maxBytes=10*1024*1024, backupCount=5
-)
-log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[log_handler, logging.StreamHandler()]
-)
+import requests, psycopg2, time, subprocess
 
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 RYU_REST = "http://127.0.0.1:8080"
-DPIDS = [1, 2, 3]
+DPIDS = [1,2,3]  # s1,s2,s3
 
 last_bytes = {}
 last_pkts = {}
@@ -23,7 +11,7 @@ last_pkts = {}
 APP_MAPPING = {
     "10.0.0.1": "youtube",
     "10.0.0.2": "netflix",
-    "10.0.0.3": "twitch",
+    "10.0.0.3": "twitch"
 }
 
 def measure_latency(dst_ip):
@@ -37,11 +25,11 @@ def measure_latency(dst_ip):
         for line in out.split("\n"):
             if "time=" in line:
                 return float(line.split("time=")[1].split()[0])
-    except Exception as e:
-        logging.debug(f"Latency check gagal ke {dst_ip}: {e}")
-    return None
+    except:
+        return None
 
 def resolve_app(ip):
+    """Cocokkan IP ke host & app"""
     if not ip:
         return ("unknown", "unknown")
     return (ip, APP_MAPPING.get(ip, "unknown"))
@@ -51,54 +39,36 @@ def collect_flows():
     for dpid in DPIDS:
         url = f"{RYU_REST}/stats/flow/{dpid}"
         try:
-            res = requests.get(url, timeout=5).json()
-            flows = res.get(str(dpid), [])
+            flows = requests.get(url).json().get(str(dpid), [])
         except Exception as e:
-            logging.error(f"Get flow dpid={dpid} error: {e}")
+            print(f"[ERROR] Get flow dpid={dpid}: {e}")
             continue
-
-        skipped_no_addr = 0
-        skipped_zero_delta = 0
-        taken = 0
 
         for f in flows:
             match = f.get("match", {})
             byte_count = f.get("byte_count", 0)
-            pkt_count  = f.get("packet_count", 0)
+            pkt_count = f.get("packet_count", 0)
 
-            in_port = match.get("in_port")
-
-            # --- Ambil IP (fallback ke nama lama 'nw_*' bila ada) ---
-            src_ip  = match.get("ipv4_src") or match.get("nw_src")
-            dst_ip  = match.get("ipv4_dst") or match.get("nw_dst")
-
-            # MAC (kalau ada)
+            src_ip = match.get("ipv4_src")
+            dst_ip = match.get("ipv4_dst")
             src_mac = match.get("eth_src")
             dst_mac = match.get("eth_dst")
+            proto   = {6: "tcp", 17: "udp"}.get(match.get("ip_proto"), "any")
 
-            # Proto: tcp/udp/icmp/any
-            ip_proto_num = match.get("ip_proto")
-            proto_map = {6: "tcp", 17: "udp", 1: "icmp"}
-            proto = proto_map.get(ip_proto_num, "any")
-
-            # Host & App (pakai src_ip dulu, kalau None pakai dst_ip)
+            # Host & App (prioritaskan src_ip, kalau tidak ada pakai dst_ip)
             if src_ip:
                 host, app = resolve_app(src_ip)
             else:
                 host, app = resolve_app(dst_ip)
 
-            # --- Flow valid kalau ada salah satu identitas (IP atau MAC) ---
-            if not (src_ip or dst_ip or src_mac or dst_mac):
-                skipped_no_addr += 1
-                continue
+            # Key unik per arah flow
+            key = (dpid, src_ip, dst_ip, proto)
 
-            # --- Key unik per flow untuk delta ---
-            key = (dpid, in_port, src_ip, dst_ip, proto)
-
+            # Hitung delta
             delta_bytes = byte_count - last_bytes.get(key, 0)
             delta_pkts  = pkt_count  - last_pkts.get(key, 0)
 
-            # Reset jika counter turun (reset/overflow)
+            # Reset kalau negatif (counter reset/overflow)
             if delta_bytes < 0:
                 delta_bytes = byte_count
             if delta_pkts < 0:
@@ -107,19 +77,19 @@ def collect_flows():
             last_bytes[key] = byte_count
             last_pkts[key]  = pkt_count
 
-            # Jika tidak ada perubahan, skip
             if delta_bytes == 0 and delta_pkts == 0:
-                skipped_zero_delta += 1
-                continue
+                continue  # skip yang nggak berubah
 
-            # --- Latency (optional; tetap aktif karena sebelumnya “aman”) ---
-            latency = measure_latency(dst_ip) if dst_ip else None
+            # latency (optional)
+            latency = None
+            if dst_ip:
+                latency = measure_latency(dst_ip)
 
-            # --- Split TX/RX (satu baris = arah src → dst) ---
-            bytes_tx = delta_bytes
-            pkts_tx  = delta_pkts
-            bytes_rx = 0
-            pkts_rx  = 0
+            # --- Split TX/RX ---
+            bytes_tx = delta_bytes if src_ip else 0
+            bytes_rx = delta_bytes if dst_ip else 0
+            pkts_tx  = delta_pkts  if src_ip else 0
+            pkts_rx  = delta_pkts  if dst_ip else 0
 
             rows.append((
                 dpid,
@@ -130,38 +100,27 @@ def collect_flows():
                 pkts_tx, pkts_rx,
                 latency
             ))
-            taken += 1
-
-        logging.info(
-            f"DPID {dpid}: total_flows={len(flows)}, kept={taken}, "
-            f"skip_no_addr={skipped_no_addr}, skip_zero_delta={skipped_zero_delta}"
-        )
-
     return rows
 
 def insert_rows(rows):
     if not rows:
-        logging.info("No rows to insert (kept=0)")
         return
-    try:
-        conn = psycopg2.connect(DB_CONN)
-        cur = conn.cursor()
-        cur.executemany("""
-            INSERT INTO traffic.flow_stats (
-                dpid, host, app, proto, src_ip, dst_ip, src_mac, dst_mac,
-                bytes_tx, bytes_rx, pkts_tx, pkts_rx, latency_ms
-            )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """, rows)
-        conn.commit()
-        cur.close()
-        conn.close()
-        logging.info(f"Inserted {len(rows)} rows into flow_stats")
-    except Exception as e:
-        logging.error(f"DB insert error: {e}")
+    conn = psycopg2.connect(DB_CONN)
+    cur = conn.cursor()
+    cur.executemany("""
+        INSERT INTO traffic.flow_stats (
+            dpid, host, app, proto, src_ip, dst_ip, src_mac, dst_mac,
+            bytes_tx, bytes_rx, pkts_tx, pkts_rx, latency_ms
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, rows)
+    conn.commit()
+    cur.close()
+    conn.close()
 
 if __name__ == "__main__":
     while True:
         rows = collect_flows()
         insert_rows(rows)
-        time.sleep(5)
+        print(f"[INFO] Inserted {len(rows)} rows")
+        time.sleep(5)  # interval 5 detik
