@@ -91,7 +91,9 @@ def collect_flows():
             last_bytes[key] = byte_count
             last_pkts[key]  = pkt_count
 
-            # Skip kalau tidak ada perubahan
+            # --- FILTER: skip kalau flow kosong/tidak ada traffic ---
+            if (not src_ip and not dst_ip):
+                continue
             if delta_bytes == 0 and delta_pkts == 0:
                 continue
 
@@ -101,7 +103,6 @@ def collect_flows():
                 latency = measure_latency(dst_ip)
 
             # --- Split TX/RX ---
-            # Anggap TX = traffic keluar dari src_ip, RX = traffic masuk ke dst_ip
             bytes_tx = delta_bytes if src_ip else 0
             pkts_tx  = delta_pkts  if src_ip else 0
             bytes_rx = delta_bytes if dst_ip else 0
