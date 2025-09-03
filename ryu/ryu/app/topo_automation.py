@@ -59,8 +59,8 @@ def start_traffic(net):
 
     info("*** Starting iperf clients\n")
         # TCP loop untuk h1 (YouTube) dan h2 (Netflix)
-    h1.cmd("bash -c 'while true; do iperf -c 10.0.1.1 -p 5001 -t 2 -i 1; sleep 0.5; done &'")
-    h2.cmd("bash -c 'while true; do iperf -c 10.0.1.2 -p 5002 -t 2 -i 1; sleep 0.5; done &'")
+    h1.cmd("bash -c 'while true; do iperf -c 10.0.1.1 -p 5001 -t 2 -i 1; sleep 1; done &'")
+    h2.cmd("bash -c 'while true; do iperf -c 10.0.1.2 -p 5002 -t 2 -i 1; sleep 1; done &'")
     h3.cmd("bash -c 'while true; do iperf -u -c 10.0.2.1 -p 5003 -b 1M -t 10 -i 5; sleep 1; done &'")
 
     # h1.cmd("iperf -c 10.0.1.1 -p 5001 -t 60 -i 5 > /tmp/h1_to_h4.log &")

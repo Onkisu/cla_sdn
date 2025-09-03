@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 import psycopg2
 import pandas as pd
 import numpy as np
@@ -8,15 +9,13 @@ from datetime import datetime
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error
-from tensorflow.keras.losses import MeanSquaredError
-
+from sklearn.metrics import r2_score
 
 # --- CONFIG ---
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 AGG_INTERVAL_SEC = 60  # 1 menit
-SEQ_LEN = 10
-MODEL_DIR = "./models"
+SEQ_LEN = 20           # sequence length lebih panjang untuk stabilitas
+MODEL_DIR = "./models_delta"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 host_app_list = [
@@ -25,7 +24,6 @@ host_app_list = [
     ('10.0.0.3','twitch')
 ]
 
-# mapping policy limit (bisa disesuaikan)
 policy_limits = {
     "youtube": "3Mbps",
     "netflix": "5Mbps",
@@ -33,7 +31,8 @@ policy_limits = {
 }
 
 # -----------------------------------
-def get_aggregated_data(host, app):
+def get_delta_data(host, app):
+    """Ambil delta bytes dari flow_stats per menit"""
     conn = psycopg2.connect(DB_CONN)
     query = f"""
         SELECT date_trunc('minute', timestamp) AS bucket,
@@ -45,7 +44,12 @@ def get_aggregated_data(host, app):
     """
     df = pd.read_sql(query, conn)
     conn.close()
-    return df['total_tx'].values
+
+    # Hitung delta
+    df['delta'] = df['total_tx'].diff().fillna(0)
+    # Smooth dengan rolling 3
+    df['delta_smooth'] = df['delta'].rolling(3).mean().fillna(method='bfill')
+    return df['delta_smooth'].values
 
 # -----------------------------------
 def prepare_sequences(data, scaler):
@@ -65,15 +69,16 @@ def train_or_load_model(host, app, data):
     data_scaled = scaler.fit_transform(data.reshape(-1,1))
 
     if os.path.exists(model_file) and os.path.exists(scaler_file):
-        # load model + scaler
         model = load_model(model_file)
         scaler = joblib.load(scaler_file)
     else:
-        # build model baru
+        if len(data_scaled) <= SEQ_LEN:
+            return None, None
+
         model = Sequential()
         model.add(LSTM(32, input_shape=(SEQ_LEN,1)))
         model.add(Dense(1))
-        model.compile(optimizer="adam", loss=MeanSquaredError())
+        model.compile(optimizer="adam", loss='mse')
 
         X, Y = prepare_sequences(data, scaler)
         if len(X) > 0:
@@ -91,7 +96,7 @@ def predict_next(model, scaler, data):
     last_seq = data_scaled[-SEQ_LEN:].reshape(1, SEQ_LEN, 1)
     pred_scaled = model.predict(last_seq, verbose=0)
     pred = scaler.inverse_transform(pred_scaled)[0][0]
-    return pred
+    return max(0, pred)  # jangan negatif
 
 # -----------------------------------
 def get_trend(data):
@@ -108,7 +113,6 @@ def get_trend(data):
 
 # -----------------------------------
 def insert_forecast(rows):
-    """Insert multiple rows ke traffic.summary_forecast_train"""
     try:
         conn = psycopg2.connect(DB_CONN)
         cur = conn.cursor()
@@ -127,52 +131,53 @@ def insert_forecast(rows):
 if __name__=="__main__":
     models = {}
     scalers = {}
+
+    # Inisialisasi model tiap host/app jika data cukup
     for host, app in host_app_list:
-        data = get_aggregated_data(host, app)
-        if len(data) < 2:
-            print(f"{host}/{app}: data tidak cukup untuk inisialisasi model.")
+        data = get_delta_data(host, app)
+        if len(data) <= SEQ_LEN:
+            print(f"{host}/{app}: data tidak cukup, skip forecast.")
             continue
         model, scaler = train_or_load_model(host, app, data)
-        models[(host, app)] = model
-        scalers[(host, app)] = scaler
+        if model and scaler:
+            models[(host, app)] = model
+            scalers[(host, app)] = scaler
+        else:
+            print(f"{host}/{app}: model tidak dibuat karena data kurang.")
 
     while True:
         rows_to_insert = []
         for host, app in host_app_list:
-            data = get_aggregated_data(host, app)
+            if (host, app) not in models:
+                continue
+
+            data = get_delta_data(host, app)
             if len(data) <= SEQ_LEN:
+                print(f"{host}/{app}: data kurang, skip forecast")
                 continue
 
-            model = models.get((host, app))
-            scaler = scalers.get((host, app))
-            if model is None or scaler is None:
-                continue
+            model = models[(host, app)]
+            scaler = scalers[(host, app)]
 
-            # --- actual last value (ground truth) ---
+            # actual last value
             actual_bytes = data[-1]
             actual_bps = int(actual_bytes * 8 / AGG_INTERVAL_SEC)
 
-            # --- forecast ---
+            # prediksi
             pred_bytes = predict_next(model, scaler, data)
             if pred_bytes is None:
                 continue
             pred_bps = int(pred_bytes * 8 / AGG_INTERVAL_SEC)
 
-            # --- confidence score ---
+            # confidence R²
             X, Y = prepare_sequences(data, scaler)
-            conf = None
-            if len(X) > 0:
-                yhat = model.predict(X, verbose=0)
-                rmse = np.sqrt(mean_squared_error(Y, yhat))
-                conf = float(max(0, 1 - rmse))
+            conf = float(max(0, r2_score(Y, model.predict(X, verbose=0))))
 
-            # --- trend ---
+            # trend
             trend = get_trend(data)
 
-            # --- policy ---
+            # policy & QoE
             policy_limit = policy_limits.get(app, "N/A")
-
-            # --- QoE risk ---
             if app == "youtube" and pred_bps < 3_000_000:
                 qoe_risk = "high"
             elif app == "twitch" and pred_bps < 2_000_000:
@@ -180,15 +185,14 @@ if __name__=="__main__":
             else:
                 qoe_risk = "low"
 
-            # --- append row ke buffer ---
             rows_to_insert.append((
                 datetime.now(), host, app,
                 actual_bps, pred_bps, conf, trend, policy_limit, qoe_risk
             ))
 
-            # --- throttle command ---
-            os.system(f"python3 translator_auto.py \"batasi {app} {pred_bps}bps\"")
-            print(f"{host}/{app} → actual={actual_bps}bps, pred={pred_bps}bps, conf={conf}, trend={trend}, qoe={qoe_risk}")
+            # throttle command
+            # os.system(f"python3 translator_auto.py \"batasi {app} {pred_bps}bps\"")
+            print(f"{host}/{app} → actual={actual_bps}bps, pred={pred_bps}bps, conf={conf:.2f}, trend={trend}, qoe={qoe_risk}")
 
         if rows_to_insert:
             insert_forecast(rows_to_insert)
