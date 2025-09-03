@@ -108,12 +108,12 @@ def get_trend(data):
 
 # -----------------------------------
 def insert_forecast(rows):
-    """Insert multiple rows ke traffic.forecast"""
+    """Insert multiple rows ke traffic.summary_forecast_train"""
     try:
         conn = psycopg2.connect(DB_CONN)
         cur = conn.cursor()
         cur.executemany("""
-            INSERT INTO traffic.forecast
+            INSERT INTO traffic.summary_forecast_train
             (ts, host, app, actual_bps, pred_bps, confidence, trend, policy_limit, qoe_risk)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, rows)
