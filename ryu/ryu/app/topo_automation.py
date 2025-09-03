@@ -38,7 +38,7 @@ class ComplexTopo(Topo):
 
         # Link hosts ke switch
         self.addLink(h1, s1, bw=5); self.addLink(h2, s1, bw=5); self.addLink(h3, s1, bw=5)
-        self.addLink(h4, s2, bw=10); self.addLink(h5, s2, bw=10); self.addLink(h6, s2, bw=10)
+        self.addLink(h4, s2, bw=10, delay = '32ms' loss =2); self.addLink(h5, s2, bw=10, delay='47ms',loss =2); self.addLink(h6, s2, bw=10)
         self.addLink(h7, s3, bw=2, delay='50ms', loss=2)
 
         # Link router ke masing-masing switch (gateway tiap subnet)
@@ -53,9 +53,9 @@ def start_traffic(net):
     h7 = net.get('h7')
 
     info("*** Starting iperf servers\n")
-    h4.cmd("iperf -s -u -p 5001 > /tmp/h4_iperf.log &")
-    h5.cmd("iperf -s -u -p 5002 > /tmp/h5_iperf.log &")
-    h7.cmd("iperf -u -s -p 5003 > /tmp/h7_udp.log &")
+    h4.cmd("iperf -s -u -p 5001 &")
+    h5.cmd("iperf -s -u -p 5002 &")
+    h7.cmd("iperf -u -s -p 5003 &")
 
     info("*** Starting iperf clients\n")
         # TCP loop untuk h1 (YouTube) dan h2 (Netflix)
