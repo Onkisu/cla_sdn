@@ -29,7 +29,7 @@ def traffic_trend(series):
     return round(slope, 4)
 
 def save_forecast(start, end, burst, anom, trend, seasonality):
-    conn = psycopg2.connect("dbname=traffic user=dev password=dev123 host=127.0.0.1")
+    conn = psycopg2.connect("dbname=development user=dev_one password=hijack332. host=127.0.0.1")
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO traffic.summary_forecast_v2 (window_start, window_end, burstiness_index, anomaly_score, traffic_trend, seasonality_pattern)
