@@ -44,6 +44,7 @@ if len(df) < 5:
     print("❌ Data tidak cukup untuk 15-min forecast")
 else:
     df = df.rename(columns={"ts_min":"ds","total_bytes":"y"})
+    df["ds"] = pd.to_datetime(df["ds"]).dt.tz_localize(None)
 
     # Prophet model for seasonality
     m = Prophet()
