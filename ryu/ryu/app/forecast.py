@@ -27,6 +27,11 @@ def traffic_trend(series):
     slope = np.polyfit(range(len(series)), series, 1)[0]
     return round(slope, 4)
 
+def slope_to_mbps(slope_bytes_per_min):
+    """Konversi slope (bytes/min) → Mbps/min"""
+    # 1 byte = 8 bit, 1e6 bit = 1 Megabit
+    return (slope_bytes_per_min * 8) / 1e6
+
 def save_forecast(start, end, burst, anom, trend, seasonality):
     conn = psycopg2.connect("dbname=development user=dev_one password=hijack332. host=127.0.0.1")
     cur = conn.cursor()
@@ -65,7 +70,7 @@ else:
     burst = burstiness_index(df["y"])
     anom = anomaly_score(df["y"])
     trend = traffic_trend(df["y"])
-
+    trend_mbps = slope_to_mbps(trend)
     # Ambil kolom seasonal kalau ada
     seasonality_cols = [c for c in forecast.columns if "seasonal" in c]
     if seasonality_cols:
@@ -77,6 +82,6 @@ else:
     window_end = df["ds"].max()
 
     print(f"✅ 15-min Forecast Window {window_start} → {window_end}")
-    print(f"   Burstiness: {burst}, Anomaly: {anom}, Trend: {trend}")
+    print(f"   Burstiness: {burst}, Anomaly: {anom}, Trend: {trend_mbps}")
     print(f"   Seasonality cols: {seasonality_cols}")
-    save_forecast(window_start, window_end, burst, anom, trend, seasonality_data)
+    save_forecast(window_start, window_end, burst, anom, trend_mbps, seasonality_data)
