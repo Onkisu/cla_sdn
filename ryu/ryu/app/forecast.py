@@ -55,7 +55,9 @@ else:
     burst = burstiness_index(df["y"])
     anom = anomaly_score(df["y"])
     trend = traffic_trend(df["y"])
-    seasonality_data = forecast[["ds","seasonal"]].tail(10).to_dict(orient="records")
+    components = m.predict_components(forecast)
+    seasonality_data = components[["ds", "seasonal"]].tail(10).to_dict(orient="records")
+
 
     window_start = df["ds"].min()
     window_end = df["ds"].max()
