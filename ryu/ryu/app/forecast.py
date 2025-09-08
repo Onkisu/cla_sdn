@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 
 def load_agg_data():
     conn = psycopg2.connect("dbname=development user=dev_one password=hijack332. host=127.0.0.1")
-    # Ambil data 15 menit terakhir
     query = """
         SELECT date_trunc('minute', timestamp) AS ts_min, SUM(bytes_tx) AS total_bytes
         FROM traffic.flow_stats
@@ -46,8 +45,8 @@ else:
     df = df.rename(columns={"ts_min":"ds","total_bytes":"y"})
     df["ds"] = pd.to_datetime(df["ds"]).dt.tz_localize(None)
 
-    # Prophet model for seasonality
-    m = Prophet()
+    # Prophet model
+    m = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False)
     m.fit(df)
     future = m.make_future_dataframe(periods=15, freq="min")
     forecast = m.predict(future)
@@ -55,9 +54,12 @@ else:
     burst = burstiness_index(df["y"])
     anom = anomaly_score(df["y"])
     trend = traffic_trend(df["y"])
-    components = m.predict_components(forecast)
-    seasonality_data = components[["ds", "seasonal"]].tail(10).to_dict(orient="records")
 
+    # Ambil kolom seasonal kalau ada
+    if "seasonal" in forecast.columns:
+        seasonality_data = forecast[["ds", "seasonal"]].tail(10).to_dict(orient="records")
+    else:
+        seasonality_data = []  # fallback aman
 
     window_start = df["ds"].min()
     window_end = df["ds"].max()
