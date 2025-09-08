@@ -5,6 +5,8 @@ from mininet.link import TCLink
 from mininet.topo import Topo
 from mininet.cli import CLI
 from mininet.log import setLogLevel, info
+import time
+import subprocess
 
 class LinuxRouter(Node):
     def config(self, **params):
@@ -53,25 +55,21 @@ def start_traffic(net):
     h7 = net.get('h7')
 
     info("*** Starting iperf servers\n")
-    h4.cmd("iperf -s -u -p 5001 &")
-    h5.cmd("iperf -s -u -p 5002 &")
-    h7.cmd("iperf -u -s -p 5003 &")
+    h4.cmd("iperf -s -u -p 5001 &") 
+    h5.cmd("iperf -s -u -p 5002 &") 
+    h7.cmd("iperf -u -s -p 5003 &") 
 
     info("*** Starting iperf clients\n")
-        # TCP loop untuk h1 (YouTube) dan h2 (Netflix)
     h1.cmd("bash -c 'while true; do iperf -u -c 10.0.1.1 -p 5001 -b 4M -t 10 -i 5; sleep 1; done &'")
     h2.cmd("bash -c 'while true; do iperf -u -c 10.0.1.2 -p 5002 -b 2M -t 10 -i 5; sleep 1; done &'")
     h3.cmd("bash -c 'while true; do iperf -u -c 10.0.2.1 -p 5003 -b 1M -t 10 -i 5; sleep 1; done &'")
 
-    # h1.cmd("iperf -c 10.0.1.1 -p 5001 -t 60 -i 5 > /tmp/h1_to_h4.log &")
-    # h2.cmd("iperf -c 10.0.1.2 -p 5002 -t 60 -i 5 > /tmp/h2_to_h5.log &")
-    # h3.cmd("iperf -u -c 10.0.2.1 -p 5003 -b 1M -t 60 -i 5 > /tmp/h3_to_h7_udp.log &")
-
-    # info("*** Starting ping background\n")
-    # h1.cmd("ping 10.0.2.1 -i 0.2 -c 100 > /tmp/ping_h1_h7.log &")
-
-   
-
+def run_forecast_loop():
+    """Loop tiap 15 menit panggil forecast.py"""
+    while True:
+        info("\n*** Running AI Forecast...\n")
+        subprocess.call(["sudo","python3", "forecast.py"])
+        time.sleep(900)  # 15 menit
 
 if __name__=="__main__":
     setLogLevel("info")
@@ -83,6 +81,11 @@ if __name__=="__main__":
 
     # mulai generate traffic
     start_traffic(net)
+
+    # jalanin forecast loop di background
+    import threading
+    t = threading.Thread(target=run_forecast_loop, daemon=True)
+    t.start()
 
     CLI(net)  # biar bisa cek manual juga
     net.stop()
