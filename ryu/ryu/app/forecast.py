@@ -31,7 +31,8 @@ def save_forecast(start, end, burst, anom, trend, seasonality):
     conn = psycopg2.connect("dbname=development user=dev_one password=hijack332. host=127.0.0.1")
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO traffic.summary_forecast_v2 (window_start, window_end, burstiness_index, anomaly_score, traffic_trend, seasonality_pattern)
+        INSERT INTO traffic.summary_forecast_v2
+        (window_start, window_end, burstiness_index, anomaly_score, traffic_trend, seasonality_pattern)
         VALUES (%s, %s, %s, %s, %s, %s)
     """, (start, end, burst, anom, trend, json.dumps(seasonality)))
     conn.commit()
@@ -45,8 +46,18 @@ else:
     df = df.rename(columns={"ts_min":"ds","total_bytes":"y"})
     df["ds"] = pd.to_datetime(df["ds"]).dt.tz_localize(None)
 
-    # Prophet model
-    m = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False)
+    # Prophet model (paksa aktifkan seasonality)
+    m = Prophet(
+        daily_seasonality=True,
+        weekly_seasonality=True,
+        yearly_seasonality=True,
+        seasonality_mode="additive"
+    )
+
+    # Tambahkan seasonality custom biar Prophet selalu bikin kolom seasonal
+    m.add_seasonality(name="minute_cycle", period=60, fourier_order=3)  # siklus tiap 1 jam
+    m.add_seasonality(name="quarter_cycle", period=15, fourier_order=2) # siklus 15 menit
+
     m.fit(df)
     future = m.make_future_dataframe(periods=15, freq="min")
     forecast = m.predict(future)
@@ -56,14 +67,16 @@ else:
     trend = traffic_trend(df["y"])
 
     # Ambil kolom seasonal kalau ada
-    if "seasonal" in forecast.columns:
-        seasonality_data = forecast[["ds", "seasonal"]].tail(10).to_dict(orient="records")
+    seasonality_cols = [c for c in forecast.columns if "seasonal" in c]
+    if seasonality_cols:
+        seasonality_data = forecast[["ds"] + seasonality_cols].tail(10).to_dict(orient="records")
     else:
-        seasonality_data = []  # fallback aman
+        seasonality_data = []
 
     window_start = df["ds"].min()
     window_end = df["ds"].max()
 
     print(f"✅ 15-min Forecast Window {window_start} → {window_end}")
     print(f"   Burstiness: {burst}, Anomaly: {anom}, Trend: {trend}")
+    print(f"   Seasonality cols: {seasonality_cols}")
     save_forecast(window_start, window_end, burst, anom, trend, seasonality_data)
