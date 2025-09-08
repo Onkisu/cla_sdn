@@ -3,7 +3,7 @@ from prophet import Prophet
 from datetime import datetime, timedelta
 
 def load_agg_data():
-    conn = psycopg2.connect("dbname=development user=dev password=dev123 host=127.0.0.1")
+    conn = psycopg2.connect("dbname=development user=dev_one password=hijack332. host=127.0.0.1")
     # Ambil data 15 menit terakhir
     query = """
         SELECT date_trunc('minute', timestamp) AS ts_min, SUM(bytes_tx) AS total_bytes
