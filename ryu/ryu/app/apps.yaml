@@ -1,0 +1,29 @@
+# apps:
+#   youtube:
+#     cidrs:
+#       - "142.250.0.0/15"
+#       - "172.217.0.0/16"
+#   facebook:
+#     cidrs:
+#       - "31.13.24.0/21"
+#       - "31.13.64.0/18"
+#   netflix:
+#     cidrs:
+#       - "45.57.0.0/16"
+#   general:
+#     cidrs:
+#       - "0.0.0.0/0"
+apps:
+  youtube:
+    cidrs: ["youtube.com"]
+    ports: []
+  netflix:
+    cidrs: ["netflix.com"]
+    ports: []
+  twitch:
+    cidrs: ["twitch.tv"]
+    ports: []
+  game:
+    cidrs: []
+    ports: [27015,27016,27017,27036]
+
