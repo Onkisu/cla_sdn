@@ -2,6 +2,8 @@
 import pandas as pd, psycopg2, numpy as np, json
 from prophet import Prophet
 from datetime import datetime, timedelta
+from translator_auto import translate_and_apply
+
 
 DB_DSN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 
@@ -109,3 +111,59 @@ if __name__ == '__main__':
     print(f"   Seasonality cols: {seasonality_cols}")
 
     save_forecast(window_start, window_end, burst, anom, trend_mbps, seasonality_data)
+
+def insert_alert(level, msg, anomaly_score=None, dpid=None, src_ip=None, dst_ip=None, flow_id=None):
+    conn = psycopg2.connect(DB_DSN)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO traffic.alerts(level,msg,anomaly_score,dpid,src_ip,dst_ip,flow_id)
+        VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id
+    """,(level,msg,anomaly_score,dpid,src_ip,dst_ip,flow_id))
+    alert_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return alert_id
+
+def insert_action(action, params, outcome, ref_alert_id):
+    conn = psycopg2.connect(DB_DSN)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO traffic.actions(action,params_json,outcome,reference_alert_id)
+        VALUES (%s,%s,%s,%s)
+    """,(action,json.dumps(params),outcome,ref_alert_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+# === Decision logic based on forecast ===
+def process_forecast(burst, anomaly, trend_mbps):
+    if anomaly > 5:
+        msg = f"⚠️ High anomaly detected (score={anomaly})"
+        alert_id = insert_alert("critical", msg, anomaly_score=anomaly, dpid=1)
+        # Example: throttle YouTube
+        prompt = "throttle youtube 2mbps"
+        out = translate_and_apply(prompt)
+        insert_action("throttle", out, "ok", alert_id)
+        return msg
+
+    elif burst > 3:
+        msg = f"⚠️ Burstiness detected (index={burst})"
+        alert_id = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1)
+        prompt = "prioritize netflix"
+        out = translate_and_apply(prompt)
+        insert_action("prioritize", out, "ok", alert_id)
+        return msg
+
+    elif trend_mbps > 50:  # >50 Mbps/minute naik
+        msg = f"📈 Rapid traffic growth (trend={trend_mbps:.2f} Mbps/min)"
+        alert_id = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1)
+        prompt = "block twitch"
+        out = translate_and_apply(prompt)
+        insert_action("block", out, "ok", alert_id)
+        return msg
+
+    else:
+        msg = "ℹ️ Traffic normal"
+        insert_alert("info", msg, anomaly_score=anomaly, dpid=1)
+        return msg
