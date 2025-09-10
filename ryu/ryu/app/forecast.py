@@ -219,16 +219,37 @@ def sla_violation_prob_from_forecast(forecast, threshold, kpi_col='yhat', direct
 def save_summary(window_start, window_end, burst, anomaly, trend_mbps,
                  seasonality, latency_prob, jitter_prob, loss_prob, app_probs):
     ensure_summary_columns()
+
+    # --- FIX: convert Timestamps to str for JSON ---
+    seasonality_safe = None
+    if seasonality:
+        seasonality_safe = []
+        for row in seasonality:
+            safe_row = {}
+            for k, v in row.items():
+                if isinstance(v, pd.Timestamp):
+                    safe_row[k] = v.isoformat()
+                else:
+                    safe_row[k] = v
+            seasonality_safe.append(safe_row)
+    else:
+        seasonality_safe = []
+
     conn = psycopg2.connect(DB_DSN)
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO traffic.summary_forecast_v2
         (window_start, window_end, burstiness_index, anomaly_score, traffic_trend, seasonality_pattern, latency_sla_prob, jitter_sla_prob, loss_sla_prob, app_sla_prob)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    """, (window_start, window_end, burst, anomaly, trend_mbps, json.dumps(seasonality), latency_prob, jitter_prob, loss_prob, json.dumps(app_probs)))
+    """, (
+        window_start, window_end, burst, anomaly, trend_mbps,
+        json.dumps(seasonality_safe),  # <- pakai safe
+        latency_prob, jitter_prob, loss_prob, json.dumps(app_probs)
+    ))
     conn.commit()
     cur.close()
     conn.close()
+
 
 def insert_alert(level, msg, anomaly_score=None, dpid=None, src_ip=None, dst_ip=None, flow_id=None):
     conn = psycopg2.connect(DB_DSN)
