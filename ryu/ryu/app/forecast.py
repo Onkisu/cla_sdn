@@ -307,7 +307,7 @@ if __name__ == "__main__":
     trend_mbps = slope_to_mbps(slope)
 
     # seasonality sample from total_forecast
-    seasonality_cols = [c for c in total_forecast.columns if c.startswith('seasonal')] if total_forecast is not None else []
+    seasonality_cols = [c for c in total_forecast.columns if "season" in c or "cycle" in c]
     seasonality_data = total_forecast[['ds'] + seasonality_cols].tail(10).to_dict(orient='records') if seasonality_cols else []
 
     # 3) latency/jitter/loss forecasts (7 days window)
