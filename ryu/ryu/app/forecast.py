@@ -32,7 +32,8 @@ SLA_LOSS_PCT = 1.0          # max packet loss percent (violation if predicted > 
 
 # Decision thresholds for actions
 SLA_VIOLATION_PROB_TH = 0.30  # if prob > 30% -> trigger action
-ANOMALY_ACTION_TH = 5.0       # anomaly score threshold (MAD)
+ANOMALY_ACTION_TH = 3.0       # anomaly score threshold (MAD)
+ANOMALY_ACTION_TH_CR = 5.0 
 
 # apps to check per-app throughput (must match your apps.yaml)
 MONITORED_APPS = ["youtube", "netflix", "twitch"]
@@ -276,20 +277,167 @@ def insert_action(action, params, outcome, ref_alert_id):
     conn.close()
 
 # ---------- decision logic ----------
-def decide_and_act(latency_prob, jitter_prob, loss_prob, app_probs, burst, anomaly):
+# -----------------------
+# Helper for RYU REST actions
+# -----------------------
+RYU_REST = os.environ.get("RYU_REST", "http://127.0.0.1:8080")
+RYU_FLOW_ADD = f"{RYU_REST}/stats/flowentry/add"
+
+# mapping app -> typical port/proto (best-effort)
+APP_PORT_MAP = {
+    "youtube": {"proto": "udp", "port": 443},   # many youtube uses QUIC/UDP 443
+    "netflix": {"proto": "tcp", "port": 443},
+    "twitch": {"proto": "tcp", "port": 1935},
+    # fallback: no specific port
+}
+
+def _post_to_ryu(payload):
+    try:
+        import requests
+        r = requests.post(RYU_FLOW_ADD, json=payload, timeout=5)
+        return r.status_code, r.text
+    except Exception as e:
+        return None, str(e)
+
+def block_flow(dpid:int, src_ip:str=None, app:str=None, dst_ip:str=None):
+    """
+    Add a DROP flow via Ryu REST for specific src_ip/app.
+    If app present and APP_PORT_MAP has mapping, match on that port.
+    """
+    match = {"eth_type": 2048}  # IP
+    if src_ip:
+        match["ipv4_src"] = src_ip
+    if dst_ip:
+        match["ipv4_dst"] = dst_ip
+
+    # add app-specific port if known
+    if app and app in APP_PORT_MAP:
+        mapping = APP_PORT_MAP[app]
+        if mapping.get("proto") == "tcp":
+            match["ip_proto"] = 6
+            match["tcp_dst"] = mapping["port"]
+        elif mapping.get("proto") == "udp":
+            match["ip_proto"] = 17
+            match["udp_dst"] = mapping["port"]
+
+    payload = {
+        "dpid": dpid,
+        "priority": 400,
+        "match": match,
+        # no actions => drop
+        "actions": []
+    }
+    code, body = _post_to_ryu(payload)
+    return code, body
+
+def throttle_user_app(dpid:int, src_ip:str=None, app:str=None, rate_mbps:int=1):
+    """
+    Create a flow that sets a queue (SET_QUEUE) for traffic from src_ip to app port.
+    This uses a simple action format compatible with the translator_auto flow format.
+    rate_mbps ignored here (you may also call ensure_qos in translator_auto to create queue limits).
+    """
+    match = {"eth_type": 2048}
+    if src_ip:
+        match["ipv4_src"] = src_ip
+
+    if app and app in APP_PORT_MAP:
+        mapping = APP_PORT_MAP[app]
+        if mapping.get("proto") == "tcp":
+            match["ip_proto"] = 6
+            match["tcp_dst"] = mapping["port"]
+        elif mapping.get("proto") == "udp":
+            match["ip_proto"] = 17
+            match["udp_dst"] = mapping["port"]
+
+    # use queue_id 2 for throttled flows (assumes QoS/queue exist)
+    actions = [{"type": "SET_QUEUE", "queue_id": 2}, {"type": "OUTPUT", "port": "NORMAL"}]
+
+    payload = {
+        "dpid": dpid,
+        "priority": 300,
+        "match": match,
+        "actions": actions
+    }
+    code, body = _post_to_ryu(payload)
+    return code, body
+
+# -----------------------
+# Helper DB lookups to find top user per app or top user overall
+# -----------------------
+def top_user_for_app(app, minutes=1):
+    """
+    Return (src_ip, total_bytes) for top src_ip feeding 'app' during last `minutes` minutes.
+    If no rows, return (None, 0)
+    """
+    conn = psycopg2.connect(DB_DSN)
+    cur = conn.cursor()
+    q = """
+    SELECT src_ip, SUM(COALESCE(bytes_tx,0) + COALESCE(bytes_rx,0)) AS total_bytes
+    FROM traffic.flow_stats
+    WHERE app = %s AND timestamp >= NOW() - interval '%s minutes'
+    GROUP BY src_ip
+    ORDER BY total_bytes DESC
+    LIMIT 1
+    """ 
+    cur.execute(q, (app, minutes))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None, 0
+    return row[0], int(row[1] or 0)
+
+def top_user_overall(minutes=1):
+    """
+    Return (src_ip, app, total_bytes) for top src_ip across apps during last `minutes` minutes.
+    """
+    conn = psycopg2.connect(DB_DSN)
+    cur = conn.cursor()
+    q = """
+    SELECT src_ip, app, SUM(COALESCE(bytes_tx,0) + COALESCE(bytes_rx,0)) AS total_bytes
+    FROM traffic.flow_stats
+    WHERE timestamp >= NOW() - interval '%s minutes'
+    GROUP BY src_ip, app
+    ORDER BY total_bytes DESC
+    LIMIT 1
+    """
+    cur.execute(q, (minutes,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None, None, 0
+    return row[0], row[1], int(row[2] or 0)
+
+# -----------------------
+# Rewritten decide_and_act (user+app hybrid)
+# -----------------------
+def decide_and_act(latency_prob, jitter_prob, loss_prob, app_probs, burst, anomaly, recent_minutes=1):
+    """
+    Hybrid decision engine:
+     - Apply global app-level actions (prioritize / throttle) as before
+     - For app-level SLA probs, attempt to throttle the top user for that app (if found)
+     - If anomaly >= ANOMALY_ACTION_TH: throttle top user+app (from recent window)
+     - If anomaly >= ANOMALY_ACTION_TH_CR: block top user+app
+    recent_minutes: window to search for top contributors
+    """
     actions_taken = []
+
+    # ---------- 1) Global SLA / app rules (keep behavior)
     if latency_prob > SLA_VIOLATION_PROB_TH:
         msg = f"Latency SLA risk: prob={latency_prob}"
         aid = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1)
         out = translate_and_apply("prioritize gaming")
         insert_action("prioritize", out, "ok", aid)
         actions_taken.append(("prioritize", "gaming", aid))
+
     if jitter_prob > SLA_VIOLATION_PROB_TH:
         msg = f"Jitter SLA risk: prob={jitter_prob}"
         aid = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1)
         out = translate_and_apply("prioritize voip")
         insert_action("prioritize", out, "ok", aid)
         actions_taken.append(("prioritize", "voip", aid))
+
     if loss_prob > SLA_VIOLATION_PROB_TH:
         msg = f"Packet loss SLA risk: prob={loss_prob}"
         aid = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1)
@@ -297,20 +445,42 @@ def decide_and_act(latency_prob, jitter_prob, loss_prob, app_probs, burst, anoma
         insert_action("throttle", out, "ok", aid)
         actions_taken.append(("throttle", "netflix", aid))
 
+    # ---------- 2) App-level SLA probabilities -> try to scope to worst user
     for app, prob in (app_probs or {}).items():
         if prob >= SLA_VIOLATION_PROB_TH:
-            msg = f"App {app} SLA risk: prob={prob}"
-            aid = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1)
-            out = translate_and_apply(f"throttle {app} 2mbps")
-            insert_action("throttle", out, "ok", aid)
-            actions_taken.append(("throttle", app, aid))
+            # try find top user for this app in recent window
+            src_ip, tot = top_user_for_app(app, minutes=recent_minutes)
+            if src_ip:
+                msg = f"App {app} SLA risk: prob={prob} (top user {src_ip} bytes={tot})"
+                aid = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1, src_ip=src_ip)
+                # throttle user+app
+                code, body = throttle_user_app(dpid=1, src_ip=src_ip, app=app, rate_mbps=2)
+                insert_action("throttle", {"user": src_ip, "app": app, "code": code}, "ok" if code and code < 400 else "failed", aid)
+                actions_taken.append(("throttle", src_ip, app, aid))
+            else:
+                # fallback: throttle global app if can't find user
+                msg = f"App {app} SLA risk: prob={prob} (no top user found; global throttle)"
+                aid = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1)
+                out = translate_and_apply(f"throttle {app} 2mbps")
+                insert_action("throttle", out, "ok", aid)
+                actions_taken.append(("throttle", app, aid))
 
-    if anomaly >= ANOMALY_ACTION_TH:
-        msg = f"High anomaly detected (score={anomaly})"
-        aid = insert_alert("critical", msg, anomaly_score=anomaly, dpid=1)
-        out = translate_and_apply("throttle youtube 1mbps")
-        insert_action("throttle", out, "ok", aid)
-        actions_taken.append(("throttle", "youtube", aid))
+    # ---------- 3) Anomaly-based per-user+app actions ----------
+    # find the top user+app in recent window
+    top_src, top_app, top_bytes = top_user_overall(minutes=recent_minutes)
+    if anomaly >= ANOMALY_ACTION_TH and top_src and top_app:
+        msg = f"High anomaly (score={anomaly}) -> top offender {top_src} on {top_app} ({top_bytes} bytes)"
+        aid = insert_alert("critical", msg, anomaly_score=anomaly, dpid=1, src_ip=top_src)
+        code, body = throttle_user_app(dpid=1, src_ip=top_src, app=top_app, rate_mbps=1)
+        insert_action("throttle", {"user": top_src, "app": top_app, "code": code}, "ok" if code and code < 400 else "failed", aid)
+        actions_taken.append(("throttle", top_src, top_app, aid))
+
+    if anomaly >= ANOMALY_ACTION_TH_CR and top_src and top_app:
+        msg = f"CRITICAL anomaly (score={anomaly}) -> blocking {top_src} on {top_app}"
+        aid = insert_alert("critical", msg, anomaly_score=anomaly, dpid=1, src_ip=top_src)
+        code, body = block_flow(dpid=1, src_ip=top_src, app=top_app)
+        insert_action("block", {"user": top_src, "app": top_app, "code": code}, "ok" if code and code < 400 else "failed", aid)
+        actions_taken.append(("block", top_src, top_app, aid))
 
     return actions_taken
 
