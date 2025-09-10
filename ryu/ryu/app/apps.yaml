@@ -16,14 +16,12 @@
 apps:
   youtube:
     cidrs: ["youtube.com"]
-    ports: []
   netflix:
     cidrs: ["netflix.com"]
-    ports: []
   twitch:
     cidrs: ["twitch.tv"]
-    ports: []
-  game:
-    cidrs: []
-    ports: [27015,27016,27017,27036]
-
+categories:
+  gaming:
+    apps: ["twitch"]
+  voip:
+    apps: ["zoom", "skype"]
