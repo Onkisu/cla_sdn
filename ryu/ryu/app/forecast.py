@@ -342,17 +342,27 @@ if __name__ == "__main__":
     trend_mbps = slope_to_mbps(slope)
 
     # seasonality extraction: include columns that look like seasonality/cycle components
+    # seasonality extraction: include columns that look like seasonality/cycle components
     seasonality_data = []
     if total_forecast is not None:
         seasonality_cols = [c for c in total_forecast.columns if ('season' in c.lower()) or ('cycle' in c.lower()) or c.lower() in ('weekly','monthly','daily')]
         if seasonality_cols:
             # ensure ds included
             cols = ['ds'] + [c for c in seasonality_cols if c in total_forecast.columns]
-            seasonality_data = total_forecast[cols].tail(10).to_dict(orient='records')
+            seasonality_df = total_forecast[cols].copy()
+            
+            # konversi ke Mbps (kecuali kolom ds)
+            for c in seasonality_df.columns:
+                if c != 'ds':
+                    seasonality_df[c] = seasonality_df[c] / 1e6
+            
+            seasonality_data = seasonality_df.tail(10).to_dict(orient='records')
         else:
             # fallback to the combined 'seasonal' column if present
             if 'seasonal' in total_forecast.columns:
-                seasonality_data = total_forecast[['ds','seasonal']].tail(10).to_dict(orient='records')
+                seasonality_df = total_forecast[['ds','seasonal']].copy()
+                seasonality_df['seasonal'] = seasonality_df['seasonal'] / 1e6
+                seasonality_data = seasonality_df.tail(10).to_dict(orient='records')
 
     # 3) latency/jitter/loss forecasts
     latency_df = load_latency_series(days=7)
