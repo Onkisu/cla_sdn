@@ -19,18 +19,25 @@ class LinuxRouter(Node):
 
 class InternetTopo(Topo):
     def build(self):
-        # Router internal
-        r1 = self.addNode('r1', cls=LinuxRouter, ip='10.0.0.254/24')
+        # Main router that will connect to your VPS network
+        r1 = self.addNode('r1', cls=LinuxRouter, ip='10.171.241.200/24')
 
-        # NAT node with proper external interface (using ens3)
-        nat = self.addNode('nat0', cls=NAT, ip='10.255.0.1/24', 
-                          inNamespace=False,
-                          subnet='10.255.0.0/24')
+        # Internal router for your Mininet network
+        r2 = self.addNode('r2', cls=LinuxRouter, ip='10.0.0.254/24')
+
+        # NAT node to bridge between VPS network and Mininet network
+        nat = self.addNode('nat0', cls=NAT, ip='10.171.241.201/24', 
+                          inNamespace=False)
         
-        # Switch for NAT connection
-        s_nat = self.addSwitch('s99')
-        self.addLink(nat, s_nat)
-        self.addLink(r1, s_nat, intfName1='r1-eth0', params1={'ip': '10.255.0.254/24'})
+        # Switch for connecting to VPS network
+        s_vps = self.addSwitch('s99')
+        self.addLink(nat, s_vps)
+        self.addLink(r1, s_vps, intfName1='r1-eth0', params1={'ip': '10.171.241.200/24'})
+
+        # Switch for connecting internal networks
+        s_internal = self.addSwitch('s98')
+        self.addLink(r1, s_internal, intfName1='r1-eth1', params1={'ip': '192.168.100.1/24'})
+        self.addLink(r2, s_internal, intfName1='r2-eth0', params1={'ip': '192.168.100.2/24'})
 
         # Internal switches
         s1 = self.addSwitch('s1')
@@ -46,15 +53,15 @@ class InternetTopo(Topo):
         h6 = self.addHost('h6', ip='10.0.1.3/24', defaultRoute='via 10.0.1.254')
         h7 = self.addHost('h7', ip='10.0.2.1/24', defaultRoute='via 10.0.2.254')
 
-        # Link host ke switch
+        # Link hosts to switches
         self.addLink(h1, s1); self.addLink(h2, s1); self.addLink(h3, s1)
         self.addLink(h4, s2); self.addLink(h5, s2); self.addLink(h6, s2)
         self.addLink(h7, s3)
 
-        # Link router ke switch-subnet
-        self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip': '10.0.0.254/24'})
-        self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
-        self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
+        # Link internal router to subnet switches
+        self.addLink(r2, s1, intfName1='r2-eth1', params1={'ip': '10.0.0.254/24'})
+        self.addLink(r2, s2, intfName1='r2-eth2', params1={'ip': '10.0.1.254/24'})
+        self.addLink(r2, s3, intfName1='r2-eth3', params1={'ip': '10.0.2.254/24'})
 
 def run_forecast_loop():
     while True:
@@ -72,44 +79,47 @@ if __name__=="__main__":
     )
     net.start()
 
-    # Get NAT and router objects
+    # Get nodes
     nat = net.get('nat0')
     r1 = net.get('r1')
+    r2 = net.get('r2')
 
-    # Configure NAT to use ens3 interface for external connectivity
-    nat.cmd('ifconfig nat0-eth0 down')
-    nat.cmd('ifconfig nat0-eth0 0')
-    nat.cmd('ovs-vsctl del-port s99 nat0-eth0')
-    nat.cmd('ovs-vsctl add-port s99 ens3')
+    # Configure NAT to use the VPS's default gateway
+    # First, find the default gateway of your VPS
+    default_gw = subprocess.check_output("ip route | grep default | awk '{print $3}'", shell=True).decode().strip()
     
-    # Configure NAT IP on the bridge interface
-    nat.cmd('ifconfig s99 10.255.0.1/24 up')
+    # Configure NAT
+    nat.configDefault()
     
-    # Set default route on router to NAT
-    r1.cmd("ip route del default 2>/dev/null || true")
-    r1.cmd("ip route add default via 10.255.0.1")
-
-    # Add routes for internal networks on NAT
-    nat.cmd("ip route add 10.0.0.0/24 via 10.255.0.254")
-    nat.cmd("ip route add 10.0.1.0/24 via 10.255.0.254")
-    nat.cmd("ip route add 10.0.2.0/24 via 10.255.0.254")
-
-    # Enable IP forwarding on NAT
-    nat.cmd("sysctl -w net.ipv4.ip_forward=1")
+    # Set up routing
+    # r1 needs to know how to reach the internal network
+    r1.cmd("ip route add 10.0.0.0/16 via 192.168.100.2")
     
-    # Configure iptables for NAT
-    nat.cmd("iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE")
-    nat.cmd("iptables -A FORWARD -i ens3 -o s99 -m state --state RELATED,ESTABLISHED -j ACCEPT")
-    nat.cmd("iptables -A FORWARD -i s99 -o ens3 -j ACCEPT")
-
+    # r2 needs default route through r1
+    r2.cmd("ip route add default via 192.168.100.1")
+    
+    # Add route on NAT for internal networks
+    nat.cmd("ip route add 10.0.0.0/16 via 10.171.241.200")
+    
     # Set DNS on all hosts
     for hname in ("h1","h2","h3","h4","h5","h6","h7"):
         h = net.get(hname)
         h.cmd("bash -c 'echo \"nameserver 8.8.8.8\" > /etc/resolv.conf'")
+        h.cmd("bash -c 'echo \"nameserver 8.8.4.4\" >> /etc/resolv.conf'")
 
     # Start forecast loop in background
     t = threading.Thread(target=run_forecast_loop, daemon=True)
     t.start()
+
+    # Test internet connectivity
+    info("*** Testing internet connectivity...\n")
+    result = net.get('h1').cmd('ping -c 3 8.8.8.8')
+    info(result)
+    
+    if "64 bytes" in result:
+        info("*** Internet connectivity is working!\n")
+    else:
+        info("*** Internet connectivity test failed\n")
 
     # Enter CLI
     CLI(net)
