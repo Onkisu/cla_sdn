@@ -13,17 +13,35 @@
 #   general:
 #     cidrs:
 #       - "0.0.0.0/0"
+# apps:
+#   youtube:
+#     cidrs: ["youtube.com"]
+#     ports: []
+#   netflix:
+#     cidrs: ["netflix.com"]
+#     ports: []
+#   twitch:
+#     cidrs: ["twitch.tv"]
+#     ports: []
+#   game:
+#     cidrs: []
+#     ports: [27015,27016,27017,27036]
+
 apps:
   youtube:
     cidrs: ["youtube.com"]
-    ports: []
   netflix:
     cidrs: ["netflix.com"]
-    ports: []
   twitch:
     cidrs: ["twitch.tv"]
-    ports: []
-  game:
-    cidrs: []
-    ports: [27015,27016,27017,27036]
+  zoom:
+    cidrs: ["zoom.us"]
+  skype:
+    cidrs: ["skype.com"]
+categories:
+  gaming:
+    apps: ["twitch"]
+  voip:
+    apps: ["zoom", "skype"]
+
 
