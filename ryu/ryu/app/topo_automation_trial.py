@@ -16,7 +16,7 @@ def run():
     s1 = net.addSwitch('s1')
 
     info('*** Adding NAT host\n')
-    nat0 = net.addHost('nat0', cls=NAT, ip='10.0.0.254/24', inetIntf='eth0')
+    nat0 = net.addHost('nat0', cls=NAT, ip='10.0.0.254/24', inetIntf='ens3')
 
     info('*** Adding hosts\n')
     h1 = net.addHost('h1', ip='10.0.0.1/24', defaultRoute='via 10.0.0.254')
