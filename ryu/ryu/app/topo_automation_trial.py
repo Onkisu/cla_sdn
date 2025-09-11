@@ -1,64 +1,90 @@
+#!/usr/bin/python3
 from mininet.net import Mininet
-from mininet.node import Node, OVSSwitch
-from mininet.cli import CLI
+from mininet.node import RemoteController, OVSSwitch, Node
 from mininet.link import TCLink
 from mininet.topo import Topo
+from mininet.cli import CLI
 from mininet.log import setLogLevel, info
+from mininet.nodelib import NAT
 
 class LinuxRouter(Node):
     def config(self, **params):
-        super().config(**params)
+        super(LinuxRouter, self).config(**params)
         self.cmd("sysctl -w net.ipv4.ip_forward=1")
+
     def terminate(self):
         self.cmd("sysctl -w net.ipv4.ip_forward=0")
-        super().terminate()
+        super(LinuxRouter, self).terminate()
 
 class InternetTopo(Topo):
     def build(self):
-        # Router internal
+        # Internal router
         r1 = self.addNode('r1', cls=LinuxRouter, ip='10.0.0.254/24')
 
-        # Switch internal
-        s1 = self.addSwitch('s1')
+        # NAT ke interface VPS
+        nat = self.addNode('nat0', cls=NAT, ip='192.168.100.254/24',
+                           inNamespace=False, inetIntf='ens3')
 
-        # Hosts internal
+        # Switch untuk NAT + router
+        s_nat = self.addSwitch('s99')
+        self.addLink(nat, s_nat)
+        self.addLink(r1, s_nat, intfName1='r1-eth0', params1={'ip':'192.168.100.1/24'})
+
+        # Internal switches & hosts
+        s1 = self.addSwitch('s1')
+        s2 = self.addSwitch('s2')
+        s3 = self.addSwitch('s3')
+
+        # Hosts
         h1 = self.addHost('h1', ip='10.0.0.1/24', defaultRoute='via 10.0.0.254')
         h2 = self.addHost('h2', ip='10.0.0.2/24', defaultRoute='via 10.0.0.254')
+        h3 = self.addHost('h3', ip='10.0.0.3/24', defaultRoute='via 10.0.0.254')
+        h4 = self.addHost('h4', ip='10.0.1.1/24', defaultRoute='via 10.0.1.254')
+        h5 = self.addHost('h5', ip='10.0.1.2/24', defaultRoute='via 10.0.1.254')
+        h6 = self.addHost('h6', ip='10.0.1.3/24', defaultRoute='via 10.0.1.254')
+        h7 = self.addHost('h7', ip='10.0.2.1/24', defaultRoute='via 10.0.2.254')
 
-        # Links
-        self.addLink(h1, s1)
-        self.addLink(h2, s1)
-        self.addLink(r1, s1, intfName1='r1-eth0', params1={'ip':'10.0.0.254/24'})
+        # Links host ke switch
+        self.addLink(h1,s1); self.addLink(h2,s1); self.addLink(h3,s1)
+        self.addLink(h4,s2); self.addLink(h5,s2); self.addLink(h6,s2)
+        self.addLink(h7,s3)
 
-def startInternet(r1):
-    # Bind router ke interface VPS (ens3) untuk akses internet
-    r1_int = "r1-eth1"
-    ens3 = "ens3"
-    
-    # Tambah interface router ke ens3 (veth pair)
-    r1.cmd(f"ip link add {r1_int} type veth peer name {r1_int}-host")
-    r1.cmd(f"ip link set {r1_int} up")
-    r1.cmd(f"ip addr add 10.171.241.200/24 dev {r1_int}")
+        # Router ke masing-masing subnet
+        self.addLink(r1,s1,intfName1='r1-eth1', params1={'ip':'10.0.0.254/24'})
+        self.addLink(r1,s2,intfName1='r1-eth2', params1={'ip':'10.0.1.254/24'})
+        self.addLink(r1,s3,intfName1='r1-eth3', params1={'ip':'10.0.2.254/24'})
 
-    # Enable NAT masquerade dari internal ke ens3
-    r1.cmd("iptables -t nat -F")
-    r1.cmd("iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE")
-    r1.cmd("iptables -A FORWARD -i r1-eth0 -o ens3 -j ACCEPT")
-    r1.cmd("iptables -A FORWARD -i ens3 -o r1-eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT")
-
-if __name__ == "__main__":
-    setLogLevel('info')
-    net = Mininet(topo=InternetTopo(), switch=OVSSwitch, link=TCLink)
+if __name__=="__main__":
+    setLogLevel("info")
+    net = Mininet(
+        topo=InternetTopo(),
+        switch=OVSSwitch,
+        controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
+        link=TCLink
+    )
     net.start()
 
-    # Setup router NAT
     r1 = net.get('r1')
-    startInternet(r1)
+    nat = net.get('nat0')
 
-    # Set DNS untuk host
-    for h in ['h1','h2']:
-        host = net.get(h)
-        host.cmd("echo 'nameserver 8.8.8.8' > /etc/resolv.conf")
+    # Router default route ke NAT
+    r1.cmd("ip route add default via 192.168.100.254")
+
+    # Enable IP forwarding & NAT MASQUERADE
+    nat.cmd("sysctl -w net.ipv4.ip_forward=1")
+    nat.cmd("iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE")
+
+    # Set DNS untuk semua host
+    for hname in ("h1","h2","h3","h4","h5","h6","h7"):
+        h = net.get(hname)
+        h.cmd("bash -c 'echo \"nameserver 8.8.8.8\" > /etc/resolv.conf'")
+        h.cmd("bash -c 'echo \"nameserver 8.8.4.4\" >> /etc/resolv.conf'")
+
+    # Test koneksi internal & NAT
+    for hname in ("h1","h2","h3","h4","h5","h6","h7"):
+        h = net.get(hname)
+        info(f"*** Testing {hname} ping 8.8.8.8\n")
+        info(h.cmd("ping -c 2 8.8.8.8"))
 
     CLI(net)
     net.stop()
