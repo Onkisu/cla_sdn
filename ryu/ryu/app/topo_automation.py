@@ -55,14 +55,14 @@ def start_traffic(net):
     h7 = net.get('h7')
 
     info("*** Starting iperf servers\n")
-    h4.cmd("iperf -s -u -p 5001 &") 
-    h5.cmd("iperf -s -u -p 5002 &") 
-    h7.cmd("iperf -u -s -p 5003 &") 
+    h4.cmd("iperf -s -u -p 443 &") 
+    h5.cmd("iperf -s -u -p 443 &") 
+    h7.cmd("iperf -u -s -p 1935 &") 
 
     info("*** Starting iperf clients\n")
-    h1.cmd("bash -c 'while true; do iperf -u -c 10.0.1.1 -p 5001 -b 4M -t 10 -i 5; sleep 1; done &'")
-    h2.cmd("bash -c 'while true; do iperf -u -c 10.0.1.2 -p 5002 -b 2M -t 10 -i 5; sleep 1; done &'")
-    h3.cmd("bash -c 'while true; do iperf -u -c 10.0.2.1 -p 5003 -b 1M -t 10 -i 5; sleep 1; done &'")
+    h1.cmd("bash -c 'while true; do iperf -u -c 10.0.1.1 -p 443 -b 4M -t 10 -i 5; sleep 1; done &'")
+    h2.cmd("bash -c 'while true; do iperf -u -c 10.0.1.2 -p 443 -b 2M -t 10 -i 5; sleep 1; done &'")
+    h3.cmd("bash -c 'while true; do iperf -u -c 10.0.2.1 -p 1935 -b 1M -t 10 -i 5; sleep 1; done &'")
 
 def run_forecast_loop():
     """Loop tiap 15 menit panggil forecast.py"""
