@@ -67,23 +67,92 @@ if __name__=="__main__":
                   link=TCLink)
     net.start()
 
-    # NAT config
+    # # NAT config
+    # nat = net.get('nat0')
+    # nat.configDefault()
+    # nat.cmd("iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE")
+    # nat.cmd("iptables -A FORWARD -i ens3 -o nat0-eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT")
+    # nat.cmd("iptables -A FORWARD -o ens3 -i nat0-eth0 -j ACCEPT")
+    # nat.cmd("ifconfig nat0-eth0 up")
+
+
+    # # Router config
+    # r1 = net.get('r1')
+    # r1.cmd("ifconfig r1-eth0 192.168.0.2/24 up")
+    # r1.cmd("ip route add default via 192.168.0.1")
+
+    # info("\n*** Testing internet from h1...\n")
+    # h1 = net.get('h1')
+    # print(h1.cmd("ping -c 3 8.8.8.8"))
+
+        # ====== NAT & routing minimal (patch) ======
+    # ambil objek
     nat = net.get('nat0')
-    nat.configDefault()
-    nat.cmd("iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE")
-    nat.cmd("iptables -A FORWARD -i ens3 -o nat0-eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT")
-    nat.cmd("iptables -A FORWARD -o ens3 -i nat0-eth0 -j ACCEPT")
-    nat.cmd("ifconfig nat0-eth0 up")
-
-
-    # Router config
     r1 = net.get('r1')
+
+    # init nat node (buat iptables default dll)
+    nat.configDefault()
+
+    # detect uplink interface on host (root namespace)
+    import subprocess, shlex
+    def detect_uplink_iface():
+        try:
+            out = subprocess.check_output(shlex.split("ip route | grep default")).decode()
+            parts = out.split()
+            if "dev" in parts:
+                i = parts.index("dev")
+                if i+1 < len(parts):
+                    return parts[i+1]
+        except Exception:
+            pass
+        return "ens3"  # fallback
+    uplink_if = detect_uplink_iface()
+
+    # ensure host kernel forwards packets
+    subprocess.call(["sysctl", "-w", "net.ipv4.ip_forward=1"])
+
+    # create MASQUERADE on host root so Mininet traffic can go out
+    # run iptables on root namespace (not inside nat.cmd) for reliability
+    subprocess.call(["iptables", "-t", "nat", "-C", "POSTROUTING", "-o", uplink_if, "-j", "MASQUERADE"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) or \
+    subprocess.call(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", uplink_if, "-j", "MASQUERADE"])
+
+    # forward rules: accept established and allow mininet <-> uplink
+    subprocess.call(["iptables", "-C", "FORWARD", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) or \
+    subprocess.call(["iptables", "-A", "FORWARD", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"])
+
+    # nat0-eth0 is veth on root created by Mininet; allow forward from it to uplink
+    subprocess.call(["iptables", "-C", "FORWARD", "-i", "nat0-eth0", "-o", uplink_if, "-j", "ACCEPT"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) or \
+    subprocess.call(["iptables", "-A", "FORWARD", "-i", "nat0-eth0", "-o", uplink_if, "-j", "ACCEPT"])
+
+    subprocess.call(["iptables", "-C", "FORWARD", "-i", uplink_if, "-o", "nat0-eth0", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) or \
+    subprocess.call(["iptables", "-A", "FORWARD", "-i", uplink_if, "-o", "nat0-eth0", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"])
+
+    # ensure interfaces up (inside Mininet namespaces)
+    nat.cmd("ifconfig nat0-eth0 up")
     r1.cmd("ifconfig r1-eth0 192.168.0.2/24 up")
+
+    # add default route on r1 via nat
+    # remove existing default if any to avoid duplicate errors
+    r1.cmd("ip route del default 2>/dev/null || true")
     r1.cmd("ip route add default via 192.168.0.1")
 
-    info("\n*** Testing internet from h1...\n")
-    h1 = net.get('h1')
-    print(h1.cmd("ping -c 3 8.8.8.8"))
+    # push public DNS into Mininet hosts so domain resolution works
+    for hname in ("h1","h2","h3","h4","h5","h6","h7"):
+        try:
+            h = net.get(hname)
+            h.cmd("bash -c 'echo \"nameserver 8.8.8.8\" > /etc/resolv.conf'")
+        except Exception:
+            pass
+
+    # short verification prints (non-blocking)
+    print("NAT uplink interface:", uplink_if)
+    print("iptables MASQUERADE & FORWARD rules applied on host root.")
+    # ====== end patch ======
+
 
     # forecast loop background
     t = threading.Thread(target=run_forecast_loop, daemon=True)
