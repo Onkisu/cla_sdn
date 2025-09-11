@@ -82,9 +82,10 @@ class CollectorFriendlyController(app_manager.RyuApp):
             # Process IPv4 packets
             ip_pkt = pkt.get_protocol(ipv4.ipv4)
             if ip_pkt:
+                # FIX: Remove in_port from match to allow bidirectional traffic flow.
+                # A rule specific to the in_port will not match return packets.
                 match = parser.OFPMatch(
                     eth_type=0x0800,
-                    in_port=in_port,
                     eth_src=src,
                     eth_dst=dst,
                     ipv4_src=ip_pkt.src,
