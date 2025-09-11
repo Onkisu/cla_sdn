@@ -31,8 +31,9 @@ class InternetTopo(Topo):
         nat = self.addNode('nat0', cls=NAT, inNamespace=False)
         
         # Switches for different subnets
-        s_internet = self.addSwitch('s-inet')  # Connects r1 to the internet via NAT
-        s_internal = self.addSwitch('s-int')  # Connects r1 to r2
+        # NOTE: Renamed switches to remove hyphens, as they cause a "datapath ID" error.
+        s_internet = self.addSwitch('s_inet')  # Connects r1 to the internet via NAT
+        s_internal = self.addSwitch('s_int')  # Connects r1 to r2
         s1 = self.addSwitch('s1')  # Subnet 10.0.0.0/24
         s2 = self.addSwitch('s2')  # Subnet 10.0.1.0/24
         s3 = self.addSwitch('s3')  # Subnet 10.0.2.0/24
@@ -108,8 +109,8 @@ if __name__=="__main__":
     # Configure NAT iptables rules for masquerading
     # This is a critical step to allow internal IPs to reach the internet
     nat.cmd("iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE")
-    nat.cmd("iptables -A FORWARD -i ens3 -o s-inet -m state --state RELATED,ESTABLISHED -j ACCEPT")
-    nat.cmd("iptables -A FORWARD -i s-inet -o ens3 -j ACCEPT")
+    nat.cmd("iptables -A FORWARD -i ens3 -o s_inet -m state --state RELATED,ESTABLISHED -j ACCEPT")
+    nat.cmd("iptables -A FORWARD -i s_inet -o ens3 -j ACCEPT")
 
     # Set DNS on all hosts
     for hname in ("h1", "h2", "h3", "h4", "h5", "h6", "h7"):
