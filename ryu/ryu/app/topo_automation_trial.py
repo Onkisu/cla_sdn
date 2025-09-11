@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 from mininet.net import Mininet
-from mininet.node import RemoteController, NAT
+from mininet.node import RemoteController
+from mininet.nodelib import NAT
 from mininet.link import TCLink
 from mininet.cli import CLI
 from mininet.log import setLogLevel, info
