@@ -23,7 +23,7 @@ class InternetTopo(Topo):
         r1 = self.addNode('r1', cls=LinuxRouter, ip='10.171.241.200/24')
 
         # Internal router for your Mininet network
-        r2 = self.addNode('r2', cls=LinuxRouter, ip='10.0.0.254/24')
+        r2 = self.addNode('r2', cls=LinuxRouter, ip='192.168.100.2/24')
 
         # NAT node to bridge between VPS network and Mininet network
         nat = self.addNode('nat0', cls=NAT, ip='10.171.241.201/24', 
@@ -85,7 +85,6 @@ if __name__=="__main__":
     r2 = net.get('r2')
 
     # Configure NAT to use the VPS's default gateway
-    # First, find the default gateway of your VPS
     try:
         default_gw = subprocess.check_output("ip route | grep default | awk '{print $3}'", shell=True).decode().strip()
         info("*** Default gateway: %s\n" % default_gw)
@@ -108,7 +107,7 @@ if __name__=="__main__":
     # Add route on NAT for internal networks
     nat.cmd("ip route add 10.0.0.0/16 via 10.171.241.200")
     
-    # Enable IP forwarding on all routers (redundant but safe)
+    # Enable IP forwarding on all routers
     r1.cmd("sysctl -w net.ipv4.ip_forward=1")
     r2.cmd("sysctl -w net.ipv4.ip_forward=1")
     
@@ -125,34 +124,33 @@ if __name__=="__main__":
         h.cmd("bash -c 'echo \"nameserver 8.8.8.8\" > /etc/resolv.conf'")
         h.cmd("bash -c 'echo \"nameserver 8.8.4.4\" >> /etc/resolv.conf'")
 
-    # Start forecast loop in background
-    # t = threading.Thread(target=run_forecast_loop, daemon=True)
-    # t.start()
-
-    # Test internet connectivity
-    info("*** Testing internet connectivity...\n")
-    result = net.get('h1').cmd('ping -c 3 8.8.8.8')
+    # Test connectivity between r2 and r1 first
+    info("*** Testing connectivity from r2 to r1:\n")
+    result = r2.cmd("ping -c 2 192.168.100.1")
     info(result)
     
     if "64 bytes" in result:
-        info("*** Internet connectivity is working!\n")
-    else:
-        info("*** Internet connectivity test failed. Checking routes...\n")
-        # Debug: show routes on all routers
-        info("*** Routes on r1:\n")
-        info(r1.cmd("ip route show") + "\n")
-        info("*** Routes on r2:\n")
-        info(r2.cmd("ip route show") + "\n")
-        info("*** Routes on nat:\n")
-        info(nat.cmd("ip route show") + "\n")
+        info("*** Connectivity between r2 and r1 is working!\n")
         
-        # Test connectivity step by step
-        info("*** Testing connectivity from r2 to r1:\n")
-        info(r2.cmd("ping -c 2 192.168.100.1") + "\n")
-        info("*** Testing connectivity from r1 to nat:\n")
-        info(r1.cmd("ping -c 2 10.171.241.201") + "\n")
-        info("*** Testing connectivity from nat to gateway:\n")
-        info(nat.cmd("ping -c 2 %s" % default_gw) + "\n")
+        # Test internet connectivity
+        info("*** Testing internet connectivity...\n")
+        result = net.get('h1').cmd('ping -c 3 8.8.8.8')
+        info(result)
+        
+        if "64 bytes" in result:
+            info("*** Internet connectivity is working!\n")
+        else:
+            info("*** Internet connectivity test failed\n")
+    else:
+        info("*** Connectivity between r2 and r1 failed. Checking interfaces...\n")
+        info("*** r1 interfaces:\n")
+        info(r1.cmd("ip addr show") + "\n")
+        info("*** r2 interfaces:\n")
+        info(r2.cmd("ip addr show") + "\n")
+
+    # Start forecast loop in background
+    t = threading.Thread(target=run_forecast_loop, daemon=True)
+    t.start()
 
     # Enter CLI
     CLI(net)
