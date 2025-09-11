@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 from mininet.net import Mininet
-from mininet.node import RemoteController, Node, UserSwitch
+from mininet.node import RemoteController, OVSSwitch, Node
 from mininet.nodelib import NAT
 from mininet.link import TCLink
 from mininet.topo import Topo
@@ -19,10 +19,11 @@ class LinuxRouter(Node):
 class InternetTopo(Topo):
     def build(self):
         # Router internal
-        r1 = self.addNode('r1', cls=LinuxRouter)
+        r1 = self.addNode('r1', cls=LinuxRouter, ip='192.168.100.1/24')
 
-        # NAT ke interface VPS ens3
-        nat = self.addNode('nat0', cls=NAT, inNamespace=False, inetIntf='ens3')
+        # NAT ke VPS ens3
+        nat = self.addNode('nat0', cls=NAT, ip='192.168.100.254/24',
+                          inNamespace=False, inetIntf='ens3')
 
         # Switch untuk NAT & router
         s_nat = self.addSwitch('s99')
@@ -56,11 +57,10 @@ if __name__=="__main__":
     setLogLevel("info")
     net = Mininet(
         topo=InternetTopo(),
-        switch=UserSwitch,  # pake UserSwitch biar gak error OVSVersion
+        switch=OVSSwitch,
         controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
         link=TCLink
     )
-
     net.start()
 
     r1 = net.get('r1')
