@@ -17,13 +17,14 @@ class LinuxRouter(Node):
         super().terminate()
 
 class InternetTopo(Topo):
-    """Topo internal + NAT untuk internet"""
+    """Topo internal + NAT untuk internet via VPS ens3"""
     def build(self):
         # Router internal
         r1 = self.addNode('r1', cls=LinuxRouter)
 
-        # NAT node Mininet
-        nat = self.addNode('nat0', cls=NAT, ip='192.168.100.254/24', inNamespace=False)
+        # NAT node → arahkan ke interface fisik VPS ens3
+        nat = self.addNode('nat0', cls=NAT, ip='192.168.100.254/24',
+                           inNamespace=False, inetIntf='ens3')
         s_nat = self.addSwitch('s99')
         self.addLink(nat, s_nat)
         self.addLink(r1, s_nat, intfName1='r1-eth0', params1={'ip':'192.168.100.1/24'})
@@ -34,23 +35,33 @@ class InternetTopo(Topo):
         s3 = self.addSwitch('s3')
 
         # Hosts
-        h1 = self.addHost('h1', ip='10.0.0.1/24', defaultRoute='via 10.0.0.254')
-        h2 = self.addHost('h2', ip='10.0.0.2/24', defaultRoute='via 10.0.0.254')
-        h3 = self.addHost('h3', ip='10.0.0.3/24', defaultRoute='via 10.0.0.254')
-        h4 = self.addHost('h4', ip='10.0.1.1/24', defaultRoute='via 10.0.1.254')
-        h5 = self.addHost('h5', ip='10.0.1.2/24', defaultRoute='via 10.0.1.254')
-        h6 = self.addHost('h6', ip='10.0.1.3/24', defaultRoute='via 10.0.1.254')
-        h7 = self.addHost('h7', ip='10.0.2.1/24', defaultRoute='via 10.0.2.254')
+        hosts = [
+            ('h1','10.0.0.1/24','10.0.0.254'),
+            ('h2','10.0.0.2/24','10.0.0.254'),
+            ('h3','10.0.0.3/24','10.0.0.254'),
+            ('h4','10.0.1.1/24','10.0.1.254'),
+            ('h5','10.0.1.2/24','10.0.1.254'),
+            ('h6','10.0.1.3/24','10.0.1.254'),
+            ('h7','10.0.2.1/24','10.0.2.254')
+        ]
+        host_objs = {}
+        for name, ip, gw in hosts:
+            host_objs[name] = self.addHost(name, ip=ip, defaultRoute=f'via {gw}')
 
         # Link hosts → switches
-        for h, s in [(h1,s1),(h2,s1),(h3,s1),(h4,s2),(h5,s2),(h6,s2),(h7,s3)]:
-            self.addLink(h, s)
+        self.addLink(host_objs['h1'], s1)
+        self.addLink(host_objs['h2'], s1)
+        self.addLink(host_objs['h3'], s1)
+        self.addLink(host_objs['h4'], s2)
+        self.addLink(host_objs['h5'], s2)
+        self.addLink(host_objs['h6'], s2)
+        self.addLink(host_objs['h7'], s3)
 
-        # Link router → internal switches
+        # Router → switches
         self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip':'10.0.0.254/24'})
         self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip':'10.0.1.254/24'})
         self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip':'10.0.2.254/24'})
-        # youh
+
 if __name__=="__main__":
     setLogLevel("info")
     net = Mininet(topo=InternetTopo(),
@@ -63,7 +74,7 @@ if __name__=="__main__":
     r1 = net.get('r1')
     nat = net.get('nat0')
 
-    # Konfigurasi NAT (Masquerade + forwarding)
+    # Konfigurasi NAT
     nat.configDefault()
 
     # Router internal default route ke NAT
@@ -75,12 +86,12 @@ if __name__=="__main__":
         h.cmd("echo 'nameserver 8.8.8.8' > /etc/resolv.conf")
         h.cmd("echo 'nameserver 8.8.4.4' >> /etc/resolv.conf")
 
-    info("*** Tes koneksi internal dan internet:\n")
+    # Tes koneksi internet host
+    info("*** Tes koneksi internet semua host:\n")
     for hname in ("h1","h2","h3","h4","h5","h6","h7"):
         h = net.get(hname)
-        info(f"{hname} ping google.com:\n")
-        result = h.cmd("ping -c 2 8.8.8.8")
-        info(result)
+        info(f"{hname} ping 8.8.8.8:\n")
+        info(h.cmd("ping -c 2 8.8.8.8"))
 
     CLI(net)
     net.stop()
