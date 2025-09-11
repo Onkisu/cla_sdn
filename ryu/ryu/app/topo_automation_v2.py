@@ -23,8 +23,8 @@ class InternetTopo(Topo):
         r1 = self.addNode('r1', cls=LinuxRouter, ip='10.0.0.254/24')
 
         # NAT keluar ke internet
-        nat = self.addNode('nat0', cls=NAT, ip='0.0.0.0')  # NAT pakai eth0 host asli
-        self.addLink(r1, nat, intfName1='r1-eth0', params1={'ip': '192.168.0.1/24'})
+        nat = self.addNode('nat0', cls=NAT, ip='192.168.0.1/24', inNamespace=False)
+        self.addLink(r1, nat, intfName1='r1-eth0', params1={'ip': '192.168.0.2/24'})
 
         # Switch
         s1 = self.addSwitch('s1')
@@ -65,6 +65,10 @@ if __name__=="__main__":
                   controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
                   link=TCLink)
     net.start()
+
+    # Tambahkan default route di r1 supaya forward ke NAT
+    r1 = net.get('r1')
+    r1.cmd("ip route add default via 192.168.0.1")
 
     info("\n*** Testing internet from h1...\n")
     h1 = net.get('h1')
