@@ -50,7 +50,7 @@ class InternetTopo(Topo):
         self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip':'10.0.0.254/24'})
         self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip':'10.0.1.254/24'})
         self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip':'10.0.2.254/24'})
-
+        # youh
 if __name__=="__main__":
     setLogLevel("info")
     net = Mininet(topo=InternetTopo(),
