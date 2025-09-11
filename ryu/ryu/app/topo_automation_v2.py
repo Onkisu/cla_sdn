@@ -153,6 +153,26 @@ if __name__=="__main__":
     print("iptables MASQUERADE & FORWARD rules applied on host root.")
     # ====== end patch ======
 
+        # ====== Set default gateway sesuai subnet untuk semua host ======
+    hosts_gateway = {
+        "h1": "10.0.0.254",
+        "h2": "10.0.0.254",
+        "h3": "10.0.0.254",
+        "h4": "10.0.1.254",
+        "h5": "10.0.1.254",
+        "h6": "10.0.1.254",
+        "h7": "10.0.2.254",
+    }
+
+    for hname, gw in hosts_gateway.items():
+        h = net.get(hname)
+        # hapus default lama kalau ada
+        h.cmd("ip route del default 2>/dev/null || true")
+        # tambahin default sesuai gateway subnetnya
+        h.cmd(f"ip route add default via {gw}")
+        # DNS supaya bisa resolve google.com
+        h.cmd("bash -c 'echo \"nameserver 8.8.8.8\" > /etc/resolv.conf'")
+
 
     # forecast loop background
     t = threading.Thread(target=run_forecast_loop, daemon=True)
