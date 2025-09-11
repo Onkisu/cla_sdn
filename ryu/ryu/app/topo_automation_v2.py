@@ -149,8 +149,8 @@ if __name__=="__main__":
         info(r2.cmd("ip addr show") + "\n")
 
     # Start forecast loop in background
-    t = threading.Thread(target=run_forecast_loop, daemon=True)
-    t.start()
+    # t = threading.Thread(target=run_forecast_loop, daemon=True)
+    # t.start()
 
     # Enter CLI
     CLI(net)
