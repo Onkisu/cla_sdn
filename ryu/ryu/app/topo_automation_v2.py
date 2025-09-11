@@ -17,9 +17,9 @@ class LinuxRouter(Node):
         super(LinuxRouter, self).terminate()
 
 class VPSReadyTopo(Topo):
-    def build(self, uplink_intf='ens3', uplink_ip='192.168.100.1/24', uplink_gw='10.171.241.1'):
+    def build(self):
         # Router
-        r1 = self.addNode('r1', cls=LinuxRouter)
+        self.r1 = self.addNode('r1', cls=LinuxRouter)
 
         # Internal switches
         s1 = self.addSwitch('s1')
@@ -42,16 +42,12 @@ class VPSReadyTopo(Topo):
         self.addLink(h7, s3)
 
         # Link router ke internal switch
-        self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip':'10.0.0.254/24'})
-        self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip':'10.0.1.254/24'})
-        self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip':'10.0.2.254/24'})
+        self.addLink(self.r1, s1, intfName1='r1-eth1', params1={'ip':'10.0.0.254/24'})
+        self.addLink(self.r1, s2, intfName1='r1-eth2', params1={'ip':'10.0.1.254/24'})
+        self.addLink(self.r1, s3, intfName1='r1-eth3', params1={'ip':'10.0.2.254/24'})
 
         # Link router ke uplink VPS
-        self.addLink(r1, s99, intfName1='r1-eth0', params1={'ip':uplink_ip})
-
-        # Simpan parameter uplink
-        r1.uplink_intf = uplink_intf
-        r1.uplink_gw = uplink_gw
+        self.addLink(self.r1, s99, intfName1='r1-eth0', params1={'ip':'192.168.100.1/24'})
 
 def setup_internet_nat(router):
     """
@@ -73,17 +69,24 @@ def setup_internet_nat(router):
 
 if __name__ == "__main__":
     setLogLevel("info")
+
+    # Buat network
+    topo = VPSReadyTopo()
     net = Mininet(
-        topo=VPSReadyTopo(uplink_intf='ens3',
-                           uplink_ip='192.168.100.1/24',
-                           uplink_gw='10.171.241.1'),
+        topo=topo,
         switch=OVSSwitch,
         controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
         link=TCLink
     )
     net.start()
 
+    # Ambil router r1
     r1 = net.get('r1')
+    # Set parameter uplink di Node (harus setelah net.get)
+    r1.uplink_intf = 'ens3'
+    r1.uplink_gw   = '10.171.241.1'
+
+    # Setup NAT + internet
     setup_internet_nat(r1)
 
     # Set DNS di semua host
