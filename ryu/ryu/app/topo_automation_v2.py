@@ -86,20 +86,38 @@ if __name__=="__main__":
 
     # Configure NAT to use the VPS's default gateway
     # First, find the default gateway of your VPS
-    default_gw = subprocess.check_output("ip route | grep default | awk '{print $3}'", shell=True).decode().strip()
+    try:
+        default_gw = subprocess.check_output("ip route | grep default | awk '{print $3}'", shell=True).decode().strip()
+        info("*** Default gateway: %s\n" % default_gw)
+    except:
+        default_gw = "10.171.241.1"  # Fallback to typical gateway for this subnet
+        info("*** Using fallback gateway: %s\n" % default_gw)
     
-    # Configure NAT
-    nat.configDefault()
+    # Configure NAT with the correct gateway
+    nat.cmd("ip route del default 2>/dev/null || true")
+    nat.cmd("ip route add default via %s" % default_gw)
     
     # Set up routing
     # r1 needs to know how to reach the internal network
     r1.cmd("ip route add 10.0.0.0/16 via 192.168.100.2")
     
     # r2 needs default route through r1
+    r2.cmd("ip route del default 2>/dev/null || true")
     r2.cmd("ip route add default via 192.168.100.1")
     
     # Add route on NAT for internal networks
     nat.cmd("ip route add 10.0.0.0/16 via 10.171.241.200")
+    
+    # Enable IP forwarding on all routers (redundant but safe)
+    r1.cmd("sysctl -w net.ipv4.ip_forward=1")
+    r2.cmd("sysctl -w net.ipv4.ip_forward=1")
+    
+    # Configure NAT iptables rules
+    nat.cmd("sysctl -w net.ipv4.ip_forward=1")
+    nat.cmd("iptables -t nat -F")
+    nat.cmd("iptables -t nat -A POSTROUTING -o nat0-eth0 -j MASQUERADE")
+    nat.cmd("iptables -A FORWARD -i nat0-eth0 -o s99 -m state --state RELATED,ESTABLISHED -j ACCEPT")
+    nat.cmd("iptables -A FORWARD -i s99 -o nat0-eth0 -j ACCEPT")
     
     # Set DNS on all hosts
     for hname in ("h1","h2","h3","h4","h5","h6","h7"):
@@ -119,7 +137,22 @@ if __name__=="__main__":
     if "64 bytes" in result:
         info("*** Internet connectivity is working!\n")
     else:
-        info("*** Internet connectivity test failed\n")
+        info("*** Internet connectivity test failed. Checking routes...\n")
+        # Debug: show routes on all routers
+        info("*** Routes on r1:\n")
+        info(r1.cmd("ip route show") + "\n")
+        info("*** Routes on r2:\n")
+        info(r2.cmd("ip route show") + "\n")
+        info("*** Routes on nat:\n")
+        info(nat.cmd("ip route show") + "\n")
+        
+        # Test connectivity step by step
+        info("*** Testing connectivity from r2 to r1:\n")
+        info(r2.cmd("ping -c 2 192.168.100.1") + "\n")
+        info("*** Testing connectivity from r1 to nat:\n")
+        info(r1.cmd("ping -c 2 10.171.241.201") + "\n")
+        info("*** Testing connectivity from nat to gateway:\n")
+        info(nat.cmd("ping -c 2 %s" % default_gw) + "\n")
 
     # Enter CLI
     CLI(net)
