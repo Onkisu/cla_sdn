@@ -1,13 +1,13 @@
 #!/usr/bin/python3
 from mininet.net import Mininet
-from mininet.node import Node, OVSSwitch, RemoteController
+from mininet.node import RemoteController, Node, UserSwitch
+from mininet.nodelib import NAT
 from mininet.link import TCLink
 from mininet.topo import Topo
 from mininet.cli import CLI
 from mininet.log import setLogLevel, info
 
 class LinuxRouter(Node):
-    """A Node with IP forwarding enabled"""
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
         self.cmd("sysctl -w net.ipv4.ip_forward=1")
@@ -19,16 +19,15 @@ class LinuxRouter(Node):
 class InternetTopo(Topo):
     def build(self):
         # Router internal
-        r1 = self.addNode('r1', cls=LinuxRouter, ip='10.0.0.254/24')
+        r1 = self.addNode('r1', cls=LinuxRouter)
 
-        # NAT node connected directly to r1
-        nat = self.addNode('nat0', cls=Node, inNamespace=False)
-        # switch untuk NAT & router (opsional, bisa langsung connect r1 ↔ nat0)
+        # NAT ke interface VPS ens3
+        nat = self.addNode('nat0', cls=NAT, inNamespace=False, inetIntf='ens3')
+
+        # Switch untuk NAT & router
         s_nat = self.addSwitch('s99')
-
-        # Link r1 ↔ NAT
-        self.addLink(r1, nat, intfName1='r1-eth0', params1={'ip':'192.168.100.1/24'},
-                             intfName2='nat0-eth0', params2={'ip':'192.168.100.254/24'})
+        self.addLink(nat, s_nat)
+        self.addLink(r1, s_nat, intfName1='r1-eth0', params1={'ip': '192.168.100.1/24'})
 
         # Internal switches & hosts
         s1 = self.addSwitch('s1')
@@ -49,16 +48,16 @@ class InternetTopo(Topo):
         self.addLink(h7, s3)
 
         # Router ke masing-masing subnet
-        self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip':'10.0.0.254/24'})
-        self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip':'10.0.1.254/24'})
-        self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip':'10.0.2.254/24'})
+        self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip': '10.0.0.254/24'})
+        self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
+        self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
 
 if __name__=="__main__":
     setLogLevel("info")
     net = Mininet(
         topo=InternetTopo(),
+        switch=UserSwitch,  # pake UserSwitch biar gak error OVSVersion
         controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
-        switch=OVSSwitch,
         link=TCLink
     )
 
@@ -72,7 +71,6 @@ if __name__=="__main__":
 
     # Enable IP forwarding & MASQUERADE di NAT
     nat.cmd("sysctl -w net.ipv4.ip_forward=1")
-    # Ganti ens3 dengan interface VPS
     nat.cmd("iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE")
 
     # Set DNS di semua host
