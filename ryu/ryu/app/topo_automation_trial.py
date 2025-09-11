@@ -1,91 +1,33 @@
-#!/usr/bin/python3
 from mininet.net import Mininet
-from mininet.node import RemoteController, OVSSwitch, Node
-from mininet.nodelib import NAT
-from mininet.link import TCLink
-from mininet.topo import Topo
+from mininet.node import Node, OVSSwitch, RemoteController
 from mininet.cli import CLI
-from mininet.log import setLogLevel, info
+from mininet.link import TCLink
 
 class LinuxRouter(Node):
     def config(self, **params):
-        super(LinuxRouter, self).config(**params)
+        super().config(**params)
         self.cmd("sysctl -w net.ipv4.ip_forward=1")
 
     def terminate(self):
         self.cmd("sysctl -w net.ipv4.ip_forward=0")
-        super(LinuxRouter, self).terminate()
+        super().terminate()
 
-class InternetTopo(Topo):
-    def build(self):
-        # Router internal
-        r1 = self.addNode('r1', cls=LinuxRouter)
+net = Mininet(controller=lambda name: RemoteController(name, ip='127.0.0.1'),
+              switch=OVSSwitch, link=TCLink)
 
-        # NAT ke interface VPS (ganti ens3 kalau beda)
-        nat = self.addNode('nat0', cls=NAT, inNamespace=False, inetIntf='ens3')
+r1 = net.addHost('r1', cls=LinuxRouter)
+s1 = net.addSwitch('s1')
+h1 = net.addHost('h1', ip='10.0.0.1/24', defaultRoute='via 10.0.0.254')
 
-        # Switch NAT & router
-        s_nat = self.addSwitch('s99')
-        self.addLink(nat, s_nat)
-        self.addLink(r1, s_nat, intfName1='r1-eth0', params1={'ip': '192.168.100.1/24'})
+net.addLink(h1, s1)
+net.addLink(r1, s1)
 
-        # Internal switches & hosts
-        s1 = self.addSwitch('s1')
-        s2 = self.addSwitch('s2')
-        s3 = self.addSwitch('s3')
+# attach veth r1-to-vps ke r1
+r1.cmd("ip link set r1-to-vps name r1-eth0 up")
+r1.cmd("ip addr add 192.168.200.2/24 dev r1-eth0")
+r1.cmd("ip route add default via 192.168.200.1 dev r1-eth0")
 
-        h1 = self.addHost('h1', ip='10.0.0.1/24', defaultRoute='via 10.0.0.254')
-        h2 = self.addHost('h2', ip='10.0.0.2/24', defaultRoute='via 10.0.0.254')
-        h3 = self.addHost('h3', ip='10.0.0.3/24', defaultRoute='via 10.0.0.254')
-        h4 = self.addHost('h4', ip='10.0.1.1/24', defaultRoute='via 10.0.1.254')
-        h5 = self.addHost('h5', ip='10.0.1.2/24', defaultRoute='via 10.0.1.254')
-        h6 = self.addHost('h6', ip='10.0.1.3/24', defaultRoute='via 10.0.1.254')
-        h7 = self.addHost('h7', ip='10.0.2.1/24', defaultRoute='via 10.0.2.254')
+net.start()
 
-        # Link hosts ke switch
-        self.addLink(h1, s1); self.addLink(h2, s1); self.addLink(h3, s1)
-        self.addLink(h4, s2); self.addLink(h5, s2); self.addLink(h6, s2)
-        self.addLink(h7, s3)
-
-        # Router ke masing-masing subnet
-        self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip': '10.0.0.254/24'})
-        self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
-        self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
-
-if __name__=="__main__":
-    setLogLevel("info")
-    net = Mininet(
-        topo=InternetTopo(),
-        switch=OVSSwitch,
-        controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
-        link=TCLink
-    )
-    net.start()
-
-    r1 = net.get('r1')
-    nat = net.get('nat0')
-
-    # Set default route r1 → NAT
-    r1.cmd("ifconfig r1-eth0 192.168.100.1/24 up")
-    nat.cmd("ifconfig nat0-eth0 192.168.100.254/24 up")
-    r1.cmd("ip route add default via 192.168.100.254")
-
-    # NAT setup
-    nat.cmd("sysctl -w net.ipv4.ip_forward=1")
-    nat.cmd("iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE")
-
-    # Set DNS untuk semua host
-    for hname in ("h1","h2","h3","h4","h5","h6","h7"):
-        h = net.get(hname)
-        h.cmd("bash -c 'echo \"nameserver 8.8.8.8\" > /etc/resolv.conf'")
-        h.cmd("bash -c 'echo \"nameserver 8.8.4.4\" >> /etc/resolv.conf'")
-
-    # Test konektivitas host → NAT → Internet
-    info("*** Testing connectivity:\n")
-    for hname in ("h1","h2","h3","h4","h5","h6","h7"):
-        h = net.get(hname)
-        info(f"*** Ping 8.8.8.8 from {hname}\n")
-        print(h.cmd("ping -c 2 8.8.8.8"))
-
-    CLI(net)
-    net.stop()
+CLI(net)
+net.stop()
