@@ -73,6 +73,17 @@ if __name__=="__main__":
     # init NAT node
     nat.configDefault()
 
+        # enable IP forwarding di nat node (Mininet namespace)
+    nat.cmd("sysctl -w net.ipv4.ip_forward=1")
+
+    # MASQUERADE semua subnet internal Mininet melalui interface keluar nat
+    nat.cmd("iptables -t nat -A POSTROUTING -s 10.0.0.0/16 -o {} -j MASQUERADE".format(uplink_if))
+
+    # forward rules di NAT node
+    nat.cmd("iptables -A FORWARD -i nat0-eth0 -o {} -j ACCEPT".format(uplink_if))
+    nat.cmd("iptables -A FORWARD -i {} -o nat0-eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT".format(uplink_if))
+
+
     # deteksi interface uplink (di host asli)
     def detect_uplink_iface():
         try:
