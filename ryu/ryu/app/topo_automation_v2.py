@@ -100,6 +100,10 @@ if __name__=="__main__":
     # r1 needs to know how to reach the internal network
     r1.cmd("ip route add 10.0.0.0/16 via 192.168.100.2")
     
+    # r1 needs default route through NAT
+    r1.cmd("ip route del default 2>/dev/null || true")
+    r1.cmd("ip route add default via 10.171.241.201")
+    
     # r2 needs default route through r1
     r2.cmd("ip route del default 2>/dev/null || true")
     r2.cmd("ip route add default via 192.168.100.1")
@@ -132,25 +136,51 @@ if __name__=="__main__":
     if "64 bytes" in result:
         info("*** Connectivity between r2 and r1 is working!\n")
         
-        # Test internet connectivity
-        info("*** Testing internet connectivity...\n")
-        result = net.get('h1').cmd('ping -c 3 8.8.8.8')
+        # Test connectivity from r1 to NAT
+        info("*** Testing connectivity from r1 to NAT:\n")
+        result = r1.cmd("ping -c 2 10.171.241.201")
         info(result)
         
         if "64 bytes" in result:
-            info("*** Internet connectivity is working!\n")
+            info("*** Connectivity from r1 to NAT is working!\n")
+            
+            # Test connectivity from NAT to gateway
+            info("*** Testing connectivity from NAT to gateway:\n")
+            result = nat.cmd("ping -c 2 %s" % default_gw)
+            info(result)
+            
+            if "64 bytes" in result:
+                info("*** Connectivity from NAT to gateway is working!\n")
+                
+                # Test internet connectivity from NAT
+                info("*** Testing internet connectivity from NAT:\n")
+                result = nat.cmd("ping -c 2 8.8.8.8")
+                info(result)
+                
+                if "64 bytes" in result:
+                    info("*** Internet connectivity from NAT is working!\n")
+                    
+                    # Test internet connectivity from host
+                    info("*** Testing internet connectivity from host...\n")
+                    result = net.get('h1').cmd('ping -c 3 8.8.8.8')
+                    info(result)
+                    
+                    if "64 bytes" in result:
+                        info("*** Internet connectivity is working!\n")
+                    else:
+                        info("*** Internet connectivity test failed from host\n")
+                else:
+                    info("*** Internet connectivity test failed from NAT\n")
+            else:
+                info("*** Connectivity from NAT to gateway failed\n")
         else:
-            info("*** Internet connectivity test failed\n")
+            info("*** Connectivity from r1 to NAT failed\n")
     else:
-        info("*** Connectivity between r2 and r1 failed. Checking interfaces...\n")
-        info("*** r1 interfaces:\n")
-        info(r1.cmd("ip addr show") + "\n")
-        info("*** r2 interfaces:\n")
-        info(r2.cmd("ip addr show") + "\n")
+        info("*** Connectivity between r2 and r1 failed\n")
 
     # Start forecast loop in background
-    # t = threading.Thread(target=run_forecast_loop, daemon=True)
-    # t.start()
+    t = threading.Thread(target=run_forecast_loop, daemon=True)
+    t.start()
 
     # Enter CLI
     CLI(net)
