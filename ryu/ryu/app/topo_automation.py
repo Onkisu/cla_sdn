@@ -67,7 +67,9 @@ class ComplexTopo(Topo):
         self.addLink(r1, s_nat, intfName1='r1-eth99', params1={'ip':'192.168.100.1/24'})  # NAT interface
 
         # Hubungkan switch NAT ke host default Mininet NAT
-        self.addLink(s_nat, Node('nat0'))
+        nat0 = self.addHost('nat0', cls=NAT, ip='192.168.100.2/24', defaultRoute='via 192.168.100.1')
+        self.addLink(s_nat, nat0)
+
 
 def start_traffic(net):
     """Jalankan traffic otomatis"""
