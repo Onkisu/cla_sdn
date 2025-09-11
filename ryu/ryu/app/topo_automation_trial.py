@@ -1,24 +1,17 @@
-#!/usr/bin/python3
 from mininet.net import Mininet
-from mininet.node import Node, RemoteController
-from mininet.link import TCLink
+from mininet.node import RemoteController, Node
 from mininet.cli import CLI
+from mininet.link import TCLink
 from mininet.log import setLogLevel, info
-
-class LinuxRouter(Node):
-    "A Node with IP forwarding enabled."
-    def config(self, **params):
-        super(LinuxRouter, self).config(**params)
-        self.cmd('sysctl -w net.ipv4.ip_forward=1')
 
 def run():
     net = Mininet(controller=RemoteController, link=TCLink)
 
     info('*** Adding controller\n')
-    c0 = net.addController('c0')
+    net.addController('c0', ip='127.0.0.1', port=6653)
 
     info('*** Adding router\n')
-    r1 = net.addHost('r1', cls=LinuxRouter, ip='10.0.0.254/24')
+    r1 = net.addHost('r1', ip='10.0.0.254/24')
 
     info('*** Adding hosts\n')
     h1 = net.addHost('h1', ip='10.0.0.1/24', defaultRoute='via 10.0.0.254')
@@ -32,13 +25,11 @@ def run():
     net.addLink(h2, s1)
     net.addLink(r1, s1)
 
-    info('*** Starting network\n')
+    info('*** Enable NAT for router\n')
+    r1.cmd('echo 1 > /proc/sys/net/ipv4/ip_forward')
+    r1.cmd('iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE')
+
     net.start()
-
-    # Set router default route via VPS gateway
-    r1.cmd('ip route add default via 192.168.200.1')  # IP VPS untuk NAT
-
-    info('*** Running CLI\n')
     CLI(net)
     net.stop()
 
