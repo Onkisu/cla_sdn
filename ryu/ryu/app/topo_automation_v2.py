@@ -130,8 +130,8 @@ if __name__=="__main__":
         info("*** Internet connectivity test failed from h1\n")
 
     # Start forecast loop in background
-    t = threading.Thread(target=run_forecast_loop, daemon=True)
-    t.start()
+    # t = threading.Thread(target=run_forecast_loop, daemon=True)
+    # t.start()
 
     # Enter CLI
     CLI(net)
