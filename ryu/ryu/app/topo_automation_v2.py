@@ -65,6 +65,9 @@ if __name__=="__main__":
                   controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
                   link=TCLink)
     net.start()
+    nat = net.get('nat0')
+    nat.configDefault()
+
 
     # Tambahkan default route di r1 supaya forward ke NAT
     r1 = net.get('r1')
