@@ -58,6 +58,7 @@ def run_forecast_loop():
         subprocess.call(["sudo","python3","forecast.py"])
         time.sleep(900)
 
+
 if __name__=="__main__":
     setLogLevel("info")
     net = Mininet(topo=InternetTopo(),
@@ -65,12 +66,19 @@ if __name__=="__main__":
                   controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
                   link=TCLink)
     net.start()
+
+    # NAT config
     nat = net.get('nat0')
     nat.configDefault()
+    nat.cmd("iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE")
+    nat.cmd("iptables -A FORWARD -i ens3 -o nat0-eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT")
+    nat.cmd("iptables -A FORWARD -o ens3 -i nat0-eth0 -j ACCEPT")
+    nat.cmd("ifconfig nat0-eth0 up")
 
 
-    # Tambahkan default route di r1 supaya forward ke NAT
+    # Router config
     r1 = net.get('r1')
+    r1.cmd("ifconfig r1-eth0 192.168.0.2/24 up")
     r1.cmd("ip route add default via 192.168.0.1")
 
     info("\n*** Testing internet from h1...\n")
@@ -83,3 +91,4 @@ if __name__=="__main__":
 
     CLI(net)
     net.stop()
+
