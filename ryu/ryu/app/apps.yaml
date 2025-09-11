@@ -13,6 +13,7 @@
 #   general:
 #     cidrs:
 #       - "0.0.0.0/0"
+# file: apps.yaml (update)
 apps:
   youtube:
     cidrs: ["youtube.com"]
@@ -20,8 +21,13 @@ apps:
     cidrs: ["netflix.com"]
   twitch:
     cidrs: ["twitch.tv"]
+  zoom:
+    cidrs: ["zoom.us"]
+  skype:
+    cidrs: ["skype.com"]
 categories:
   gaming:
     apps: ["twitch"]
   voip:
     apps: ["zoom", "skype"]
+

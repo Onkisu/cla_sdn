@@ -20,6 +20,9 @@ LOCAL_MAP = {
 }
 
 INTENT_LABELS = ["block", "allow", "prioritize", "throttle"]
+DEFAULT_UPLINK = os.environ.get("UPLINK_PORT", None)
+DNS_CACHE_TTL = 300  # 5 minutes
+_dns_cache = {}  # domain -> (timestamp, [ips])
 
 # --------------------------
 # UTIL
@@ -34,17 +37,36 @@ def parse_bandwidth(prompt: str):
     return val * factor[unit]
 
 def resolve_domain(domain: str):
-    if domain in LOCAL_MAP:
-        return [LOCAL_MAP[domain]]
+    now = time.time()
+    if domain in _dns_cache:
+        ts, ips = _dns_cache[domain]
+        if now - ts < DNS_CACHE_TTL:
+            return ips
+    # existing resolution
     try:
         import dns.resolver
         answers = dns.resolver.resolve(domain, 'A')
-        return [a.to_text() for a in answers]
-    except:
+        ips = [a.to_text() for a in answers]
+    except Exception:
         try:
-            return socket.gethostbyname_ex(domain)[2]
-        except:
-            return ["10.0.0.1"]
+            ips = socket.gethostbyname_ex(domain)[2]
+        except Exception:
+            ips = ["10.0.0.1"]
+    _dns_cache[domain] = (now, ips)
+    return ips
+    
+# def resolve_domain(domain: str):
+#     if domain in LOCAL_MAP:
+#         return [LOCAL_MAP[domain]]
+#     try:
+#         import dns.resolver
+#         answers = dns.resolver.resolve(domain, 'A')
+#         return [a.to_text() for a in answers]
+#     except:
+#         try:
+#             return socket.gethostbyname_ex(domain)[2]
+#         except:
+#             return ["10.0.0.1"]
 
 def expand_targets(word: str):
     """Return list of apps/cidrs from a target word (app or category)."""
@@ -176,9 +198,9 @@ def push_flows(flows):
 # --------------------------
 # MAIN API
 # --------------------------
-def translate_and_apply(prompt):
+def translate_and_apply(prompt, uplink_override=None):
     parsed = parse_prompt(prompt)
-    uplink = "s1-eth1"
+    uplink = uplink_override or DEFAULT_UPLINK or "s1-eth1"
 
     # QoS setup if throttle with bandwidth
     if parsed.get("bandwidth") and parsed["intent"] == "throttle":
