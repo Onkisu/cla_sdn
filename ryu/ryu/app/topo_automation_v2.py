@@ -22,11 +22,17 @@ class InternetTopo(Topo):
         # Router internal
         r1 = self.addNode('r1', cls=LinuxRouter, ip='10.0.0.254/24')
 
-        # NAT bawaan Mininet (langsung bridge ke host)
-        nat = self.addNode('nat0', cls=NAT, ip='10.255.0.1/24', inNamespace=False)
-        self.addLink(r1, nat, intfName1='r1-eth0', params1={'ip': '10.255.0.254/24'})
+        # NAT node with proper external interface
+        nat = self.addNode('nat0', cls=NAT, ip='10.255.0.1/24', 
+                          inNamespace=False,
+                          subnet='10.255.0.0/24')
+        
+        # Switch for NAT connection
+        s_nat = self.addSwitch('s99')
+        self.addLink(nat, s_nat)
+        self.addLink(r1, s_nat, intfName1='r1-eth0', params1={'ip': '10.255.0.254/24'})
 
-        # Switch
+        # Internal switches
         s1 = self.addSwitch('s1')
         s2 = self.addSwitch('s2')
         s3 = self.addSwitch('s3')
@@ -66,25 +72,31 @@ if __name__=="__main__":
     )
     net.start()
 
-    # Ambil objek NAT & router
+    # Get NAT and router objects
     nat = net.get('nat0')
     r1 = net.get('r1')
 
-    # Init NAT bawaan Mininet
+    # Configure NAT properly
     nat.configDefault()
 
-    # Pastikan router punya default route via NAT
+    # Set default route on router to NAT
+    r1.cmd("ip route del default 2>/dev/null || true")
     r1.cmd("ip route add default via 10.255.0.1")
 
-    # Set DNS di semua host supaya bisa resolve domain
+    # Add routes for internal networks on NAT
+    nat.cmd("ip route add 10.0.0.0/24 via 10.255.0.254")
+    nat.cmd("ip route add 10.0.1.0/24 via 10.255.0.254")
+    nat.cmd("ip route add 10.0.2.0/24 via 10.255.0.254")
+
+    # Set DNS on all hosts
     for hname in ("h1","h2","h3","h4","h5","h6","h7"):
         h = net.get(hname)
         h.cmd("bash -c 'echo \"nameserver 8.8.8.8\" > /etc/resolv.conf'")
 
-    # Mulai loop forecast di background
+    # Start forecast loop in background
     t = threading.Thread(target=run_forecast_loop, daemon=True)
     t.start()
 
-    # Masuk CLI
+    # Enter CLI
     CLI(net)
     net.stop()
