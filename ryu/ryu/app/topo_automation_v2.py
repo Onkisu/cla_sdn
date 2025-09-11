@@ -22,7 +22,7 @@ class InternetTopo(Topo):
         # Router internal
         r1 = self.addNode('r1', cls=LinuxRouter, ip='10.0.0.254/24')
 
-        # NAT node with proper external interface
+        # NAT node with proper external interface (using ens3)
         nat = self.addNode('nat0', cls=NAT, ip='10.255.0.1/24', 
                           inNamespace=False,
                           subnet='10.255.0.0/24')
@@ -76,9 +76,15 @@ if __name__=="__main__":
     nat = net.get('nat0')
     r1 = net.get('r1')
 
-    # Configure NAT properly
-    nat.configDefault()
-
+    # Configure NAT to use ens3 interface for external connectivity
+    nat.cmd('ifconfig nat0-eth0 down')
+    nat.cmd('ifconfig nat0-eth0 0')
+    nat.cmd('ovs-vsctl del-port s99 nat0-eth0')
+    nat.cmd('ovs-vsctl add-port s99 ens3')
+    
+    # Configure NAT IP on the bridge interface
+    nat.cmd('ifconfig s99 10.255.0.1/24 up')
+    
     # Set default route on router to NAT
     r1.cmd("ip route del default 2>/dev/null || true")
     r1.cmd("ip route add default via 10.255.0.1")
@@ -87,6 +93,14 @@ if __name__=="__main__":
     nat.cmd("ip route add 10.0.0.0/24 via 10.255.0.254")
     nat.cmd("ip route add 10.0.1.0/24 via 10.255.0.254")
     nat.cmd("ip route add 10.0.2.0/24 via 10.255.0.254")
+
+    # Enable IP forwarding on NAT
+    nat.cmd("sysctl -w net.ipv4.ip_forward=1")
+    
+    # Configure iptables for NAT
+    nat.cmd("iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE")
+    nat.cmd("iptables -A FORWARD -i ens3 -o s99 -m state --state RELATED,ESTABLISHED -j ACCEPT")
+    nat.cmd("iptables -A FORWARD -i s99 -o ens3 -j ACCEPT")
 
     # Set DNS on all hosts
     for hname in ("h1","h2","h3","h4","h5","h6","h7"):
