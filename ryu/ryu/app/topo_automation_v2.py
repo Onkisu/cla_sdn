@@ -9,7 +9,6 @@ from mininet.log import setLogLevel, info
 class LinuxRouter(Node):
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
-        # Enable IP forwarding
         self.cmd("sysctl -w net.ipv4.ip_forward=1")
 
     def terminate(self):
@@ -21,13 +20,13 @@ class VPSReadyTopo(Topo):
         # Router
         self.r1 = self.addNode('r1', cls=LinuxRouter)
 
-        # Internal switches
+        # Switch internal
         s1 = self.addSwitch('s1')
         s2 = self.addSwitch('s2')
         s3 = self.addSwitch('s3')
-        s99 = self.addSwitch('s99')  # switch untuk uplink
+        s99 = self.addSwitch('s99')  # uplink switch
 
-        # Internal hosts
+        # Hosts internal
         h1 = self.addHost('h1', ip='10.0.0.1/24', defaultRoute='via 10.0.0.254')
         h2 = self.addHost('h2', ip='10.0.0.2/24', defaultRoute='via 10.0.0.254')
         h3 = self.addHost('h3', ip='10.0.0.3/24', defaultRoute='via 10.0.0.254')
@@ -41,7 +40,7 @@ class VPSReadyTopo(Topo):
         self.addLink(h4, s2); self.addLink(h5, s2); self.addLink(h6, s2)
         self.addLink(h7, s3)
 
-        # Link router ke internal switch
+        # Link router ke internal switches
         self.addLink(self.r1, s1, intfName1='r1-eth1', params1={'ip':'10.0.0.254/24'})
         self.addLink(self.r1, s2, intfName1='r1-eth2', params1={'ip':'10.0.1.254/24'})
         self.addLink(self.r1, s3, intfName1='r1-eth3', params1={'ip':'10.0.2.254/24'})
@@ -50,16 +49,14 @@ class VPSReadyTopo(Topo):
         self.addLink(self.r1, s99, intfName1='r1-eth0', params1={'ip':'192.168.100.1/24'})
 
 def setup_internet_nat(router):
-    """
-    Konfigurasi NAT di r1 agar host internal bisa akses internet
-    """
+    """Konfigurasi NAT di router agar host internal bisa akses internet"""
     intf = router.uplink_intf
-    gw = router.uplink_gw
+    gw   = router.uplink_gw
 
     # Set default route di router
     router.cmd(f"ip route add default via {gw} dev {intf}")
 
-    # MASQUERADE semua subnet internal ke uplink
+    # MASQUERADE semua subnet internal
     router.cmd(f"iptables -t nat -A POSTROUTING -s 10.0.0.0/16 -o {intf} -j MASQUERADE")
 
     # Forward trafik untuk semua interface internal
@@ -80,9 +77,9 @@ if __name__ == "__main__":
     )
     net.start()
 
-    # Ambil router r1
+    # Ambil router
     r1 = net.get('r1')
-    # Set parameter uplink di Node (harus setelah net.get)
+    # Set parameter uplink
     r1.uplink_intf = 'ens3'
     r1.uplink_gw   = '10.171.241.1'
 
@@ -95,12 +92,23 @@ if __name__ == "__main__":
         h.cmd("bash -c 'echo \"nameserver 8.8.8.8\" > /etc/resolv.conf'")
         h.cmd("bash -c 'echo \"nameserver 8.8.4.4\" >> /etc/resolv.conf'")
 
-    # Test konektivitas internal & internet
+    # Mapping host -> IP router
+    router_ips = {
+        "h1": "10.0.0.254",
+        "h2": "10.0.0.254",
+        "h3": "10.0.0.254",
+        "h4": "10.0.1.254",
+        "h5": "10.0.1.254",
+        "h6": "10.0.1.254",
+        "h7": "10.0.2.254",
+    }
+
+    # Test ping router & internet
     info("*** Testing connectivity:\n")
-    for hname in ("h1","h4","h7"):
+    for hname in router_ips:
         h = net.get(hname)
         info(f"Ping router dari {hname}:\n")
-        info(h.cmd(f"ping -c 2 {r1.IP(hname[-1])}"))
+        info(h.cmd(f"ping -c 2 {router_ips[hname]}"))
         info(f"Ping internet dari {hname}:\n")
         info(h.cmd("ping -c 3 8.8.8.8"))
 
