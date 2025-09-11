@@ -126,8 +126,8 @@ if __name__=="__main__":
         h.cmd("bash -c 'echo \"nameserver 8.8.4.4\" >> /etc/resolv.conf'")
 
     # Start forecast loop in background
-    t = threading.Thread(target=run_forecast_loop, daemon=True)
-    t.start()
+    # t = threading.Thread(target=run_forecast_loop, daemon=True)
+    # t.start()
 
     # Test internet connectivity
     info("*** Testing internet connectivity...\n")
