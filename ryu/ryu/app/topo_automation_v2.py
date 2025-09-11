@@ -58,6 +58,19 @@ def run_forecast_loop():
         subprocess.call(["sudo","python3","forecast.py"])
         time.sleep(900)
 
+def detect_uplink_iface():
+    """Detect default uplink interface di host root"""
+    try:
+        out = subprocess.check_output(shlex.split("ip route | grep default")).decode()
+        parts = out.split()
+        if "dev" in parts:
+            i = parts.index("dev")
+            if i+1 < len(parts):
+                return parts[i+1]
+    except Exception:
+        pass
+    return "ens3"  # fallback
+
 if __name__=="__main__":
     setLogLevel("info")
     net = Mininet(topo=InternetTopo(),
@@ -70,38 +83,27 @@ if __name__=="__main__":
     nat = net.get('nat0')
     r1 = net.get('r1')
 
-    # init NAT node
+    # detect uplink interface host root
+    uplink_if = detect_uplink_iface()
+    print("Detected uplink interface:", uplink_if)
+
+    # init NAT node (Mininet namespace)
     nat.configDefault()
 
-        # enable IP forwarding di nat node (Mininet namespace)
+    # enable IP forwarding di NAT node
     nat.cmd("sysctl -w net.ipv4.ip_forward=1")
 
-    # MASQUERADE semua subnet internal Mininet melalui interface keluar nat
+    # MASQUERADE semua subnet internal Mininet via NAT node ke host root
     nat.cmd("iptables -t nat -A POSTROUTING -s 10.0.0.0/16 -o {} -j MASQUERADE".format(uplink_if))
 
     # forward rules di NAT node
     nat.cmd("iptables -A FORWARD -i nat0-eth0 -o {} -j ACCEPT".format(uplink_if))
     nat.cmd("iptables -A FORWARD -i {} -o nat0-eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT".format(uplink_if))
 
-
-    # deteksi interface uplink (di host asli)
-    def detect_uplink_iface():
-        try:
-            out = subprocess.check_output(shlex.split("ip route | grep default")).decode()
-            parts = out.split()
-            if "dev" in parts:
-                i = parts.index("dev")
-                if i+1 < len(parts):
-                    return parts[i+1]
-        except Exception:
-            pass
-        return "ens3"  # fallback
-    uplink_if = detect_uplink_iface()
-
-    # enable forwarding di host
+    # enable IP forwarding di host root
     subprocess.call(["sysctl", "-w", "net.ipv4.ip_forward=1"])
 
-    # iptables NAT di host
+    # iptables NAT di host root
     subprocess.call(["iptables", "-t", "nat", "-C", "POSTROUTING", "-o", uplink_if, "-j", "MASQUERADE"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) or \
     subprocess.call(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", uplink_if, "-j", "MASQUERADE"])
@@ -131,8 +133,7 @@ if __name__=="__main__":
         h = net.get(hname)
         h.cmd("bash -c 'echo \"nameserver 8.8.8.8\" > /etc/resolv.conf'")
 
-    print("NAT uplink interface:", uplink_if)
-    print("iptables MASQUERADE & FORWARD rules applied on host root.")
+    print("NAT & routing rules applied successfully.")
 
     # forecast loop background
     t = threading.Thread(target=run_forecast_loop, daemon=True)
