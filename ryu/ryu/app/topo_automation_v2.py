@@ -92,19 +92,24 @@ if __name__=="__main__":
         default_gw = "10.171.241.1"  # Fallback to typical gateway for this subnet
         info("*** Using fallback gateway: %s\n" % default_gw)
     
-    # Configure NAT with the correct gateway
+    # Configure NAT properly
+    # First, remove the Mininet NAT interface and connect to the host's network
+    nat.cmd('ifconfig nat0-eth0 0')
+    nat.cmd('dhclient ens3')  # Get IP from DHCP on the host interface
+    
+    # Configure NAT routing
     nat.cmd("ip route del default 2>/dev/null || true")
     nat.cmd("ip route add default via %s" % default_gw)
     
-    # Set up routing
-    # r1 needs to know how to reach the internal network
-    r1.cmd("ip route add 10.0.0.0/16 via 192.168.100.2")
+    # Add NAT interface to the OVS bridge
+    nat.cmd('ovs-vsctl add-port s99 ens3')
+    nat.cmd('ifconfig s99 10.171.241.201/24 up')
     
-    # r1 needs default route through NAT
+    # Set up routing
+    r1.cmd("ip route add 10.0.0.0/16 via 192.168.100.2")
     r1.cmd("ip route del default 2>/dev/null || true")
     r1.cmd("ip route add default via 10.171.241.201")
     
-    # r2 needs default route through r1
     r2.cmd("ip route del default 2>/dev/null || true")
     r2.cmd("ip route add default via 192.168.100.1")
     
@@ -114,13 +119,13 @@ if __name__=="__main__":
     # Enable IP forwarding on all routers
     r1.cmd("sysctl -w net.ipv4.ip_forward=1")
     r2.cmd("sysctl -w net.ipv4.ip_forward=1")
+    nat.cmd("sysctl -w net.ipv4.ip_forward=1")
     
     # Configure NAT iptables rules
-    nat.cmd("sysctl -w net.ipv4.ip_forward=1")
     nat.cmd("iptables -t nat -F")
-    nat.cmd("iptables -t nat -A POSTROUTING -o nat0-eth0 -j MASQUERADE")
-    nat.cmd("iptables -A FORWARD -i nat0-eth0 -o s99 -m state --state RELATED,ESTABLISHED -j ACCEPT")
-    nat.cmd("iptables -A FORWARD -i s99 -o nat0-eth0 -j ACCEPT")
+    nat.cmd("iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE")
+    nat.cmd("iptables -A FORWARD -i ens3 -o s99 -m state --state RELATED,ESTABLISHED -j ACCEPT")
+    nat.cmd("iptables -A FORWARD -i s99 -o ens3 -j ACCEPT")
     
     # Set DNS on all hosts
     for hname in ("h1","h2","h3","h4","h5","h6","h7"):
@@ -128,59 +133,39 @@ if __name__=="__main__":
         h.cmd("bash -c 'echo \"nameserver 8.8.8.8\" > /etc/resolv.conf'")
         h.cmd("bash -c 'echo \"nameserver 8.8.4.4\" >> /etc/resolv.conf'")
 
-    # Test connectivity between r2 and r1 first
-    info("*** Testing connectivity from r2 to r1:\n")
-    result = r2.cmd("ping -c 2 192.168.100.1")
+    # Test connectivity
+    info("*** Testing NAT internet connectivity:\n")
+    result = nat.cmd("ping -c 2 8.8.8.8")
     info(result)
     
     if "64 bytes" in result:
-        info("*** Connectivity between r2 and r1 is working!\n")
+        info("*** NAT has internet connectivity!\n")
         
-        # Test connectivity from r1 to NAT
-        info("*** Testing connectivity from r1 to NAT:\n")
-        result = r1.cmd("ping -c 2 10.171.241.201")
+        # Test connectivity from r1 through NAT
+        info("*** Testing connectivity from r1 through NAT:\n")
+        result = r1.cmd("ping -c 2 8.8.8.8")
         info(result)
         
         if "64 bytes" in result:
-            info("*** Connectivity from r1 to NAT is working!\n")
+            info("*** r1 has internet connectivity!\n")
             
-            # Test connectivity from NAT to gateway
-            info("*** Testing connectivity from NAT to gateway:\n")
-            result = nat.cmd("ping -c 2 %s" % default_gw)
+            # Test internet connectivity from host
+            info("*** Testing internet connectivity from host...\n")
+            result = net.get('h1').cmd('ping -c 3 8.8.8.8')
             info(result)
             
             if "64 bytes" in result:
-                info("*** Connectivity from NAT to gateway is working!\n")
-                
-                # Test internet connectivity from NAT
-                info("*** Testing internet connectivity from NAT:\n")
-                result = nat.cmd("ping -c 2 8.8.8.8")
-                info(result)
-                
-                if "64 bytes" in result:
-                    info("*** Internet connectivity from NAT is working!\n")
-                    
-                    # Test internet connectivity from host
-                    info("*** Testing internet connectivity from host...\n")
-                    result = net.get('h1').cmd('ping -c 3 8.8.8.8')
-                    info(result)
-                    
-                    if "64 bytes" in result:
-                        info("*** Internet connectivity is working!\n")
-                    else:
-                        info("*** Internet connectivity test failed from host\n")
-                else:
-                    info("*** Internet connectivity test failed from NAT\n")
+                info("*** Internet connectivity is working!\n")
             else:
-                info("*** Connectivity from NAT to gateway failed\n")
+                info("*** Internet connectivity test failed from host\n")
         else:
-            info("*** Connectivity from r1 to NAT failed\n")
+            info("*** Internet connectivity test failed from r1\n")
     else:
-        info("*** Connectivity between r2 and r1 failed\n")
+        info("*** NAT does not have internet connectivity\n")
 
     # Start forecast loop in background
-    # t = threading.Thread(target=run_forecast_loop, daemon=True)
-    # t.start()
+    t = threading.Thread(target=run_forecast_loop, daemon=True)
+    t.start()
 
     # Enter CLI
     CLI(net)
