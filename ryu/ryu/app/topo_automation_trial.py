@@ -19,13 +19,12 @@ class LinuxRouter(Node):
 class InternetTopo(Topo):
     def build(self):
         # Router internal
-        r1 = self.addNode('r1', cls=LinuxRouter, ip='192.168.100.1/24')
+        r1 = self.addNode('r1', cls=LinuxRouter)
 
-        # NAT ke VPS ens3
-        nat = self.addNode('nat0', cls=NAT, ip='192.168.100.254/24',
-                          inNamespace=False, inetIntf='ens3')
+        # NAT ke interface VPS (ganti ens3 kalau beda)
+        nat = self.addNode('nat0', cls=NAT, inNamespace=False, inetIntf='ens3')
 
-        # Switch untuk NAT & router
+        # Switch NAT & router
         s_nat = self.addSwitch('s99')
         self.addLink(nat, s_nat)
         self.addLink(r1, s_nat, intfName1='r1-eth0', params1={'ip': '192.168.100.1/24'})
@@ -66,24 +65,27 @@ if __name__=="__main__":
     r1 = net.get('r1')
     nat = net.get('nat0')
 
-    # Default route router ke NAT
+    # Set default route r1 → NAT
+    r1.cmd("ifconfig r1-eth0 192.168.100.1/24 up")
+    nat.cmd("ifconfig nat0-eth0 192.168.100.254/24 up")
     r1.cmd("ip route add default via 192.168.100.254")
 
-    # Enable IP forwarding & MASQUERADE di NAT
+    # NAT setup
     nat.cmd("sysctl -w net.ipv4.ip_forward=1")
     nat.cmd("iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE")
 
-    # Set DNS di semua host
+    # Set DNS untuk semua host
     for hname in ("h1","h2","h3","h4","h5","h6","h7"):
         h = net.get(hname)
         h.cmd("bash -c 'echo \"nameserver 8.8.8.8\" > /etc/resolv.conf'")
         h.cmd("bash -c 'echo \"nameserver 8.8.4.4\" >> /etc/resolv.conf'")
 
-    # Tes koneksi internal & NAT
+    # Test konektivitas host → NAT → Internet
+    info("*** Testing connectivity:\n")
     for hname in ("h1","h2","h3","h4","h5","h6","h7"):
         h = net.get(hname)
-        info(f"*** Testing {hname} ping 8.8.8.8\n")
-        info(h.cmd("ping -c 2 8.8.8.8"))
+        info(f"*** Ping 8.8.8.8 from {hname}\n")
+        print(h.cmd("ping -c 2 8.8.8.8"))
 
     CLI(net)
     net.stop()
