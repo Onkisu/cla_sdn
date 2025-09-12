@@ -7,24 +7,20 @@ import socket
 import yaml
 import json
 import os
+import ipaddress
 from datetime import datetime
 
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 RYU_REST = "http://127.0.0.1:8080"
 DPIDS = [1, 2, 3]
 
-# Cache counter terakhir → untuk delta
 last_bytes = {}
 last_pkts = {}
-
-# Cache ip→mac
 ip_mac_map = {}
 
-# Global mapping
-ip_app_map = {}
-port_app_map = {}
+ip_app_map = {}   # { "10.0.0.2/32": "youtube" }
+port_app_map = {} # { 443: "youtube" }
 
-# --- Load apps.yaml ---
 with open("apps.yaml") as f:
     apps_conf = yaml.safe_load(f)
 
@@ -33,24 +29,20 @@ CACHE_EXPIRE = 3600  # 1 jam
 
 
 def load_cache():
-    """Load IP mapping cache dari file JSON kalau masih valid."""
-    global ip_app_map
+    global ip_app_map, port_app_map
     if not os.path.exists(CACHE_FILE):
         return False
-
     try:
         with open(CACHE_FILE, "r") as f:
             data = json.load(f)
-
         ts_saved = data.get("_timestamp", 0)
         age = time.time() - ts_saved
-
         if age > CACHE_EXPIRE:
-            print(f"[INFO] Cache expired ({int(age)}s), akan refresh ulang.")
+            print(f"[INFO] Cache expired ({int(age)}s), refresh ulang.")
             return False
-
         ip_app_map.update(data.get("ip_app_map", {}))
-        print(f"[INFO] Cache {CACHE_FILE} diload ({len(ip_app_map)} entries, age={int(age)}s).")
+        port_app_map.update({int(k): v for k, v in data.get("port_app_map", {}).items()})
+        print(f"[INFO] Cache diload: {len(ip_app_map)} IP, {len(port_app_map)} ports.")
         return True
     except Exception as e:
         print(f"[WARN] Gagal load cache: {e}", file=sys.stderr)
@@ -58,41 +50,67 @@ def load_cache():
 
 
 def save_cache():
-    """Simpan IP mapping cache ke file JSON."""
     try:
         data = {
             "_timestamp": time.time(),
-            "ip_app_map": ip_app_map
+            "ip_app_map": ip_app_map,
+            "port_app_map": port_app_map
         }
         with open(CACHE_FILE, "w") as f:
             json.dump(data, f, indent=2)
-        print(f"[INFO] Cache {CACHE_FILE} disimpan.")
+        print(f"[INFO] Cache disimpan.")
     except Exception as e:
         print(f"[WARN] Gagal simpan cache: {e}", file=sys.stderr)
 
 
 def refresh_ip_mapping():
-    """Resolve domain di apps.yaml ke IP address (auto-refresh + cache)."""
     global ip_app_map, port_app_map
     ip_app_map = {}
     port_app_map = {}
 
     for app_name, conf in apps_conf.get("apps", {}).items():
-        # Resolve domain → IP list
-        for domain in conf.get("cidrs", []):
-            try:
-                ips = socket.gethostbyname_ex(domain)[2]
-                for ip in ips:
-                    ip_app_map[ip] = app_name
-            except Exception as e:
-                print(f"[WARN] DNS resolve gagal untuk {domain}: {e}", file=sys.stderr)
+        for item in conf.get("cidrs", []):
+            if "/" in item or item.replace(".", "").isdigit():
+                # langsung IP atau CIDR
+                ip_app_map[item] = app_name
+            else:
+                # coba resolve domain
+                try:
+                    ips = socket.gethostbyname_ex(item)[2]
+                    for ip in ips:
+                        ip_app_map[f"{ip}/32"] = app_name
+                except Exception as e:
+                    print(f"[WARN] DNS gagal {item}: {e}", file=sys.stderr)
 
-        # Map ports → app
         for port in conf.get("ports", []):
-            port_app_map[port] = app_name
+            try:
+                port_app_map[int(port)] = app_name
+            except Exception:
+                continue
 
     save_cache()
-    print(f"[INFO] Mapping di-refresh. {len(ip_app_map)} IP, {len(port_app_map)} ports.")
+    print(f"[INFO] Mapping di-refresh: {len(ip_app_map)} IP/CIDR, {len(port_app_map)} ports.")
+
+
+def match_app(src_ip, dst_ip, tp_src, tp_dst):
+    app = "unknown"
+    # cek IP mapping (pakai ipaddress)
+    for net, app_name in ip_app_map.items():
+        try:
+            if src_ip and ipaddress.ip_address(src_ip) in ipaddress.ip_network(net):
+                return app_name
+            if dst_ip and ipaddress.ip_address(dst_ip) in ipaddress.ip_network(net):
+                return app_name
+        except Exception:
+            continue
+
+    # cek port mapping
+    if tp_src in port_app_map:
+        return port_app_map[tp_src]
+    if tp_dst in port_app_map:
+        return port_app_map[tp_dst]
+
+    return app
 
 
 def collect_flows():
@@ -121,56 +139,33 @@ def collect_flows():
             tp_src = int(match.get("tcp_src") or match.get("udp_src") or 0)
             tp_dst = int(match.get("tcp_dst") or match.get("udp_dst") or 0)
 
+            if not src_ip and not dst_ip:
+                continue
 
-            # update cache ip->mac
             if src_ip and src_mac:
                 ip_mac_map[src_ip] = src_mac
             if dst_ip and dst_mac:
                 ip_mac_map[dst_ip] = dst_mac
-
-            # fallback mac
             if not src_mac and src_ip in ip_mac_map:
                 src_mac = ip_mac_map[src_ip]
             if not dst_mac and dst_ip in ip_mac_map:
                 dst_mac = ip_mac_map[dst_ip]
 
-            if not src_ip and not dst_ip:
-                continue
-
-            # Identifikasi host & app
             host = src_ip or dst_ip or "unknown"
-            app = "unknown"
+            app = match_app(src_ip, dst_ip, tp_src, tp_dst)
 
-            # Cek berdasarkan IP
-            if src_ip in ip_app_map:
-                app = ip_app_map[src_ip]
-            elif dst_ip in ip_app_map:
-                app = ip_app_map[dst_ip]
-
-            # Cek berdasarkan port kalau masih unknown
-            if app == "unknown":
-                if tp_src in port_app_map:
-                    app = port_app_map[tp_src]
-                elif tp_dst in port_app_map:
-                    app = port_app_map[tp_dst]
-
-            # Protokol
             ip_proto = match.get("ip_proto", 0)
             proto = {6: "tcp", 17: "udp"}.get(ip_proto, "any")
 
-            # Counter kumulatif
             bytes_count = flow.get("byte_count", 0)
             pkts_count = flow.get("packet_count", 0)
-
-            # Key unik delta
             key = (dpid, src_ip, dst_ip, proto)
-
             delta_bytes = bytes_count - last_bytes.get(key, 0)
             delta_pkts = pkts_count - last_pkts.get(key, 0)
-
-            # Update cache counter
             last_bytes[key] = bytes_count
             last_pkts[key] = pkts_count
+
+            print(f"[DBG] dpid={dpid}, src={src_ip}:{tp_src}, dst={dst_ip}:{tp_dst}, app={app}")
 
             if delta_bytes > 0 or delta_pkts > 0:
                 rows.append((
@@ -204,14 +199,11 @@ def insert_pg(rows):
 
 
 if __name__ == "__main__":
-    # load cache kalau masih valid, kalau tidak refresh DNS
     if not load_cache():
         refresh_ip_mapping()
-
     last_refresh = time.time()
 
     while True:
-        # Refresh mapping tiap 600 detik (10 menit)
         if time.time() - last_refresh > 600:
             refresh_ip_mapping()
             last_refresh = time.time()
@@ -219,7 +211,7 @@ if __name__ == "__main__":
         rows = collect_flows()
         if rows:
             insert_pg(rows)
-            print(f"{len(rows)} baris dimasukkan.", file=sys.stderr)
+            print(f"{len(rows)} baris masuk DB.", file=sys.stderr)
         else:
             print("Tidak ada delta baru.", file=sys.stderr)
 
