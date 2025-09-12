@@ -5,13 +5,42 @@ from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet, ether_types, ipv4, arp, tcp, udp
+import json
+from webob import Response
+from ryu.app.wsgi import ControllerBase, WSGIApplication, route
+
+# Create a simple REST API for the collector to get mappings
+class MappingController(ControllerBase):
+    def __init__(self, req, link, data, **config):
+        super(MappingController, self).__init__(req, link, data, **config)
+        self.controller_app = data['controller_app']
+
+    @route('mappings', '/ip_mac_map', methods=['GET'])
+    def get_ip_mac_map(self, req, **kwargs):
+        body = json.dumps(self.controller_app.get_ip_mac_map())
+        return Response(content_type='application/json', body=body)
+
+    @route('mappings', '/mac_ip_map', methods=['GET'])
+    def get_mac_ip_map(self, req, **kwargs):
+        body = json.dumps(self.controller_app.get_mac_ip_map())
+        return Response(content_type='application/json', body=body)
 
 class CollectorFriendlyController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
+    _CONTEXTS = {
+        'wsgi': WSGIApplication
+    }
+
     def __init__(self, *args, **kwargs):
         super(CollectorFriendlyController, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
+        self.ip_mac_map = {}  # Store IP to MAC mapping
+        self.mac_ip_map = {}  # Store MAC to IP mapping
+        
+        # Setup REST API
+        wsgi = kwargs['wsgi']
+        wsgi.register(MappingController, {'controller_app': self})
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -58,7 +87,7 @@ class CollectorFriendlyController(app_manager.RyuApp):
         dpid = format(datapath.id, "d").zfill(16)
         self.mac_to_port.setdefault(dpid, {})
 
-        # Learn MAC
+        # Learn MAC address to port mapping
         self.mac_to_port[dpid][src] = in_port
 
         # Determine output port
@@ -66,9 +95,15 @@ class CollectorFriendlyController(app_manager.RyuApp):
 
         actions = [parser.OFPActionOutput(out_port)]
 
-        # Process ARP packets
+        # Process ARP packets - LEARN IP-MAC MAPPING
         arp_pkt = pkt.get_protocol(arp.arp)
         if arp_pkt:
+            # LEARN IP-MAC MAPPING FROM ARP PACKETS
+            self.ip_mac_map[arp_pkt.src_ip] = src
+            self.mac_ip_map[src] = arp_pkt.src_ip
+            if arp_pkt.dst_ip in self.ip_mac_map:
+                self.mac_ip_map[dst] = arp_pkt.dst_ip
+            
             match = parser.OFPMatch(
                 eth_type=0x0806,
                 arp_spa=arp_pkt.src_ip,
@@ -81,15 +116,20 @@ class CollectorFriendlyController(app_manager.RyuApp):
             # Process IPv4 packets
             ip_pkt = pkt.get_protocol(ipv4.ipv4)
             if ip_pkt:
+                # LEARN IP-MAC MAPPING FROM IP PACKETS TOO
+                if ip_pkt.src not in self.ip_mac_map:
+                    self.ip_mac_map[ip_pkt.src] = src
+                    self.mac_ip_map[src] = ip_pkt.src
+                if ip_pkt.dst in self.ip_mac_map and dst not in self.mac_ip_map:
+                    self.mac_ip_map[dst] = ip_pkt.dst
+
                 # Extract transport layer information (TCP/UDP)
                 tcp_pkt = pkt.get_protocol(tcp.tcp)
                 udp_pkt = pkt.get_protocol(udp.udp)
                 
-                # Build match dictionary
+                # Build match dictionary with CORRECT DIRECTION
                 match_dict = {
                     'eth_type': 0x0800,
-                    'eth_src': src,
-                    'eth_dst': dst,
                     'ipv4_src': ip_pkt.src,
                     'ipv4_dst': ip_pkt.dst,
                     'ip_proto': ip_pkt.proto
@@ -102,6 +142,12 @@ class CollectorFriendlyController(app_manager.RyuApp):
                 elif udp_pkt:
                     match_dict['udp_src'] = udp_pkt.src_port
                     match_dict['udp_dst'] = udp_pkt.dst_port
+                
+                # Add MAC addresses if known (for collector)
+                if ip_pkt.src in self.ip_mac_map:
+                    match_dict['eth_src'] = self.ip_mac_map[ip_pkt.src]
+                if ip_pkt.dst in self.ip_mac_map:
+                    match_dict['eth_dst'] = self.ip_mac_map[ip_pkt.dst]
                 
                 match = parser.OFPMatch(**match_dict)
                 self.add_flow(datapath, 1, match, actions)
@@ -127,3 +173,11 @@ class CollectorFriendlyController(app_manager.RyuApp):
             data=data
         )
         datapath.send_msg(out)
+
+    # Method to get IP-MAC mapping for collector
+    def get_ip_mac_map(self):
+        return self.ip_mac_map
+
+    # Method to get MAC-IP mapping for collector  
+    def get_mac_ip_map(self):
+        return self.mac_ip_map

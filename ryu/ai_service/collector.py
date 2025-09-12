@@ -28,7 +28,7 @@ with open("apps.yaml") as f:
 CACHE_FILE = "ip_cache.json"
 CACHE_EXPIRE = 3600  # 1 jam
 
-# For synthetic data generation (remove in production)
+# For synthetic data generation
 app_latency_ranges = {
     "youtube": (20, 60),
     "netflix": (25, 70), 
@@ -42,6 +42,16 @@ app_loss_ranges = {
     "twitch": (0, 2),
     "unknown": (0, 10)
 }
+
+def get_controller_mappings():
+    """Get IP-MAC mappings from Ryu controller"""
+    try:
+        response = requests.get(f"{RYU_REST}/ip_mac_map", timeout=3)
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        print(f"Failed to get controller mappings: {e}")
+    return {}
 
 def load_cache():
     global ip_app_map, port_app_map
@@ -146,6 +156,10 @@ def collect_flows():
     rows = []
     ts = datetime.now()
 
+    # Get latest IP-MAC mappings from controller
+    global ip_mac_map
+    ip_mac_map.update(get_controller_mappings())
+
     for dpid in DPIDS:
         try:
             t0 = time.time()
@@ -168,19 +182,25 @@ def collect_flows():
             tp_src = int(match.get("tcp_src") or match.get("udp_src") or 0)
             tp_dst = int(match.get("tcp_dst") or match.get("udp_dst") or 0)
 
-            if not src_ip and not dst_ip:
-                continue
+            if not src_ip or not dst_ip:
+                continue  # Skip flows without both IPs
 
-            if src_ip and src_mac:
-                ip_mac_map[src_ip] = src_mac
-            if dst_ip and dst_mac:
-                ip_mac_map[dst_ip] = dst_mac
+            # Get MAC addresses from mapping if not in flow
             if not src_mac and src_ip in ip_mac_map:
                 src_mac = ip_mac_map[src_ip]
             if not dst_mac and dst_ip in ip_mac_map:
                 dst_mac = ip_mac_map[dst_ip]
 
-            host = src_ip or dst_ip or "unknown"
+            # Determine host based on network topology
+            # Clients: 10.0.0.0/24, Servers: 10.0.1.0/24 and 10.0.2.0/24
+            if src_ip.startswith('10.0.0.'):
+                host = src_ip  # Client is the source
+            elif dst_ip.startswith('10.0.0.'):
+                host = dst_ip  # Client is the destination  
+            else:
+                host = src_ip  # Fallback
+
+            # Proper application matching
             app_name = match_app(src_ip, dst_ip, tp_src, tp_dst)
 
             ip_proto = match.get("ip_proto", 0)
@@ -197,9 +217,9 @@ def collect_flows():
             pkts_rx = max(0, int(total_pkts * (1 - loss_percent / 100)))
             
             key = (dpid, src_ip, dst_ip, proto)
-            delta_bytes = bytes_count - last_bytes.get(key, 0)
-            delta_pkts_tx = pkts_tx - last_pkts.get(key, (0, 0))[0]
-            delta_pkts_rx = pkts_rx - last_pkts.get(key, (0, 0))[1]
+            delta_bytes = max(0, bytes_count - last_bytes.get(key, 0))
+            delta_pkts_tx = max(0, pkts_tx - last_pkts.get(key, (0, 0))[0])
+            delta_pkts_rx = max(0, pkts_rx - last_pkts.get(key, (0, 0))[1])
             
             last_bytes[key] = bytes_count
             last_pkts[key] = (pkts_tx, pkts_rx)
