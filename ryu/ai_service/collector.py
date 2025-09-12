@@ -8,6 +8,7 @@ import yaml
 import json
 import os
 import ipaddress
+import random
 from datetime import datetime
 
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
@@ -27,6 +28,20 @@ with open("apps.yaml") as f:
 CACHE_FILE = "ip_cache.json"
 CACHE_EXPIRE = 3600  # 1 jam
 
+# For synthetic data generation (remove in production)
+app_latency_ranges = {
+    "youtube": (20, 60),
+    "netflix": (25, 70), 
+    "twitch": (15, 50),
+    "unknown": (30, 100)
+}
+
+app_loss_ranges = {
+    "youtube": (0, 3),
+    "netflix": (0, 5),
+    "twitch": (0, 2),
+    "unknown": (0, 10)
+}
 
 def load_cache():
     global ip_app_map, port_app_map
@@ -48,7 +63,6 @@ def load_cache():
         print(f"[WARN] Gagal load cache: {e}", file=sys.stderr)
         return False
 
-
 def save_cache():
     try:
         data = {
@@ -62,7 +76,6 @@ def save_cache():
     except Exception as e:
         print(f"[WARN] Gagal simpan cache: {e}", file=sys.stderr)
 
-
 def refresh_ip_mapping():
     global ip_app_map, port_app_map
     ip_app_map = {}
@@ -71,10 +84,8 @@ def refresh_ip_mapping():
     for app_name, conf in apps_conf.get("apps", {}).items():
         for item in conf.get("cidrs", []):
             if "/" in item or item.replace(".", "").isdigit():
-                # langsung IP atau CIDR
                 ip_app_map[item] = app_name
             else:
-                # coba resolve domain
                 try:
                     ips = socket.gethostbyname_ex(item)[2]
                     for ip in ips:
@@ -91,20 +102,29 @@ def refresh_ip_mapping():
     save_cache()
     print(f"[INFO] Mapping di-refresh: {len(ip_app_map)} IP/CIDR, {len(port_app_map)} ports.")
 
-
 def match_app(src_ip, dst_ip, tp_src, tp_dst):
     app = "unknown"
-    # cek IP mapping (pakai ipaddress)
+    
+    # Clean IP addresses (remove subnet mask if present)
+    def clean_ip(ip):
+        if ip and '/' in ip:
+            return ip.split('/')[0]
+        return ip
+    
+    clean_src_ip = clean_ip(src_ip)
+    clean_dst_ip = clean_ip(dst_ip)
+    
+    # Check IP mapping
     for net, app_name in ip_app_map.items():
         try:
-            if src_ip and ipaddress.ip_address(src_ip) in ipaddress.ip_network(net):
+            if clean_src_ip and ipaddress.ip_address(clean_src_ip) in ipaddress.ip_network(net):
                 return app_name
-            if dst_ip and ipaddress.ip_address(dst_ip) in ipaddress.ip_network(net):
+            if clean_dst_ip and ipaddress.ip_address(clean_dst_ip) in ipaddress.ip_network(net):
                 return app_name
         except Exception:
             continue
 
-    # cek port mapping
+    # Check port mapping
     if tp_src in port_app_map:
         return port_app_map[tp_src]
     if tp_dst in port_app_map:
@@ -112,6 +132,15 @@ def match_app(src_ip, dst_ip, tp_src, tp_dst):
 
     return app
 
+def get_synthetic_metrics(app):
+    """Generate synthetic latency and loss metrics for testing"""
+    latency_range = app_latency_ranges.get(app, app_latency_ranges["unknown"])
+    loss_range = app_loss_ranges.get(app, app_loss_ranges["unknown"])
+    
+    latency_ms = random.uniform(latency_range[0], latency_range[1])
+    loss_percent = random.uniform(loss_range[0], loss_range[1])
+    
+    return latency_ms, loss_percent
 
 def collect_flows():
     rows = []
@@ -121,7 +150,7 @@ def collect_flows():
         try:
             t0 = time.time()
             res = requests.get(f"{RYU_REST}/stats/flow/{dpid}", timeout=5).json()
-            latency_ms = round((time.time() - t0) * 1000, 2)
+            api_latency_ms = round((time.time() - t0) * 1000, 2)
         except Exception as e:
             print(f"Error fetch dpid {dpid}: {e}", file=sys.stderr)
             continue
@@ -152,31 +181,42 @@ def collect_flows():
                 dst_mac = ip_mac_map[dst_ip]
 
             host = src_ip or dst_ip or "unknown"
-            app = match_app(src_ip, dst_ip, tp_src, tp_dst)
+            app_name = match_app(src_ip, dst_ip, tp_src, tp_dst)
 
             ip_proto = match.get("ip_proto", 0)
             proto = {6: "tcp", 17: "udp"}.get(ip_proto, "any")
 
             bytes_count = flow.get("byte_count", 0)
-            pkts_count = flow.get("packet_count", 0)
+            total_pkts = flow.get("packet_count", 0)
+            
+            # Generate synthetic metrics for forecast system
+            network_latency_ms, loss_percent = get_synthetic_metrics(app_name)
+            
+            # Calculate packet loss based on loss percentage
+            pkts_tx = total_pkts
+            pkts_rx = max(0, int(total_pkts * (1 - loss_percent / 100)))
+            
             key = (dpid, src_ip, dst_ip, proto)
             delta_bytes = bytes_count - last_bytes.get(key, 0)
-            delta_pkts = pkts_count - last_pkts.get(key, 0)
+            delta_pkts_tx = pkts_tx - last_pkts.get(key, (0, 0))[0]
+            delta_pkts_rx = pkts_rx - last_pkts.get(key, (0, 0))[1]
+            
             last_bytes[key] = bytes_count
-            last_pkts[key] = pkts_count
+            last_pkts[key] = (pkts_tx, pkts_rx)
 
-            print(f"[DBG] dpid={dpid}, src={src_ip}:{tp_src}, dst={dst_ip}:{tp_dst}, app={app}")
+            print(f"[DBG] dpid={dpid}, src={src_ip}:{tp_src}, dst={dst_ip}:{tp_dst}, app={app_name}, "
+                  f"latency={network_latency_ms:.2f}ms, loss={loss_percent:.2f}%")
 
-            if delta_bytes > 0 or delta_pkts > 0:
+            if delta_bytes > 0 or delta_pkts_tx > 0 or delta_pkts_rx > 0:
                 rows.append((
-                    ts, dpid, host, app, proto,
+                    ts, dpid, host, app_name, proto,
                     src_ip, dst_ip, src_mac, dst_mac,
-                    delta_bytes, delta_bytes, delta_pkts, delta_pkts,
-                    latency_ms
+                    delta_bytes, delta_bytes,  # bytes_tx, bytes_rx
+                    delta_pkts_tx, delta_pkts_rx,  # pkts_tx, pkts_rx
+                    network_latency_ms  # network latency for forecast
                 ))
 
     return rows
-
 
 def insert_pg(rows):
     try:
@@ -197,7 +237,6 @@ def insert_pg(rows):
     except Exception as e:
         print(f"DB error: {e}", file=sys.stderr)
 
-
 if __name__ == "__main__":
     if not load_cache():
         refresh_ip_mapping()
@@ -211,7 +250,7 @@ if __name__ == "__main__":
         rows = collect_flows()
         if rows:
             insert_pg(rows)
-            print(f"{len(rows)} baris masuk DB.", file=sys.stderr)
+            print(f"{len(rows)} baris masuk DB dengan metrics untuk forecast.", file=sys.stderr)
         else:
             print("Tidak ada delta baru.", file=sys.stderr)
 
