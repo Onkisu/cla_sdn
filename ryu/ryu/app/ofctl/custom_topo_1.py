@@ -4,8 +4,7 @@ from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
-from ryu.lib.packet import ethernet, ether_types, ipv4, arp
-
+from ryu.lib.packet import ethernet, ether_types, ipv4, arp, tcp, udp
 
 class CollectorFriendlyController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -82,16 +81,29 @@ class CollectorFriendlyController(app_manager.RyuApp):
             # Process IPv4 packets
             ip_pkt = pkt.get_protocol(ipv4.ipv4)
             if ip_pkt:
-                # FIX: Remove in_port from match to allow bidirectional traffic flow.
-                # A rule specific to the in_port will not match return packets.
-                match = parser.OFPMatch(
-                    eth_type=0x0800,
-                    eth_src=src,
-                    eth_dst=dst,
-                    ipv4_src=ip_pkt.src,
-                    ipv4_dst=ip_pkt.dst,
-                    ip_proto=ip_pkt.proto
-                )
+                # Extract transport layer information (TCP/UDP)
+                tcp_pkt = pkt.get_protocol(tcp.tcp)
+                udp_pkt = pkt.get_protocol(udp.udp)
+                
+                # Build match dictionary
+                match_dict = {
+                    'eth_type': 0x0800,
+                    'eth_src': src,
+                    'eth_dst': dst,
+                    'ipv4_src': ip_pkt.src,
+                    'ipv4_dst': ip_pkt.dst,
+                    'ip_proto': ip_pkt.proto
+                }
+                
+                # Add transport layer ports if available
+                if tcp_pkt:
+                    match_dict['tcp_src'] = tcp_pkt.src_port
+                    match_dict['tcp_dst'] = tcp_pkt.dst_port
+                elif udp_pkt:
+                    match_dict['udp_src'] = udp_pkt.src_port
+                    match_dict['udp_dst'] = udp_pkt.dst_port
+                
+                match = parser.OFPMatch(**match_dict)
                 self.add_flow(datapath, 1, match, actions)
             else:
                 # Non-IP, fallback to L2 only
