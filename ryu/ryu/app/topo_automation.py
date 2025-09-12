@@ -44,7 +44,7 @@ class ComplexTopo(Topo):
         self.addLink(h7, s3, bw=2, delay='50ms', loss=2)
 
         # Link router ke masing-masing switch (gateway tiap subnet)
-        self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip': '10.0.0.254/24'})
+        self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip': '10.0.0.254/24'}) 
         self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
         self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
 
@@ -55,9 +55,9 @@ def start_traffic(net):
     h7 = net.get('h7')
 
     info("*** Starting iperf servers\n")
-    h4.cmd("iperf -s -u -p 443 &") 
-    h5.cmd("iperf -s -u -p 443 &") 
-    h7.cmd("iperf -u -s -p 1935 &") 
+    h4.cmd("iperf -s -u -p 443 &") # youtube
+    h5.cmd("iperf -s -u -p 443 &")  # netflix
+    h7.cmd("iperf -u -s -p 1935 &") # twich
 
     info("*** Starting iperf clients\n")
     h1.cmd("bash -c 'while true; do iperf -u -c 10.0.1.1 -p 443 -b 4M -t 10 -i 5; sleep 1; done &'")

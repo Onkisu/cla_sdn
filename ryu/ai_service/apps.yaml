@@ -29,25 +29,20 @@
 
 apps:
   youtube:
-    cidrs: ["youtube.com"]
+    cidrs: ["10.0.1.1/32"]
     ports: [443]
   netflix:
-    cidrs: ["netflix.com"]
+    cidrs: ["10.0.1.2/32"]
     ports: [443]
   twitch:
-    cidrs: ["twitch.tv"]
-    ports: [1935, 443]
-  zoom:
-    cidrs: ["zoom.us"]
-    ports: [8801, 8802, 443]
-  skype:
-    cidrs: ["skype.com"]
-    ports: [3478, 3479, 3480, 443]
+    cidrs: ["10.0.2.1/32"]
+    ports: [1935]
 
 categories:
+  streaming:
+    apps: ["youtube", "netflix"]
   gaming:
     apps: ["twitch"]
-  voip:
-    apps: ["zoom", "skype"]
+
 
 
