@@ -30,14 +30,20 @@
 apps:
   youtube:
     cidrs: ["youtube.com"]
+    ports: [443]
   netflix:
     cidrs: ["netflix.com"]
+    ports: [443]
   twitch:
     cidrs: ["twitch.tv"]
+    ports: [1935, 443]
   zoom:
     cidrs: ["zoom.us"]
+    ports: [8801, 8802, 443]
   skype:
     cidrs: ["skype.com"]
+    ports: [3478, 3479, 3480, 443]
+
 categories:
   gaming:
     apps: ["twitch"]
