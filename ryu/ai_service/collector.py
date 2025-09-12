@@ -118,8 +118,9 @@ def collect_flows():
             dst_ip = match.get("ipv4_dst") or match.get("nw_dst")
             src_mac = match.get("eth_src")
             dst_mac = match.get("eth_dst")
-            tp_src = match.get("tcp_src") or match.get("udp_src")
-            tp_dst = match.get("tcp_dst") or match.get("udp_dst")
+            tp_src = int(match.get("tcp_src") or match.get("udp_src") or 0)
+            tp_dst = int(match.get("tcp_dst") or match.get("udp_dst") or 0)
+
 
             # update cache ip->mac
             if src_ip and src_mac:
