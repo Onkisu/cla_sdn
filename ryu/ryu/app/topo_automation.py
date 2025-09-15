@@ -7,6 +7,7 @@ from mininet.cli import CLI
 from mininet.log import setLogLevel, info
 import time
 import subprocess
+import threading
 
 class LinuxRouter(Node):
     def config(self, **params):
@@ -40,7 +41,7 @@ class ComplexTopo(Topo):
 
         # Link hosts ke switch
         self.addLink(h1, s1, bw=5); self.addLink(h2, s1, bw=5); self.addLink(h3, s1, bw=5)
-        self.addLink(h4, s2, bw=10, delay = '32ms' ,loss =2); self.addLink(h5, s2, bw=10, delay='47ms',loss =2); self.addLink(h6, s2, bw=10)
+        self.addLink(h4, s2, bw=10, delay='32ms', loss=2); self.addLink(h5, s2, bw=10, delay='47ms', loss=2); self.addLink(h6, s2, bw=10)
         self.addLink(h7, s3, bw=2, delay='50ms', loss=2)
 
         # Link router ke masing-masing switch (gateway tiap subnet)
@@ -55,23 +56,32 @@ def start_traffic(net):
     h7 = net.get('h7')
 
     info("*** Starting iperf servers\n")
-    h4.cmd("iperf -s -u -p 443 &") # youtube
-    h5.cmd("iperf -s -u -p 443 &")  # netflix
-    h7.cmd("iperf -u -s -p 1935 &") # twich
+    # YouTube server
+    h4.cmd("iperf -s -u -p 443 &")
+    # Netflix server  
+    h5.cmd("iperf -s -u -p 443 &")
+    # Twitch server
+    h7.cmd("iperf -u -s -p 1935 &")
 
     info("*** Starting iperf clients\n")
+    # YouTube client
     h1.cmd("bash -c 'while true; do iperf -u -c 10.0.1.1 -p 443 -b 4M -t 10 -i 5; sleep 1; done &'")
+    # Netflix client
     h2.cmd("bash -c 'while true; do iperf -u -c 10.0.1.2 -p 443 -b 2M -t 10 -i 5; sleep 1; done &'")
+    # Twitch client
     h3.cmd("bash -c 'while true; do iperf -u -c 10.0.2.1 -p 1935 -b 1M -t 10 -i 5; sleep 1; done &'")
 
 def run_forecast_loop():
     """Loop tiap 15 menit panggil forecast.py"""
     while True:
         info("\n*** Running AI Forecast...\n")
-        subprocess.call(["sudo","python3", "forecast.py"])
+        try:
+            subprocess.call(["sudo", "python3", "forecast.py"])
+        except Exception as e:
+            info(f"*** Forecast error: {e}\n")
         time.sleep(900)  # 15 menit
 
-if __name__=="__main__":
+if __name__ == "__main__":
     setLogLevel("info")
     net = Mininet(topo=ComplexTopo(),
                   switch=OVSSwitch,
@@ -83,7 +93,6 @@ if __name__=="__main__":
     start_traffic(net)
 
     # jalanin forecast loop di background
-    import threading
     t = threading.Thread(target=run_forecast_loop, daemon=True)
     t.start()
 

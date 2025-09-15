@@ -101,25 +101,23 @@ class CollectorFriendlyController(app_manager.RyuApp):
             # LEARN IP-MAC MAPPING FROM ARP PACKETS
             self.ip_mac_map[arp_pkt.src_ip] = src
             self.mac_ip_map[src] = arp_pkt.src_ip
-            if arp_pkt.dst_ip in self.ip_mac_map:
+            if arp_pkt.opcode == arp.ARP_REPLY and arp_pkt.dst_ip in self.ip_mac_map:
                 self.mac_ip_map[dst] = arp_pkt.dst_ip
             
+            # Install ARP flow
             match = parser.OFPMatch(
-                eth_type=0x0806,
+                eth_type=ether_types.ETH_TYPE_ARP,
                 arp_spa=arp_pkt.src_ip,
-                arp_tpa=arp_pkt.dst_ip,
-                eth_src=src,
-                eth_dst=dst
+                arp_tpa=arp_pkt.dst_ip
             )
             self.add_flow(datapath, 1, match, actions)
         else:
             # Process IPv4 packets
             ip_pkt = pkt.get_protocol(ipv4.ipv4)
             if ip_pkt:
-                # LEARN IP-MAC MAPPING FROM IP PACKETS TOO
+                # LEARN IP-MAC MAPPING FROM IP PACKETS
                 if ip_pkt.src not in self.ip_mac_map:
                     self.ip_mac_map[ip_pkt.src] = src
-                    self.mac_ip_map[src] = ip_pkt.src
                 if ip_pkt.dst in self.ip_mac_map and dst not in self.mac_ip_map:
                     self.mac_ip_map[dst] = ip_pkt.dst
 
@@ -127,9 +125,9 @@ class CollectorFriendlyController(app_manager.RyuApp):
                 tcp_pkt = pkt.get_protocol(tcp.tcp)
                 udp_pkt = pkt.get_protocol(udp.udp)
                 
-                # Build match dictionary with CORRECT DIRECTION
+                # Build match for IPv4 flow
                 match_dict = {
-                    'eth_type': 0x0800,
+                    'eth_type': ether_types.ETH_TYPE_IP,
                     'ipv4_src': ip_pkt.src,
                     'ipv4_dst': ip_pkt.dst,
                     'ip_proto': ip_pkt.proto
@@ -143,14 +141,8 @@ class CollectorFriendlyController(app_manager.RyuApp):
                     match_dict['udp_src'] = udp_pkt.src_port
                     match_dict['udp_dst'] = udp_pkt.dst_port
                 
-                # Add MAC addresses if known (for collector)
-                if ip_pkt.src in self.ip_mac_map:
-                    match_dict['eth_src'] = self.ip_mac_map[ip_pkt.src]
-                if ip_pkt.dst in self.ip_mac_map:
-                    match_dict['eth_dst'] = self.ip_mac_map[ip_pkt.dst]
-                
                 match = parser.OFPMatch(**match_dict)
-                self.add_flow(datapath, 1, match, actions)
+                self.add_flow(datapath, 10, match, actions)
             else:
                 # Non-IP, fallback to L2 only
                 match = parser.OFPMatch(

@@ -38,6 +38,8 @@ app_latency_ranges = {
     "youtube": (20, 60),
     "netflix": (25, 70), 
     "twitch": (15, 50),
+    "zoom": (10, 30),
+    "skype": (10, 30),
     "unknown": (30, 100)
 }
 
@@ -45,6 +47,8 @@ app_loss_ranges = {
     "youtube": (0, 3),
     "netflix": (0, 5),
     "twitch": (0, 2),
+    "zoom": (0, 1),
+    "skype": (0, 1),
     "unknown": (0, 10)
 }
 
@@ -160,7 +164,6 @@ def get_synthetic_metrics(app):
 def collect_flows():
     rows = []
     ts = datetime.now()
-    category = "data"
 
     # Get latest IP-MAC mappings from controller
     global ip_mac_map
@@ -227,8 +230,7 @@ def collect_flows():
             delta_pkts_tx = max(0, pkts_tx - last_pkts.get(key, (0, 0))[0])
             delta_pkts_rx = max(0, pkts_rx - last_pkts.get(key, (0, 0))[1])
 
-            if app_name in app_category_map:
-                category = app_category_map[app_name]
+            category = app_category_map.get(app_name, "data")
             
             last_bytes[key] = bytes_count
             last_pkts[key] = (pkts_tx, pkts_rx)
@@ -238,7 +240,7 @@ def collect_flows():
 
             if delta_bytes > 0 or delta_pkts_tx > 0 or delta_pkts_rx > 0:
                 rows.append((
-                    ts, dpid, host, app_name,category, proto,
+                    ts, dpid, host, app_name, proto,
                     src_ip, dst_ip, src_mac, dst_mac,
                     delta_bytes, delta_bytes,  # bytes_tx, bytes_rx
                     delta_pkts_tx, delta_pkts_rx,  # pkts_tx, pkts_rx
