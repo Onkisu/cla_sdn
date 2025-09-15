@@ -3,7 +3,6 @@ import requests
 import psycopg2
 import time
 import sys
-import socket
 import yaml
 import json
 import os
@@ -12,17 +11,13 @@ import random
 from datetime import datetime
 from collections import defaultdict
 
-DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
+DB_CONN = "dbname=development user=dev_one password=hijack332 host=127.0.0.1"
 RYU_REST = "http://127.0.0.1:8080"
 DPIDS = [1, 2, 3]
 
-# delta tracking sekarang per (dpid, app)
-last_bytes = {}
-last_pkts = {}
-
 ip_mac_map = {}
-ip_app_map = {}   
-port_app_map = {} 
+ip_app_map = {}
+port_app_map = {}
 
 with open("apps.yaml") as f:
     apps_conf = yaml.safe_load(f)
@@ -37,7 +32,7 @@ CACHE_EXPIRE = 3600  # 1 jam
 
 app_latency_ranges = {
     "youtube": (20, 60),
-    "netflix": (25, 70), 
+    "netflix": (25, 70),
     "twitch": (15, 50),
     "zoom": (10, 30),
     "skype": (10, 30),
@@ -123,13 +118,13 @@ def get_synthetic_metrics(app):
     lat_range = app_latency_ranges.get(app, app_latency_ranges["unknown"])
     loss_range = app_loss_ranges.get(app, app_loss_ranges["unknown"])
     return random.uniform(*lat_range), random.uniform(*loss_range)
-    
+
 def collect_flows():
     ts = datetime.now()
     global ip_mac_map
     ip_mac_map.update(get_controller_mappings())
 
-    # agregasi per (dpid, flow_id, app, category)
+    # agregasi per (dpid, app, category)
     agg = defaultdict(lambda: {
         "bytes_tx": 0, "bytes_rx": 0,
         "pkts_tx": 0, "pkts_rx": 0,
@@ -153,63 +148,45 @@ def collect_flows():
             src_ip, dst_ip = match.get("ipv4_src"), match.get("ipv4_dst")
             if not src_ip or not dst_ip:
                 continue
-            
-            # Use flow cookie + ports as unique identifier
-            flow_id = flow.get("cookie", 0)
+
             tp_src = int(match.get("tcp_src") or match.get("udp_src") or 0)
             tp_dst = int(match.get("tcp_dst") or match.get("udp_dst") or 0)
-            
+
             app_name = match_app(src_ip, dst_ip, tp_src, tp_dst)
             category = app_category_map.get(app_name, "data")
-            proto = {6:"tcp", 17:"udp"}.get(match.get("ip_proto", 0), "any")
+            proto = {6: "tcp", 17: "udp"}.get(match.get("ip_proto", 0), "any")
             bytes_count = flow.get("byte_count", 0)
             pkts_tx = flow.get("packet_count", 0)
 
             latency, loss = get_synthetic_metrics(app_name)
             pkts_rx = max(0, int(pkts_tx * (1 - loss/100)))
 
-            # UNIQUE KEY per flow: (dpid, flow_id, src_ip, dst_ip, tp_src, tp_dst)
-            key_delta = (dpid, flow_id, src_ip, dst_ip, tp_src, tp_dst)
-            
-            # Calculate delta from previous measurement
-            delta_bytes = max(0, bytes_count - last_bytes.get(key_delta, 0))
-            delta_pkts_tx = max(0, pkts_tx - last_pkts.get(key_delta, (0,0))[0])
-            delta_pkts_rx = max(0, pkts_rx - last_pkts.get(key_delta, (0,0))[1])
-
-            # Update last values
-            last_bytes[key_delta] = bytes_count
-            last_pkts[key_delta] = (pkts_tx, pkts_rx)
-
-            if delta_bytes > 0 or delta_pkts_tx > 0:
-                key_agg = (dpid, app_name, category)
-                agg[key_agg]["bytes_tx"] += delta_bytes
-                agg[key_agg]["bytes_rx"] += delta_bytes
-                agg[key_agg]["pkts_tx"] += delta_pkts_tx
-                agg[key_agg]["pkts_rx"] += delta_pkts_rx
-                agg[key_agg]["latencies"].append(latency)
-                agg[key_agg]["losses"].append(loss)
-                agg[key_agg]["src_ip"] = src_ip
-                agg[key_agg]["dst_ip"] = dst_ip
-                agg[key_agg]["src_mac"] = match.get("eth_src") or ip_mac_map.get(src_ip)
-                agg[key_agg]["dst_mac"] = match.get("eth_dst") or ip_mac_map.get(dst_ip)
-                agg[key_agg]["proto"] = proto
+            key = (dpid, app_name, category)
+            agg[key]["bytes_tx"] += bytes_count
+            agg[key]["bytes_rx"] += bytes_count
+            agg[key]["pkts_tx"] += pkts_tx
+            agg[key]["pkts_rx"] += pkts_rx
+            agg[key]["latencies"].append(latency)
+            agg[key]["losses"].append(loss)
+            agg[key]["src_ip"] = src_ip
+            agg[key]["dst_ip"] = dst_ip
+            agg[key]["src_mac"] = match.get("eth_src") or ip_mac_map.get(src_ip)
+            agg[key]["dst_mac"] = match.get("eth_dst") or ip_mac_map.get(dst_ip)
+            agg[key]["proto"] = proto
 
     rows = []
     for (dpid, app, category), v in agg.items():
-        if v["bytes_tx"] == 0 and v["pkts_tx"] == 0:
-            continue
-        avg_lat = sum(v["latencies"])/len(v["latencies"]) if v["latencies"] else 0
-        avg_loss = sum(v["losses"])/len(v["losses"]) if v["losses"] else 0
-        
-        # Determine host (client IP)
-        host = v["src_ip"] if v["src_ip"].startswith('10.0.0.') else v["dst_ip"]
-        
+        avg_lat = sum(v["latencies"]) / len(v["latencies"]) if v["latencies"] else 0
+        avg_loss = sum(v["losses"]) / len(v["losses"]) if v["losses"] else 0
+
+        host = v["src_ip"] if v["src_ip"] and v["src_ip"].startswith("10.0.0.") else v["dst_ip"]
+
         rows.append((
             ts, dpid, host, app, v["proto"], v["src_ip"], v["dst_ip"],
             v["src_mac"], v["dst_mac"], v["bytes_tx"], v["bytes_rx"],
             v["pkts_tx"], v["pkts_rx"], avg_lat, category
         ))
-    
+
     return rows
 
 def insert_pg(rows):
@@ -243,7 +220,7 @@ if __name__ == "__main__":
         rows = collect_flows()
         if rows:
             insert_pg(rows)
-            print(f"{len(rows)} baris masuk DB (agregasi per app).", file=sys.stderr)
+            print(f"{len(rows)} baris masuk DB (agregasi total per app, tiap 5 detik).", file=sys.stderr)
         else:
-            print("Tidak ada delta baru.", file=sys.stderr)
+            print("Tidak ada data flow.", file=sys.stderr)
         time.sleep(5)
