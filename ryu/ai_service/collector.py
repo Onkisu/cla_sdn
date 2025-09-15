@@ -25,6 +25,11 @@ port_app_map = {} # { 443: "youtube" }
 with open("apps.yaml") as f:
     apps_conf = yaml.safe_load(f)
 
+app_category_map = {}
+for cat, catconf in apps_conf.get("categories", {}).items():
+    for app in catconf.get("apps", []):
+        app_category_map[app] = cat
+
 CACHE_FILE = "ip_cache.json"
 CACHE_EXPIRE = 3600  # 1 jam
 
