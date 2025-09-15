@@ -238,7 +238,7 @@ def collect_flows():
 
             if delta_bytes > 0 or delta_pkts_tx > 0 or delta_pkts_rx > 0:
                 rows.append((
-                    ts, dpid, host, app_name,categories, proto,
+                    ts, dpid, host, app_name,category, proto,
                     src_ip, dst_ip, src_mac, dst_mac,
                     delta_bytes, delta_bytes,  # bytes_tx, bytes_rx
                     delta_pkts_tx, delta_pkts_rx,  # pkts_tx, pkts_rx
@@ -254,7 +254,7 @@ def insert_pg(rows):
         for r in rows:
             cur.execute("""
             INSERT INTO traffic.flow_stats(
-                timestamp, dpid, host, app, proto,
+                timestamp, dpid, host, app, category ,proto,
                 src_ip, dst_ip, src_mac, dst_mac,
                 bytes_tx, bytes_rx, pkts_tx, pkts_rx, latency_ms
             )
