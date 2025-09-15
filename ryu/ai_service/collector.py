@@ -16,8 +16,10 @@ DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 RYU_REST = "http://127.0.0.1:8080"
 DPIDS = [1, 2, 3]
 
+# delta tracking sekarang per (dpid, app)
 last_bytes = {}
 last_pkts = {}
+
 ip_mac_map = {}
 ip_app_map = {}   
 port_app_map = {} 
@@ -132,7 +134,9 @@ def collect_flows():
         "bytes_tx": 0, "bytes_rx": 0,
         "pkts_tx": 0, "pkts_rx": 0,
         "latencies": [], "losses": [],
-        "src_ip": None, "dst_ip": None, "src_mac": None, "dst_mac": None, "proto": "any"
+        "src_ip": None, "dst_ip": None,
+        "src_mac": None, "dst_mac": None,
+        "proto": "any"
     })
 
     for dpid in DPIDS:
@@ -161,26 +165,28 @@ def collect_flows():
             latency, loss = get_synthetic_metrics(app_name)
             pkts_rx = max(0, int(pkts_tx * (1 - loss/100)))
 
-            key = (dpid, app_name, category)
-            delta_bytes = max(0, bytes_count - last_bytes.get((dpid, src_ip, dst_ip, proto), 0))
-            delta_pkts_tx = max(0, pkts_tx - last_pkts.get((dpid, src_ip, dst_ip, proto), (0,0))[0])
-            delta_pkts_rx = max(0, pkts_rx - last_pkts.get((dpid, src_ip, dst_ip, proto), (0,0))[1])
+            # delta key per app
+            key_delta = (dpid, app_name)
+            delta_bytes = max(0, bytes_count - last_bytes.get(key_delta, 0))
+            delta_pkts_tx = max(0, pkts_tx - last_pkts.get(key_delta, (0,0))[0])
+            delta_pkts_rx = max(0, pkts_rx - last_pkts.get(key_delta, (0,0))[1])
 
-            last_bytes[(dpid, src_ip, dst_ip, proto)] = bytes_count
-            last_pkts[(dpid, src_ip, dst_ip, proto)] = (pkts_tx, pkts_rx)
+            last_bytes[key_delta] = bytes_count
+            last_pkts[key_delta] = (pkts_tx, pkts_rx)
 
             if delta_bytes > 0 or delta_pkts_tx > 0:
-                agg[key]["bytes_tx"] += delta_bytes
-                agg[key]["bytes_rx"] += delta_bytes
-                agg[key]["pkts_tx"] += delta_pkts_tx
-                agg[key]["pkts_rx"] += delta_pkts_rx
-                agg[key]["latencies"].append(latency)
-                agg[key]["losses"].append(loss)
-                agg[key]["src_ip"] = src_ip
-                agg[key]["dst_ip"] = dst_ip
-                agg[key]["src_mac"] = match.get("eth_src")
-                agg[key]["dst_mac"] = match.get("eth_dst")
-                agg[key]["proto"] = proto
+                key_agg = (dpid, app_name, category)
+                agg[key_agg]["bytes_tx"] += delta_bytes
+                agg[key_agg]["bytes_rx"] += delta_bytes
+                agg[key_agg]["pkts_tx"] += delta_pkts_tx
+                agg[key_agg]["pkts_rx"] += delta_pkts_rx
+                agg[key_agg]["latencies"].append(latency)
+                agg[key_agg]["losses"].append(loss)
+                agg[key_agg]["src_ip"] = src_ip
+                agg[key_agg]["dst_ip"] = dst_ip
+                agg[key_agg]["src_mac"] = match.get("eth_src")
+                agg[key_agg]["dst_mac"] = match.get("eth_dst")
+                agg[key_agg]["proto"] = proto
 
     rows = []
     for (dpid, app, category), v in agg.items():
