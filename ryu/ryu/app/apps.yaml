@@ -16,26 +16,20 @@
 # file: apps.yaml (update)
 apps:
   youtube:
-    cidrs: ["youtube.com"]
+    cidrs: ["10.0.1.1/32"]
+    ports: [443]
   netflix:
-    cidrs: ["netflix.com"]
+    cidrs: ["10.0.1.2/32"]
+    ports: [443]
   twitch:
-    cidrs: ["twitch.tv"]
-  zoom:
-    cidrs: ["zoom.us"]
-  skype:
-    cidrs: ["skype.com"]
+    cidrs: ["10.0.2.1/32"]
+    ports: [1935]
 
 categories:
-  video:
+  streaming:
     apps: ["youtube", "netflix"]
   gaming:
     apps: ["twitch"]
-  voip:
-    apps: ["zoom", "skype"]
-  data:
-    apps: []   # general/default
-
 
 
 
