@@ -26,10 +26,14 @@ apps:
     ports: [1935]
 
 categories:
-  streaming:
+  video:
     apps: ["youtube", "netflix"]
   gaming:
     apps: ["twitch"]
+  voip:
+    apps: ["zoom", "skype"]
+  data:
+    apps: []   # general/default
 
 
 

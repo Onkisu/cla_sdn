@@ -25,11 +25,6 @@ port_app_map = {} # { 443: "youtube" }
 with open("apps.yaml") as f:
     apps_conf = yaml.safe_load(f)
 
-app_category_map = {}
-for cat, catconf in apps_conf.get("categories", {}).items():
-    for app in catconf.get("apps", []):
-        app_category_map[app] = cat
-
 CACHE_FILE = "ip_cache.json"
 CACHE_EXPIRE = 3600  # 1 jam
 
@@ -227,8 +222,8 @@ def collect_flows():
             delta_pkts_tx = max(0, pkts_tx - last_pkts.get(key, (0, 0))[0])
             delta_pkts_rx = max(0, pkts_rx - last_pkts.get(key, (0, 0))[1])
 
-            if app in app_category_map:
-                category = app_category_map[app]
+            if app_name in app_category_map:
+                category = app_category_map[app_name]
             
             last_bytes[key] = bytes_count
             last_pkts[key] = (pkts_tx, pkts_rx)
@@ -258,7 +253,7 @@ def insert_pg(rows):
                 src_ip, dst_ip, src_mac, dst_mac,
                 bytes_tx, bytes_rx, pkts_tx, pkts_rx, latency_ms
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, r)
         conn.commit()
         cur.close()
