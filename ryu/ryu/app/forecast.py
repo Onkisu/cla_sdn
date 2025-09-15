@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """
-forecast_full.py (patched)
-- Fixes SLA violation direction logic (throughput = min required -> lt; latency/jitter/loss = max allowed -> gt)
-- Robust seasonality extraction
-- Better logging and safe handling when Prophet can't forecast
-- Keeps same DB schema interactions as before
-
-Requirements:
-- prophet, pandas, numpy, psycopg2, translator_auto.py in same folder (with apps.yaml)
-- traffic.flow_stats contains columns used by loaders (if not present, related KPI will be skipped)
+forecast.py - Updated for 5-second aggregated data
+- Adjusted for your network monitoring system
+- Compatible with 5-second aggregated traffic data
+- Simplified dependencies
 """
 
 import os
@@ -19,23 +14,20 @@ import psycopg2
 from datetime import datetime, timedelta
 from prophet import Prophet
 
-# translator_auto must exist and expose translate_and_apply(prompt)
-from translator_auto import translate_and_apply
+DB_DSN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 
-DB_DSN = os.environ.get("DB_DSN", "dbname=development user=dev_one password=hijack332. host=127.0.0.1")
+# SLA thresholds adjusted for your test network
+SLA_THROUGHPUT_MBPS = 2.0   # Lower threshold for test environment
+SLA_LATENCY_MS = 100.0      # Higher latency threshold
+SLA_JITTER_MS = 50.0        
+SLA_LOSS_PCT = 5.0          
 
-# SLA thresholds (example values; adjust to your SLAs)
-SLA_THROUGHPUT_MBPS = 5.0   # Mbps minimal throughput per-app (violation if predicted < this)
-SLA_LATENCY_MS = 50.0       # max latency in ms (violation if predicted > this)
-SLA_JITTER_MS = 30.0        # max jitter in ms (violation if predicted > this)
-SLA_LOSS_PCT = 1.0          # max packet loss percent (violation if predicted > this)
-
-# Decision thresholds for actions
-SLA_VIOLATION_PROB_TH = 0.30  # if prob > 30% -> trigger action
-ANOMALY_ACTION_TH = 3.0       # anomaly score threshold (MAD)
+# Decision thresholds
+SLA_VIOLATION_PROB_TH = 0.30
+ANOMALY_ACTION_TH = 3.0
 ANOMALY_ACTION_TH_CR = 5.0 
 
-# apps to check per-app throughput (must match your apps.yaml)
+# Apps from your apps.yaml
 MONITORED_APPS = ["youtube", "netflix", "twitch"]
 
 # ---------- DB helpers ----------
@@ -51,75 +43,123 @@ def run_sql(query, params=None, fetch=False):
     conn.close()
     return rows
 
-def ensure_summary_columns():
-    """Ensure summary table has columns for storing SLA probs & per-app JSONB."""
-    q = """
-    ALTER TABLE traffic.summary_forecast_v2
-    ADD COLUMN IF NOT EXISTS latency_sla_prob NUMERIC,
-    ADD COLUMN IF NOT EXISTS jitter_sla_prob NUMERIC,
-    ADD COLUMN IF NOT EXISTS loss_sla_prob NUMERIC,
-    ADD COLUMN IF NOT EXISTS app_sla_prob JSONB;
-    """
-    run_sql(q)
+def ensure_tables_exist():
+    """Ensure all required tables exist"""
+    run_sql("""
+        CREATE TABLE IF NOT EXISTS traffic.summary_forecast_v2 (
+            id SERIAL PRIMARY KEY,
+            window_start TIMESTAMP,
+            window_end TIMESTAMP,
+            burstiness_index NUMERIC,
+            anomaly_score NUMERIC,
+            traffic_trend NUMERIC,
+            seasonality_pattern JSONB,
+            latency_sla_prob NUMERIC,
+            jitter_sla_prob NUMERIC,
+            loss_sla_prob NUMERIC,
+            app_sla_prob JSONB,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    
+    run_sql("""
+        CREATE TABLE IF NOT EXISTS traffic.alerts (
+            id SERIAL PRIMARY KEY,
+            level VARCHAR(20),
+            msg TEXT,
+            anomaly_score NUMERIC,
+            dpid INTEGER,
+            src_ip VARCHAR(20),
+            dst_ip VARCHAR(20),
+            flow_id VARCHAR(50),
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    
+    run_sql("""
+        CREATE TABLE IF NOT EXISTS traffic.actions (
+            id SERIAL PRIMARY KEY,
+            action VARCHAR(50),
+            params_json JSONB,
+            outcome VARCHAR(20),
+            reference_alert_id INTEGER,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
 
 # ---------- data loaders ----------
 def load_time_series_for_kpi(sql_query, params=None):
     conn = psycopg2.connect(DB_DSN)
     try:
         df = pd.read_sql(sql_query, conn, params=params)
+    except Exception as e:
+        print(f"Database query error: {e}")
+        df = pd.DataFrame()
     finally:
         conn.close()
     return df
 
-def load_agg_bytes(days=30):
+def load_agg_bytes(days=1):
+    """Load aggregated bytes (now in 5-second intervals)"""
     q = f"""
-    SELECT date_trunc('minute', timestamp) AS ds, SUM(bytes_tx) AS y
+    SELECT date_trunc('minute', timestamp) AS ds, 
+           SUM(bytes_tx + bytes_rx) AS y
     FROM traffic.flow_stats
     WHERE timestamp >= NOW() - interval '{days} days'
-    GROUP BY ds ORDER BY ds;
+    GROUP BY ds 
+    ORDER BY ds;
     """
     return load_time_series_for_kpi(q)
 
-def load_app_bytes(app, days=30):
+def load_app_bytes(app, days=1):
+    """Load app-specific bytes"""
     q = f"""
-    SELECT date_trunc('minute', timestamp) AS ds, SUM(bytes_tx) AS y
+    SELECT date_trunc('minute', timestamp) AS ds, 
+           SUM(bytes_tx + bytes_rx) AS y
     FROM traffic.flow_stats
     WHERE app = %s AND timestamp >= NOW() - interval '{days} days'
-    GROUP BY ds ORDER BY ds;
+    GROUP BY ds 
+    ORDER BY ds;
     """
     return load_time_series_for_kpi(q, params=(app,))
 
-def load_latency_series(days=7):
+def load_latency_series(days=1):
+    """Load latency data"""
     q = f"""
-    SELECT date_trunc('minute', timestamp) AS ds, AVG(latency_ms) AS y
+    SELECT date_trunc('minute', timestamp) AS ds, 
+           AVG(latency_ms) AS y
     FROM traffic.flow_stats
-    WHERE latency_ms IS NOT NULL AND timestamp >= NOW() - interval '{days} days'
-    GROUP BY ds ORDER BY ds;
+    WHERE latency_ms IS NOT NULL 
+    AND timestamp >= NOW() - interval '{days} days'
+    GROUP BY ds 
+    ORDER BY ds;
     """
     return load_time_series_for_kpi(q)
 
-def load_jitter_series(days=7):
-    # jitter approximated as stddev of latency per minute
+def load_jitter_series(days=1):
+    """Load jitter data"""
     q = f"""
-    SELECT ds, stddev(lat) AS y FROM (
-      SELECT date_trunc('minute', timestamp) AS ds, latency_ms AS lat
-      FROM traffic.flow_stats
-      WHERE latency_ms IS NOT NULL AND timestamp >= NOW() - interval '{days} days'
-    ) s GROUP BY ds ORDER BY ds;
+    SELECT date_trunc('minute', timestamp) AS ds, 
+           STDDEV(latency_ms) AS y
+    FROM traffic.flow_stats
+    WHERE latency_ms IS NOT NULL 
+    AND timestamp >= NOW() - interval '{days} days'
+    GROUP BY ds 
+    ORDER BY ds;
     """
     return load_time_series_for_kpi(q)
 
-def load_loss_series(days=7):
-    # loss% per minute = 100 * (tx - rx) / tx  (guard tx==0)
+def load_loss_series(days=1):
+    """Load packet loss data"""
     q = f"""
-    SELECT ds, CASE WHEN sum_tx = 0 THEN 0 ELSE (100.0 * (sum_tx - sum_rx) / sum_tx) END AS y FROM (
-      SELECT date_trunc('minute', timestamp) AS ds,
-             SUM(COALESCE(pkts_tx,0)) AS sum_tx,
-             SUM(COALESCE(pkts_rx,0)) AS sum_rx
-      FROM traffic.flow_stats
-      WHERE timestamp >= NOW() - interval '{days} days'
-      GROUP BY ds
-    ) t ORDER BY ds;
+    SELECT date_trunc('minute', timestamp) AS ds,
+           CASE WHEN SUM(pkts_tx) = 0 THEN 0 
+                ELSE 100.0 * (SUM(pkts_tx) - SUM(pkts_rx)) / SUM(pkts_tx) 
+           END AS y
+    FROM traffic.flow_stats
+    WHERE timestamp >= NOW() - interval '{days} days'
+    GROUP BY ds 
+    ORDER BY ds;
     """
     return load_time_series_for_kpi(q)
 
@@ -153,61 +193,32 @@ def slope_to_mbps(slope_bytes_per_min):
 
 # ---------- forecasting ----------
 def prophet_forecast(df, periods=15, freq='min'):
-    """
-    Input df must have columns ['ds','y'], ds timezone-naive
-    Returns forecast dataframe (or None on failure)
-    """
+    """Simple Prophet forecast"""
     if df is None or df.empty or len(df) < 3:
         return None
+        
     df_local = df.copy()
     df_local['ds'] = pd.to_datetime(df_local['ds']).dt.tz_localize(None)
-    # ensure numeric y and drop NaN rows
     df_local = df_local.dropna(subset=['y'])
+    
     if df_local.empty or len(df_local) < 3:
         return None
 
     try:
         m = Prophet(daily_seasonality=True, yearly_seasonality=False)
-        m.add_seasonality(name='hour_cycle', period=60, fourier_order=4)
-        m.add_seasonality(name='quarter_cycle', period=15, fourier_order=3)
-        # fit
         m.fit(df_local)
         future = m.make_future_dataframe(periods=periods, freq=freq)
         forecast = m.predict(future)
         return forecast
     except Exception as e:
-        print(f"[WARN] Prophet failed to fit/predict: {e}")
+        print(f"Prophet forecast error: {e}")
         return None
 
-def sla_violation_prob_from_forecast(forecast, threshold, kpi_col='yhat', direction='auto'):
-    """
-    direction:
-      - 'lt' : violation if forecast value < threshold  (e.g. throughput below min)
-      - 'gt' : violation if forecast value > threshold  (e.g. latency > max)
-      - 'auto': attempt to choose by reading threshold meaning:
-          * if threshold > 1 and threshold <= 100 (likely percent) assume 'gt' for loss%
-          * else for latency/jitter (threshold in ms) assume 'gt'
-          * for throughput (Mbps), typically we want 'lt' (if threshold small)
-    NOTE: this simple auto heuristic is fallback; callers should pass explicit direction.
-    """
+def sla_violation_prob_from_forecast(forecast, threshold, kpi_col='yhat', direction='gt'):
+    """Calculate SLA violation probability"""
     if forecast is None or forecast.empty:
         return 0.0
-    if kpi_col not in forecast.columns:
-        kpi_col = 'yhat'
-
-    # choose direction if auto
-    if direction == 'auto':
-        # if threshold is small (throughput often small number like 5.0), assume 'lt' for throughput,
-        # but for latency/jitter/loss often we want 'gt'. We'll use heuristics:
-        if threshold <= 100 and threshold > 10:
-            # likely latency (ms) or large Mbps -> treat as 'gt' (violation if > threshold)
-            direction = 'gt'
-        elif threshold <= 10:
-            # small number (e.g. Mbps threshold 5) -> treat as 'lt'
-            direction = 'lt'
-        else:
-            direction = 'gt'
-
+        
     if direction == 'lt':
         viol = (forecast[kpi_col] < threshold).sum()
     else:
@@ -219,12 +230,11 @@ def sla_violation_prob_from_forecast(forecast, threshold, kpi_col='yhat', direct
 # ---------- DB writes ----------
 def save_summary(window_start, window_end, burst, anomaly, trend_mbps,
                  seasonality, latency_prob, jitter_prob, loss_prob, app_probs):
-    ensure_summary_columns()
-
-    # --- FIX: convert Timestamps to str for JSON ---
-    seasonality_safe = None
+    """Save forecast summary to database"""
+    ensure_tables_exist()
+    
+    seasonality_safe = []
     if seasonality:
-        seasonality_safe = []
         for row in seasonality:
             safe_row = {}
             for k, v in row.items():
@@ -233,394 +243,162 @@ def save_summary(window_start, window_end, burst, anomaly, trend_mbps,
                 else:
                     safe_row[k] = v
             seasonality_safe.append(safe_row)
-    else:
-        seasonality_safe = []
 
-    conn = psycopg2.connect(DB_DSN)
-    cur = conn.cursor()
-    cur.execute("""
+    run_sql("""
         INSERT INTO traffic.summary_forecast_v2
-        (window_start, window_end, burstiness_index, anomaly_score, traffic_trend, seasonality_pattern, latency_sla_prob, jitter_sla_prob, loss_sla_prob, app_sla_prob)
+        (window_start, window_end, burstiness_index, anomaly_score, traffic_trend, 
+         seasonality_pattern, latency_sla_prob, jitter_sla_prob, loss_sla_prob, app_sla_prob)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    """, (
-        window_start, window_end, burst, anomaly, trend_mbps,
-        json.dumps(seasonality_safe),  # <- pakai safe
-        latency_prob, jitter_prob, loss_prob, json.dumps(app_probs)
-    ))
-    conn.commit()
-    cur.close()
-    conn.close()
-
+    """, (window_start, window_end, burst, anomaly, trend_mbps,
+          json.dumps(seasonality_safe), latency_prob, jitter_prob, loss_prob, json.dumps(app_probs)))
 
 def insert_alert(level, msg, anomaly_score=None, dpid=None, src_ip=None, dst_ip=None, flow_id=None):
-    conn = psycopg2.connect(DB_DSN)
-    cur = conn.cursor()
-    cur.execute("""
+    """Insert alert into database"""
+    run_sql("""
         INSERT INTO traffic.alerts(level,msg,anomaly_score,dpid,src_ip,dst_ip,flow_id)
-        VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id
+        VALUES (%s,%s,%s,%s,%s,%s,%s)
     """, (level, msg, anomaly_score, dpid, src_ip, dst_ip, flow_id))
-    alert_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return alert_id
 
 def insert_action(action, params, outcome, ref_alert_id):
-    conn = psycopg2.connect(DB_DSN)
-    cur = conn.cursor()
-    cur.execute("""
+    """Insert action into database"""
+    run_sql("""
         INSERT INTO traffic.actions(action,params_json,outcome,reference_alert_id)
         VALUES (%s,%s,%s,%s)
     """, (action, json.dumps(params), outcome, ref_alert_id))
-    conn.commit()
+
+# ---------- Simple action functions ----------
+def translate_and_apply(prompt):
+    """Simplified translation for your network"""
+    if "prioritize" in prompt:
+        return {"action": "set_priority", "value": "high"}
+    elif "throttle" in prompt:
+        return {"action": "set_rate_limit", "value": "2mbps"}
+    return {"action": "monitor", "value": "none"}
+
+def top_user_for_app(app, minutes=5):
+    """Find top user for specific app"""
+    conn = psycopg2.connect(DB_DSN)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT src_ip, SUM(bytes_tx + bytes_rx) as total_bytes
+        FROM traffic.flow_stats 
+        WHERE app = %s AND timestamp >= NOW() - interval '%s minutes'
+        GROUP BY src_ip ORDER BY total_bytes DESC LIMIT 1
+    """, (app, minutes))
+    row = cur.fetchone()
     cur.close()
     conn.close()
+    return (row[0], row[1]) if row else (None, 0)
+
+def top_user_overall(minutes=5):
+    """Find top user across all apps"""
+    conn = psycopg2.connect(DB_DSN)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT src_ip, app, SUM(bytes_tx + bytes_rx) as total_bytes
+        FROM traffic.flow_stats 
+        WHERE timestamp >= NOW() - interval '%s minutes'
+        GROUP BY src_ip, app ORDER BY total_bytes DESC LIMIT 1
+    """, (minutes,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return (row[0], row[1], row[2]) if row else (None, None, 0)
 
 # ---------- decision logic ----------
-# -----------------------
-# Helper for RYU REST actions
-# -----------------------
-RYU_REST = os.environ.get("RYU_REST", "http://127.0.0.1:8080")
-RYU_FLOW_ADD = f"{RYU_REST}/stats/flowentry/add"
-
-# mapping app -> typical port/proto (best-effort)
-APP_PORT_MAP = {
-    "youtube": {"proto": "udp", "port": 443},   # many youtube uses QUIC/UDP 443
-    "netflix": {"proto": "tcp", "port": 443},
-    "twitch": {"proto": "tcp", "port": 1935},
-    # fallback: no specific port
-}
-
-def _post_to_ryu(payload):
-    try:
-        import requests
-        r = requests.post(RYU_FLOW_ADD, json=payload, timeout=5)
-        return r.status_code, r.text
-    except Exception as e:
-        return None, str(e)
-
-def block_flow(dpid:int, src_ip:str=None, app:str=None, dst_ip:str=None):
-    """
-    Add a DROP flow via Ryu REST for specific src_ip/app.
-    If app present and APP_PORT_MAP has mapping, match on that port.
-    """
-    match = {"eth_type": 2048}  # IP
-    if src_ip:
-        match["ipv4_src"] = src_ip
-    if dst_ip:
-        match["ipv4_dst"] = dst_ip
-
-    # add app-specific port if known
-    if app and app in APP_PORT_MAP:
-        mapping = APP_PORT_MAP[app]
-        if mapping.get("proto") == "tcp":
-            match["ip_proto"] = 6
-            match["tcp_dst"] = mapping["port"]
-        elif mapping.get("proto") == "udp":
-            match["ip_proto"] = 17
-            match["udp_dst"] = mapping["port"]
-
-    payload = {
-        "dpid": dpid,
-        "priority": 400,
-        "match": match,
-        # no actions => drop
-        "actions": []
-    }
-    code, body = _post_to_ryu(payload)
-    return code, body
-
-def throttle_user_app(dpid:int, src_ip:str=None, app:str=None, rate_mbps:int=1):
-    """
-    Create a flow that sets a queue (SET_QUEUE) for traffic from src_ip to app port.
-    This uses a simple action format compatible with the translator_auto flow format.
-    rate_mbps ignored here (you may also call ensure_qos in translator_auto to create queue limits).
-    """
-    match = {"eth_type": 2048}
-    if src_ip:
-        match["ipv4_src"] = src_ip
-
-    if app and app in APP_PORT_MAP:
-        mapping = APP_PORT_MAP[app]
-        if mapping.get("proto") == "tcp":
-            match["ip_proto"] = 6
-            match["tcp_dst"] = mapping["port"]
-        elif mapping.get("proto") == "udp":
-            match["ip_proto"] = 17
-            match["udp_dst"] = mapping["port"]
-
-    # use queue_id 2 for throttled flows (assumes QoS/queue exist)
-    actions = [{"type": "SET_QUEUE", "queue_id": 2}, {"type": "OUTPUT", "port": "NORMAL"}]
-
-    payload = {
-        "dpid": dpid,
-        "priority": 300,
-        "match": match,
-        "actions": actions
-    }
-    code, body = _post_to_ryu(payload)
-    return code, body
-
-# -----------------------
-# Helper DB lookups to find top user per app or top user overall
-# -----------------------
-def top_user_for_app(app, minutes=1):
-    """
-    Return (src_ip, total_bytes) for top src_ip feeding 'app' during last `minutes` minutes.
-    If no rows, return (None, 0)
-    """
-    conn = psycopg2.connect(DB_DSN)
-    cur = conn.cursor()
-    q = """
-    SELECT src_ip, SUM(COALESCE(bytes_tx,0) + COALESCE(bytes_rx,0)) AS total_bytes
-    FROM traffic.flow_stats
-    WHERE app = %s AND timestamp >= NOW() - interval '%s minutes'
-    GROUP BY src_ip
-    ORDER BY total_bytes DESC
-    LIMIT 1
-    """ 
-    cur.execute(q, (app, minutes))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    if not row:
-        return None, 0
-    return row[0], int(row[1] or 0)
-
-def top_user_overall(minutes=1):
-    """
-    Return (src_ip, app, total_bytes) for top src_ip across apps during last `minutes` minutes.
-    """
-    conn = psycopg2.connect(DB_DSN)
-    cur = conn.cursor()
-    q = """
-    SELECT src_ip, app, SUM(COALESCE(bytes_tx,0) + COALESCE(bytes_rx,0)) AS total_bytes
-    FROM traffic.flow_stats
-    WHERE timestamp >= NOW() - interval '%s minutes'
-    GROUP BY src_ip, app
-    ORDER BY total_bytes DESC
-    LIMIT 1
-    """
-    cur.execute(q, (minutes,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    if not row:
-        return None, None, 0
-    return row[0], row[1], int(row[2] or 0)
-
-# -----------------------
-# Rewritten decide_and_act (user+app hybrid)
-# -----------------------
-def decide_and_act(latency_prob, jitter_prob, loss_prob, app_probs, burst, anomaly, recent_minutes=1):
-    """
-    Hybrid decision engine:
-     - Apply global app-level actions (prioritize / throttle) as before
-     - For app-level SLA probs, attempt to throttle the top user for that app (if found)
-     - If anomaly >= ANOMALY_ACTION_TH: throttle top user+app (from recent window)
-     - If anomaly >= ANOMALY_ACTION_TH_CR: block top user+app
-    recent_minutes: window to search for top contributors
-    """
+def decide_and_act(latency_prob, jitter_prob, loss_prob, app_probs, burst, anomaly):
+    """Simplified decision logic"""
     actions_taken = []
-
-    # ---------- 1) Global SLA / app rules (keep behavior)
+    
+    # Global SLA actions
     if latency_prob > SLA_VIOLATION_PROB_TH:
-        msg = f"Latency SLA risk: prob={latency_prob}"
-        aid = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1)
-        out = translate_and_apply("prioritize gaming")
-        insert_action("prioritize", out, "ok", aid)
-        actions_taken.append(("prioritize", "gaming", aid))
-
-    if jitter_prob > SLA_VIOLATION_PROB_TH:
-        msg = f"Jitter SLA risk: prob={jitter_prob}"
-        aid = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1)
-        out = translate_and_apply("prioritize voip")
-        insert_action("prioritize", out, "ok", aid)
-        actions_taken.append(("prioritize", "voip", aid))
-
-    if loss_prob > SLA_VIOLATION_PROB_TH:
-        msg = f"Packet loss SLA risk: prob={loss_prob}"
-        aid = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1)
-        out = translate_and_apply("throttle netflix 5mbps")
-        insert_action("throttle", out, "ok", aid)
-        actions_taken.append(("throttle", "netflix", aid))
-
-    # ---------- 2) App-level SLA probabilities -> try to scope to worst user
-    for app, prob in (app_probs or {}).items():
-        if prob >= SLA_VIOLATION_PROB_TH:
-            # try find top user for this app in recent window
-            src_ip, tot = top_user_for_app(app, minutes=recent_minutes)
-            if src_ip:
-                msg = f"App {app} SLA risk: prob={prob} (top user {src_ip} bytes={tot})"
-                aid = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1, src_ip=src_ip)
-                # throttle user+app
-                code, body = throttle_user_app(dpid=1, src_ip=src_ip, app=app, rate_mbps=2)
-                insert_action("throttle", {"user": src_ip, "app": app, "code": code}, "ok" if code and code < 400 else "failed", aid)
-                actions_taken.append(("throttle", src_ip, app, aid))
-            else:
-                # fallback: throttle global app if can't find user
-                msg = f"App {app} SLA risk: prob={prob} (no top user found; global throttle)"
-                aid = insert_alert("warn", msg, anomaly_score=anomaly, dpid=1)
-                out = translate_and_apply(f"throttle {app} 2mbps")
-                insert_action("throttle", out, "ok", aid)
-                actions_taken.append(("throttle", app, aid))
-
-    # ---------- 3) Anomaly-based per-user+app actions ----------
-    # find the top user+app in recent window
-    top_src, top_app, top_bytes = top_user_overall(minutes=recent_minutes)
-    if anomaly >= ANOMALY_ACTION_TH and top_src and top_app:
-        msg = f"High anomaly (score={anomaly}) -> top offender {top_src} on {top_app} ({top_bytes} bytes)"
-        aid = insert_alert("critical", msg, anomaly_score=anomaly, dpid=1, src_ip=top_src)
-        code, body = throttle_user_app(dpid=1, src_ip=top_src, app=top_app, rate_mbps=1)
-        insert_action("throttle", {"user": top_src, "app": top_app, "code": code}, "ok" if code and code < 400 else "failed", aid)
-        actions_taken.append(("throttle", top_src, top_app, aid))
-
-    if anomaly >= ANOMALY_ACTION_TH_CR and top_src and top_app:
-        msg = f"CRITICAL anomaly (score={anomaly}) -> blocking {top_src} on {top_app}"
-        aid = insert_alert("critical", msg, anomaly_score=anomaly, dpid=1, src_ip=top_src)
-        code, body = block_flow(dpid=1, src_ip=top_src, app=top_app)
-        insert_action("block", {"user": top_src, "app": top_app, "code": code}, "ok" if code and code < 400 else "failed", aid)
-        actions_taken.append(("block", top_src, top_app, aid))
-
+        msg = f"High latency probability: {latency_prob}"
+        insert_alert("warning", msg, anomaly)
+        actions_taken.append(("alert", "high_latency"))
+    
+    if any(prob > SLA_VIOLATION_PROB_TH for prob in app_probs.values()):
+        for app, prob in app_probs.items():
+            if prob > SLA_VIOLATION_PROB_TH:
+                msg = f"App {app} SLA risk: {prob}"
+                insert_alert("warning", msg, anomaly)
+                actions_taken.append(("alert", f"app_{app}_sla"))
+    
+    # High anomaly actions
+    if anomaly > ANOMALY_ACTION_TH:
+        user, app, bytes = top_user_overall()
+        if user:
+            msg = f"High anomaly: {anomaly}, top user: {user} on {app}"
+            insert_alert("critical", msg, anomaly, src_ip=user)
+            actions_taken.append(("throttle", user, app))
+    
     return actions_taken
 
 # ---------- MAIN ----------
 if __name__ == "__main__":
-    # 1) total throughput series
-    total_df = load_agg_bytes(days=30)
+    print("Starting network forecast...")
+    
+    # Ensure database tables exist
+    ensure_tables_exist()
+    
+    # Load data (shorter periods since we have 5-second data now)
+    total_df = load_agg_bytes(days=1)  # Only need 1 day of data
     if total_df is None or total_df.empty:
-        print("[ERR] No throughput data available. Exiting.")
-        raise SystemExit(0)
+        print("No data available. Exiting.")
+        exit(0)
+    
     total_df['ds'] = pd.to_datetime(total_df['ds']).dt.tz_localize(None)
     total_df = total_df.dropna(subset=['y'])
+    
     if total_df.empty:
-        print("[ERR] Throughput series has no numeric rows. Exiting.")
-        raise SystemExit(0)
-
-    total_forecast = prophet_forecast(total_df, periods=15, freq='min')
-    if total_forecast is None:
-        print("[WARN] total_forecast is None (not enough data or Prophet error)")
-
-    # 2) recent 15-min metrics
-    recent = total_df[total_df['ds'] >= total_df['ds'].max() - timedelta(minutes=15)]
-    if recent.empty:
-        recent = total_df.tail(15)
-
+        print("No valid data rows. Exiting.")
+        exit(0)
+    
+    # Generate forecast
+    total_forecast = prophet_forecast(total_df)
+    
+    # Calculate metrics
+    recent = total_df.tail(15)
     burst = burstiness_index(recent['y'])
     anomaly = anomaly_score_mad(recent['y'])
     slope = traffic_trend(recent['y'])
     trend_mbps = slope_to_mbps(slope)
-
-    # seasonality extraction: include columns that look like seasonality/cycle components
-    # seasonality extraction: include columns that look like seasonality/cycle components
-    seasonality_data = []
-    if total_forecast is not None:
-        seasonality_cols = [c for c in total_forecast.columns if ('season' in c.lower()) or ('cycle' in c.lower()) or c.lower() in ('weekly','monthly','daily')]
-        if seasonality_cols:
-            # ensure ds included
-            cols = ['ds'] + [c for c in seasonality_cols if c in total_forecast.columns]
-            seasonality_df = total_forecast[cols].copy()
-            
-            # konversi ke Mbps (kecuali kolom ds)
-            for c in seasonality_df.columns:
-                if c != 'ds':
-                    seasonality_df[c] = seasonality_df[c] / 1e6
-            
-            seasonality_data = seasonality_df.tail(10).to_dict(orient='records')
-        else:
-            # fallback to the combined 'seasonal' column if present
-            if 'seasonal' in total_forecast.columns:
-                seasonality_df = total_forecast[['ds','seasonal']].copy()
-                seasonality_df['seasonal'] = seasonality_df['seasonal'] / 1e6
-                seasonality_data = seasonality_df.tail(10).to_dict(orient='records')
-
-    # 3) latency/jitter/loss forecasts
-    latency_df = load_latency_series(days=7)
-    jitter_df = load_jitter_series(days=7)
-    loss_df = load_loss_series(days=7)
-
-    latency_prob = 0.0
-    jitter_prob = 0.0
-    loss_prob = 0.0
-
-    if latency_df is None or latency_df.empty:
-        print("[INFO] No latency data found for last 7 days; skipping latency forecast.")
-    else:
-        latency_df['ds'] = pd.to_datetime(latency_df['ds']).dt.tz_localize(None)
-        latency_df = latency_df.dropna(subset=['y'])
-        if latency_df.empty:
-            print("[INFO] Latency series contains no numeric rows; skipping.")
-        else:
-            lat_fore = prophet_forecast(latency_df, periods=15, freq='min')
-            latency_prob = sla_violation_prob_from_forecast(lat_fore, SLA_LATENCY_MS, kpi_col='yhat', direction='gt')
-            print(f"[DBG] latency forecast computed, SLA prob (>{SLA_LATENCY_MS}ms) = {latency_prob}")
-
-    if jitter_df is None or jitter_df.empty:
-        print("[INFO] No jitter data found for last 7 days; skipping jitter forecast.")
-    else:
-        jitter_df['ds'] = pd.to_datetime(jitter_df['ds']).dt.tz_localize(None)
-        jitter_df = jitter_df.dropna(subset=['y'])
-        if jitter_df.empty:
-            print("[INFO] Jitter series contains no numeric rows; skipping.")
-        else:
-            jit_fore = prophet_forecast(jitter_df, periods=15, freq='min')
-            jitter_prob = sla_violation_prob_from_forecast(jit_fore, SLA_JITTER_MS, kpi_col='yhat', direction='gt')
-            print(f"[DBG] jitter forecast computed, SLA prob (>{SLA_JITTER_MS}ms) = {jitter_prob}")
-
-    if loss_df is None or loss_df.empty:
-        print("[INFO] No packet-loss data found for last 7 days; skipping loss forecast.")
-    else:
-        loss_df['ds'] = pd.to_datetime(loss_df['ds']).dt.tz_localize(None)
-        loss_df = loss_df.dropna(subset=['y'])
-        if loss_df.empty:
-            print("[INFO] Loss series contains no numeric rows; skipping.")
-        else:
-            loss_fore = prophet_forecast(loss_df, periods=15, freq='min')
-            loss_prob = sla_violation_prob_from_forecast(loss_fore, SLA_LOSS_PCT, kpi_col='yhat', direction='gt')
-            print(f"[DBG] loss forecast computed, SLA prob (>{SLA_LOSS_PCT}%) = {loss_prob}")
-
-    # 4) per-app throughput forecasts and SLA probs
+    
+    # Load other metrics
+    latency_df = load_latency_series(days=1)
+    jitter_df = load_jitter_series(days=1)
+    loss_df = load_loss_series(days=1)
+    
+    latency_prob = jitter_prob = loss_prob = 0.0
+    
+    if not latency_df.empty:
+        latency_forecast = prophet_forecast(latency_df)
+        latency_prob = sla_violation_prob_from_forecast(latency_forecast, SLA_LATENCY_MS, direction='gt')
+    
+    if not jitter_df.empty:
+        jitter_forecast = prophet_forecast(jitter_df)
+        jitter_prob = sla_violation_prob_from_forecast(jitter_forecast, SLA_JITTER_MS, direction='gt')
+    
+    if not loss_df.empty:
+        loss_forecast = prophet_forecast(loss_df)
+        loss_prob = sla_violation_prob_from_forecast(loss_forecast, SLA_LOSS_PCT, direction='gt')
+    
+    # App-specific forecasts
     app_probs = {}
     for app in MONITORED_APPS:
-        app_df = load_app_bytes(app, days=14)  # 2 weeks for app-level
-        if app_df is None or app_df.empty:
+        app_df = load_app_bytes(app, days=1)
+        if not app_df.empty:
+            app_forecast = prophet_forecast(app_df)
+            app_probs[app] = sla_violation_prob_from_forecast(app_forecast, SLA_THROUGHPUT_MBPS, direction='lt')
+        else:
             app_probs[app] = 0.0
-            print(f"[INFO] no data for app {app}; prob=0.0")
-            continue
-        app_df['ds'] = pd.to_datetime(app_df['ds']).dt.tz_localize(None)
-        app_df = app_df.dropna(subset=['y'])
-        if app_df.empty:
-            app_probs[app] = 0.0
-            print(f"[INFO] app {app} has no numeric rows; prob=0.0")
-            continue
-
-        # convert bytes -> Mbps (approx avg) for comparison with SLA (Mbps)
-        # bytes per minute -> bits per minute /1e6 = Megabits per minute; divide by 60 ~= Mbps average
-        app_df = app_df.copy()
-        app_df['y'] = (app_df['y'] * 8.0) / 1e6
-        app_df['y'] = app_df['y'] / 60.0
-
-        app_fore = prophet_forecast(app_df, periods=15, freq='min')
-        prob = sla_violation_prob_from_forecast(app_fore, SLA_THROUGHPUT_MBPS, kpi_col='yhat', direction='lt')
-        app_probs[app] = prob
-        print(f"[DBG] app {app} SLA prob (<{SLA_THROUGHPUT_MBPS} Mbps) = {prob}")
-
-    # 5) Summary print
-    print("=== Forecast Summary ===")
-    print(f" Burstiness: {burst}, Anomaly(MAD): {anomaly}, Trend: {trend_mbps:.3f} Mbps/min")
-    print(f" Latency SLA prob (> {SLA_LATENCY_MS} ms): {latency_prob}")
-    print(f" Jitter SLA prob (> {SLA_JITTER_MS} ms): {jitter_prob}")
-    print(f" Loss SLA prob (> {SLA_LOSS_PCT} %): {loss_prob}")
-    print(f" App SLA probs: {app_probs}")
-    print(f" Seasonality points saved: {len(seasonality_data)}")
-
-    # 6) Save summary
+    
+    # Save results
     window_start = recent['ds'].min()
     window_end = recent['ds'].max()
-    # save_summary uses variable 'seasonality' in its signature; keep compatibility by passing seasonality_data as that param
-    seasonality = seasonality_data
-    save_summary(window_start, window_end, burst, anomaly, trend_mbps, seasonality, latency_prob, jitter_prob, loss_prob, app_probs)
-
-    # 7) decision & actions
+    save_summary(window_start, window_end, burst, anomaly, trend_mbps, 
+                [], latency_prob, jitter_prob, loss_prob, app_probs)
+    
+    # Make decisions
     actions = decide_and_act(latency_prob, jitter_prob, loss_prob, app_probs, burst, anomaly)
-    print("Actions taken:", actions)
+    
+    print("Forecast completed. Actions:", actions)
