@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-forecast.py - FINAL FIXED VERSION
+forecast.py - EXACT DATA CALCULATIONS ONLY (No Random Values)
 """
 
 import os
@@ -12,11 +12,11 @@ from datetime import datetime, timedelta
 
 DB_DSN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 
-# SLA thresholds - Realistic for your test network
-SLA_THROUGHPUT_MBPS = 0.3    # Very low threshold for iperf test traffic
-SLA_LATENCY_MS = 50.0        
-SLA_JITTER_MS = 20.0        
-SLA_LOSS_PCT = 1.5          
+# SLA thresholds
+SLA_THROUGHPUT_MBPS = 0.3
+SLA_LATENCY_MS = 50.0
+SLA_JITTER_MS = 20.0
+SLA_LOSS_PCT = 1.5
 
 CATEGORIES = ["video", "gaming", "voip", "data"]
 
@@ -48,17 +48,17 @@ def load_time_series_for_kpi(sql_query, params=None):
         print(f"Error loading time series: {e}")
         return pd.DataFrame()
 
-def load_recent_traffic(minutes=10):
-    """Load recent traffic data"""
+def load_recent_traffic_data(minutes=15):
+    """Load comprehensive recent traffic data"""
     q = f"""
     SELECT 
-        timestamp as ds, 
-        SUM(bytes_tx + bytes_rx) AS bytes,
-        AVG(latency_ms) AS latency,
-        STDDEV(latency_ms) AS jitter,
+        timestamp,
+        SUM(bytes_tx + bytes_rx) AS total_bytes,
+        AVG(latency_ms) AS avg_latency,
+        STDDEV(latency_ms) AS avg_jitter,
         CASE WHEN SUM(pkts_tx) = 0 THEN 0 
              ELSE 100.0 * (SUM(pkts_tx) - SUM(pkts_rx)) / SUM(pkts_tx) 
-        END AS loss
+        END AS avg_loss
     FROM traffic.flow_stats 
     WHERE timestamp >= NOW() - interval '{minutes} minutes'
     GROUP BY timestamp 
@@ -66,168 +66,175 @@ def load_recent_traffic(minutes=10):
     """
     return load_time_series_for_kpi(q)
 
-def load_recent_category_traffic(category, minutes=10):
-    """Load recent category traffic"""
+def load_category_traffic_data(minutes=15):
+    """Load category-wise traffic data"""
     q = f"""
     SELECT 
-        timestamp as ds, 
-        SUM(bytes_tx + bytes_rx) AS bytes
+        timestamp,
+        category,
+        SUM(bytes_tx + bytes_rx) AS bytes,
+        COUNT(*) AS flow_count
     FROM traffic.flow_stats 
-    WHERE category = %s AND timestamp >= NOW() - interval '{minutes} minutes'
-    GROUP BY timestamp 
-    ORDER BY timestamp;
+    WHERE timestamp >= NOW() - interval '{minutes} minutes'
+    GROUP BY timestamp, category
+    ORDER BY timestamp, category;
     """
-    return load_time_series_for_kpi(q, params=(category,))
+    return load_time_series_for_kpi(q)
 
-# ---------- simple metrics ----------
-def calculate_burstiness(series):
-    """Calculate realistic burstiness index"""
-    if series is None or series.empty or len(series) < 3:
+# ---------- exact metric calculations ----------
+def calculate_exact_burstiness(series):
+    """Calculate burstiness index from exact data"""
+    if series is None or series.empty or len(series) < 2:
         return 1.0
     
-    # Use last 8 values for burstiness
-    values = series.tail(8).values
+    values = series.values
     if np.mean(values) == 0:
         return 1.0
     
-    burstiness = np.max(values) / np.mean(values)
-    return round(float(max(1.0, min(3.0, burstiness))), 2)  # Limit to reasonable range
+    return round(float(np.max(values) / np.mean(values)), 3)
 
-def calculate_anomaly(series):
-    """Calculate meaningful anomaly score"""
+def calculate_exact_anomaly(series):
+    """Calculate anomaly score from exact data using IQR method"""
     if series is None or series.empty or len(series) < 5:
         return 0.0
     
-    values = series.tail(10).values
-    if len(values) < 3:
+    values = series.values
+    Q1 = np.percentile(values, 25)
+    Q3 = np.percentile(values, 75)
+    IQR = Q3 - Q1
+    
+    if IQR == 0:
         return 0.0
     
-    # Calculate z-score of last value
-    mean_val = np.mean(values[:-1])  # Mean of all but last value
-    std_val = np.std(values[:-1]) if len(values) > 2 else 1.0
+    # Check if last value is an outlier
+    last_value = values[-1]
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
     
-    if std_val == 0:
-        return 0.0
+    if last_value < lower_bound or last_value > upper_bound:
+        # Calculate how many IQRs away from the median
+        median = np.median(values[:-1])
+        anomaly_score = abs(last_value - median) / IQR
+        return round(float(anomaly_score), 3)
     
-    z_score = abs(values[-1] - mean_val) / std_val
-    return round(float(min(5.0, z_score)), 2)  # Cap at 5.0
+    return 0.0
 
-def calculate_trend(series):
-    """Calculate traffic trend in Mbps per minute"""
+def calculate_exact_trend(series):
+    """Calculate exact traffic trend in Mbps per minute"""
     if series is None or series.empty or len(series) < 3:
         return 0.0
     
-    values = series.tail(6).values  # Last 6 data points
+    values = series.values
     x = np.arange(len(values))
     
     try:
         slope = np.polyfit(x, values, 1)[0]
-        # Convert bytes to Mbps per minute (assuming 5-second intervals)
-        slope_mbps = (slope * 8) / 1e6 * 12  # Convert to Mbps per minute
+        # Convert bytes to Mbps per minute (assuming data points are per minute)
+        slope_mbps = (slope * 8) / 1e6
         return round(float(slope_mbps), 3)
     except:
         return 0.0
 
-def calculate_sla_probability(current_value, threshold, direction='gt'):
-    """Calculate realistic SLA violation probability"""
-    if current_value is None:
+def calculate_exact_sla_probability(current_value, threshold, direction='gt'):
+    """Calculate exact SLA violation probability based on current value"""
+    if current_value is None or current_value == 0:
         return 0.0
     
     try:
         if direction == 'lt':
-            # Throughput: probability increases as value decreases below threshold
-            if current_value <= threshold:
-                return round(min(0.9, (threshold - current_value) / threshold + 0.1), 3)
-            else:
-                return round(max(0.0, 0.2 * (1 - current_value/threshold)), 3)
+            # For throughput: probability based on how far below threshold
+            if current_value < threshold:
+                violation_ratio = (threshold - current_value) / threshold
+                return round(min(0.95, violation_ratio), 3)
+            return 0.0
         else:
-            # Latency/Jitter/Loss: probability increases as value increases above threshold
-            if current_value >= threshold:
-                return round(min(0.9, (current_value - threshold) / threshold + 0.1), 3)
-            else:
-                return round(max(0.0, 0.2 * (current_value/threshold)), 3)
+            # For latency/jitter/loss: probability based on how far above threshold
+            if current_value > threshold:
+                violation_ratio = (current_value - threshold) / threshold
+                return round(min(0.95, violation_ratio), 3)
+            return 0.0
     except:
         return 0.0
 
 # ---------- MAIN ----------
 if __name__ == "__main__":
-    print("=== Starting Network Forecast ===")
-    print(f"Current time: {datetime.now()}")
+    print("=== Starting Exact Data Network Forecast ===")
+    print(f"Analysis time: {datetime.now()}")
     
     # 1) Load recent traffic data
-    traffic_df = load_recent_traffic(minutes=15)
+    traffic_df = load_recent_traffic_data(minutes=15)
+    category_df = load_category_traffic_data(minutes=15)
     
     if traffic_df.empty:
-        print("No data available")
-        # Create default values
-        current_time = datetime.now()
-        result = {
-            'window_start': current_time - timedelta(minutes=5),
-            'window_end': current_time,
-            'burstiness': 1.0,
-            'anomaly': 0.0,
-            'trend': 0.0,
-            'latency_prob': 0.0,
-            'jitter_prob': 0.0,
-            'loss_prob': 0.0,
-            'category_probs': {cat: 0.1 for cat in CATEGORIES}
-        }
-    else:
-        # Convert timestamps
-        traffic_df['ds'] = pd.to_datetime(traffic_df['ds'])
-        
-        # Calculate metrics
-        bytes_series = traffic_df['bytes'].dropna()
-        latency_series = traffic_df['latency'].dropna()
-        jitter_series = traffic_df['jitter'].dropna()
-        loss_series = traffic_df['loss'].dropna()
-        
-        # Get current values
-        current_bytes = bytes_series.iloc[-1] if not bytes_series.empty else 0
-        current_latency = latency_series.iloc[-1] if not latency_series.empty else 0
-        current_jitter = jitter_series.iloc[-1] if not jitter_series.empty else 0
-        current_loss = loss_series.iloc[-1] if not loss_series.empty else 0
-        
-        # Calculate metrics
-        burstiness = calculate_burstiness(bytes_series)
-        anomaly = calculate_anomaly(bytes_series)
-        trend = calculate_trend(bytes_series)
-        
-        # Calculate SLA probabilities
-        latency_prob = calculate_sla_probability(current_latency, SLA_LATENCY_MS, 'gt')
-        jitter_prob = calculate_sla_probability(current_jitter, SLA_JITTER_MS, 'gt')
-        loss_prob = calculate_sla_probability(current_loss, SLA_LOSS_PCT, 'gt')
-        
-        # Calculate category probabilities
-        category_probs = {}
-        for category in CATEGORIES:
-            cat_df = load_recent_category_traffic(category, minutes=15)
-            if not cat_df.empty:
-                cat_df['ds'] = pd.to_datetime(cat_df['ds'])
-                bytes_series = cat_df['bytes'].dropna()
-                if not bytes_series.empty:
-                    current_cat_bytes = bytes_series.iloc[-1]
-                    current_cat_mbps = (current_cat_bytes * 8) / 1e6  # Convert to Mbps
-                    cat_prob = calculate_sla_probability(current_cat_mbps, SLA_THROUGHPUT_MBPS, 'lt')
-                    category_probs[category] = cat_prob
-                else:
-                    category_probs[category] = 0.1
-            else:
-                category_probs[category] = 0.1
-        
-        result = {
-            'window_start': traffic_df['ds'].min(),
-            'window_end': traffic_df['ds'].max(),
-            'burstiness': burstiness,
-            'anomaly': anomaly,
-            'trend': trend,
-            'latency_prob': latency_prob,
-            'jitter_prob': jitter_prob,
-            'loss_prob': loss_prob,
-            'category_probs': category_probs
-        }
+        print("ERROR: No traffic data found in the specified time window")
+        exit(1)
     
-    # 2) Save to database
+    # 2) Process timestamps
+    traffic_df['timestamp'] = pd.to_datetime(traffic_df['timestamp'])
+    
+    # 3) Calculate main metrics
+    bytes_series = traffic_df['total_bytes'].dropna()
+    latency_series = traffic_df['avg_latency'].dropna()
+    jitter_series = traffic_df['avg_jitter'].dropna()
+    loss_series = traffic_df['avg_loss'].dropna()
+    
+    burstiness = calculate_exact_burstiness(bytes_series)
+    anomaly = calculate_exact_anomaly(bytes_series)
+    trend = calculate_exact_trend(bytes_series)
+    
+    # 4) Calculate network quality probabilities
+    current_latency = latency_series.iloc[-1] if not latency_series.empty else 0
+    current_jitter = jitter_series.iloc[-1] if not jitter_series.empty else 0
+    current_loss = loss_series.iloc[-1] if not loss_series.empty else 0
+    
+    latency_prob = calculate_exact_sla_probability(current_latency, SLA_LATENCY_MS, 'gt')
+    jitter_prob = calculate_exact_sla_probability(current_jitter, SLA_JITTER_MS, 'gt')
+    loss_prob = calculate_exact_sla_probability(current_loss, SLA_LOSS_PCT, 'gt')
+    
+    # 5) Calculate category probabilities
+    category_probs = {}
+    
+    if not category_df.empty:
+        category_df['timestamp'] = pd.to_datetime(category_df['timestamp'])
+        
+        for category in CATEGORIES:
+            cat_data = category_df[category_df['category'] == category]
+            
+            if not cat_data.empty:
+                # Get most recent data for this category
+                latest_cat_data = cat_data.iloc[-1]
+                current_bytes = latest_cat_data['bytes']
+                current_mbps = (current_bytes * 8) / 1e6  # Convert to Mbps
+                
+                cat_prob = calculate_exact_sla_probability(current_mbps, SLA_THROUGHPUT_MBPS, 'lt')
+                category_probs[category] = cat_prob
+            else:
+                category_probs[category] = 0.0
+    else:
+        # No category data found
+        for category in CATEGORIES:
+            category_probs[category] = 0.0
+    
+    # 6) Prepare results
+    result = {
+        'window_start': traffic_df['timestamp'].min(),
+        'window_end': traffic_df['timestamp'].max(),
+        'burstiness': burstiness,
+        'anomaly': anomaly,
+        'trend': trend,
+        'latency_prob': latency_prob,
+        'jitter_prob': jitter_prob,
+        'loss_prob': loss_prob,
+        'category_probs': category_probs,
+        'current_values': {
+            'throughput_mbps': (bytes_series.iloc[-1] * 8) / 1e6 if not bytes_series.empty else 0,
+            'latency_ms': current_latency,
+            'jitter_ms': current_jitter,
+            'loss_pct': current_loss
+        }
+    }
+    
+    # 7) Save to database
     try:
         run_sql("""
             INSERT INTO traffic.summary_forecast_v2
@@ -240,27 +247,44 @@ if __name__ == "__main__":
             result['burstiness'],
             result['anomaly'],
             result['trend'],
-            json.dumps([]),  # Empty seasonality
+            json.dumps([]),
             result['latency_prob'],
             result['jitter_prob'],
             result['loss_prob'],
             json.dumps(result['category_probs'])
         ))
+        print("✓ Results saved to database")
     except Exception as e:
         print(f"Error saving to database: {e}")
     
-    # 3) Print results
-    print("\n=== FORECAST RESULTS ===")
+    # 8) Print detailed results
+    print("\n=== EXACT DATA FORECAST RESULTS ===")
     print(f"Time Window: {result['window_start']} to {result['window_end']}")
+    print(f"Data Points: {len(traffic_df)}")
+    print(f"\nCURRENT NETWORK STATE:")
+    print(f"Throughput: {result['current_values']['throughput_mbps']:.3f} Mbps")
+    print(f"Latency: {result['current_values']['latency_ms']:.3f} ms")
+    print(f"Jitter: {result['current_values']['jitter_ms']:.3f} ms") 
+    print(f"Loss: {result['current_values']['loss_pct']:.3f} %")
+    
+    print(f"\nNETWORK METRICS:")
     print(f"Burstiness Index: {result['burstiness']}")
     print(f"Anomaly Score: {result['anomaly']}")
     print(f"Traffic Trend: {result['trend']} Mbps/min")
-    print(f"\nNETWORK QUALITY:")
-    print(f"Latency SLA Prob (> {SLA_LATENCY_MS}ms): {result['latency_prob']:.3f}")
-    print(f"Jitter SLA Prob (> {SLA_JITTER_MS}ms): {result['jitter_prob']:.3f}")
-    print(f"Loss SLA Prob (> {SLA_LOSS_PCT}%): {result['loss_prob']:.3f}")
-    print(f"\nCATEGORY THROUGHPUT (< {SLA_THROUGHPUT_MBPS}Mbps):")
+    
+    print(f"\nSLA VIOLATION PROBABILITIES:")
+    print(f"Latency (> {SLA_LATENCY_MS}ms): {result['latency_prob']:.3f}")
+    print(f"Jitter (> {SLA_JITTER_MS}ms): {result['jitter_prob']:.3f}")
+    print(f"Loss (> {SLA_LOSS_PCT}%): {result['loss_prob']:.3f}")
+    
+    print(f"\nCATEGORY THROUGHPUT PROBABILITIES (< {SLA_THROUGHPUT_MBPS}Mbps):")
     for category, prob in result['category_probs'].items():
         print(f"  {category}: {prob:.3f}")
+    
+    print(f"\nDATA QUALITY INDICATORS:")
+    print(f"Bytes data points: {len(bytes_series)}")
+    print(f"Latency data points: {len(latency_series)}")
+    print(f"Jitter data points: {len(jitter_series)}")
+    print(f"Loss data points: {len(loss_series)}")
     
     print("\n=== FORECAST COMPLETED ===")
