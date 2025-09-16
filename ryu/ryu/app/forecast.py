@@ -61,7 +61,7 @@ def load_agg_bytes(hours=4):
         SUM(bytes_tx + bytes_rx) AS y
     FROM traffic.flow_stats 
     WHERE timestamp >= NOW() - interval '{hours} hours'
-    ORDER BY timestamp;
+    group by timestamp order by timestamp;
     """
     return load_time_series_for_kpi(q)
 
@@ -73,7 +73,7 @@ def load_category_bytes(category, hours=4):
         SUM(bytes_tx + bytes_rx) AS y
     FROM traffic.flow_stats 
     WHERE category = %s AND timestamp >= NOW() - interval '{hours} hours'
-    ORDER BY timestamp;
+    group by timestamp order by timestamp;
     """
     return load_time_series_for_kpi(q, params=(category,))
 
@@ -86,7 +86,7 @@ def load_latency_series(hours=4):
     FROM traffic.flow_stats 
     WHERE latency_ms IS NOT NULL 
     AND timestamp >= NOW() - interval '{hours} hours'
-    ORDER BY timestamp;
+    group by timestamp order by timestamp;
     """
     return load_time_series_for_kpi(q)
 
@@ -99,7 +99,7 @@ def load_jitter_series(hours=4):
     FROM traffic.flow_stats 
     WHERE latency_ms IS NOT NULL 
     AND timestamp >= NOW() - interval '{hours} hours'
-    ORDER BY timestamp;
+    group by timestamp order by timestamp;
     """
     return load_time_series_for_kpi(q)
 
@@ -113,7 +113,7 @@ def load_loss_series(hours=4):
         END AS y
     FROM traffic.flow_stats 
     WHERE timestamp >= NOW() - interval '{hours} hours'
-    ORDER BY timestamp;
+    group by timestamp order by timestamp;
     """
     return load_time_series_for_kpi(q)
 
