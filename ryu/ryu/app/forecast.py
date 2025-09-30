@@ -246,11 +246,6 @@ def forecast_throughput_prophet(traffic_df, periods=30):
 # Dynamic SLA calculation
 # -----------------------
 def dynamic_sla_from_history(traffic_df, method='percentile', percentile=5):
-    """
-    Compute dynamic SLA threshold for throughput:
-    - method='percentile' => returns Xth percentile of historical throughput (Mbps)
-    - method='mean_std' => returns mean - k * std (safer)
-    """
     if traffic_df is None or traffic_df.empty:
         return SLA_THROUGHPUT_MBPS_BASE
     df = traffic_df.copy()
@@ -267,10 +262,9 @@ def dynamic_sla_from_history(traffic_df, method='percentile', percentile=5):
         return round(float(threshold), 6)
 
 # -----------------------
-# Adaptive policy (deterministic)
+# Adaptive policy
 # -----------------------
 def get_action_stats(window=ACTION_HISTORY_WINDOW):
-    """Return dict {action: {count, avg_reward}} from DB history (most recent window rows)"""
     rows = run_sql("SELECT action, reward FROM forecast_actions_log ORDER BY ts DESC LIMIT %s", (window,), fetch=True)
     stats = {a: {"count": 0, "avg_reward": 0.0} for a in ACTIONS}
     if not rows:
@@ -288,54 +282,35 @@ def get_action_stats(window=ACTION_HISTORY_WINDOW):
     return stats
 
 def select_action_adaptive(pre_metrics, forecast_df, sla_dynamic):
-    """
-    Deterministic selection:
-    - Compute candidate actions and reasons
-    - Use historical avg_reward to pick best action
-    - If no history (all avg_reward == 0), pick safe default or 'none'
-    """
-    # Candidate list with simple heuristic scoring
     candidates = []
-
-    # Example heuristics:
-    # If predicted throughput median is below SLA -> scale_up or reroute
     if not forecast_df.empty:
         future_median = float(forecast_df['yhat'].median())
     else:
         future_median = pre_metrics['throughput_mbps']
 
-    # If predicted below SLA or trend negative and small throughput
     if future_median < sla_dynamic * 0.9:
         candidates += [("scale_up", "Predicted throughput below dynamic SLA")]
         candidates += [("reroute", "Predicted localized deficit; reroute heavy flows")]
-    # If high burstiness => rate limit
     if pre_metrics['burstiness'] > 1.0:
         candidates += [("rate_limit", "High burstiness detected")]
-    # If many anomalies => alert & investigate
     if pre_metrics['anomaly'] > 1.5:
         candidates += [("alert", "Multiple anomalies detected")]
-    # Always include 'none' as fallback
     candidates += [("none", "No direct action — monitor")]
 
-    # Get action stats
     stats = get_action_stats()
 
-    # Score candidates by historical avg_reward (higher is better). Deterministically pick max.
     best_action = None
     best_score = -9999.0
     for act, reason in candidates:
         score = stats.get(act, {}).get("avg_reward", 0.0)
-        # Tie-breaking by preference order (scale_up > reroute > rate_limit > alert > none)
         pref_order = {"scale_up":5, "reroute":4, "rate_limit":3, "alert":2, "none":1}
-        score = score + (pref_order.get(act,0) * 1e-6)  # tiny deterministic tie-breaker
+        score = score + (pref_order.get(act,0) * 1e-6)
         if score > best_score:
             best_score = score
             best_action = (act, reason)
 
-    # If all avg_reward are zero (no history), pick deterministic safe default:
     all_zero = all(stats[a]["avg_reward"] == 0.0 for a in ACTIONS)
     if all_zero:
-        # Choose conservative default based on immediate metrics
         if pre_metrics['anomaly'] > 2:
             return ("alert", "No history; anomalies high -> alert")
         if pre_metrics['burstiness'] > 1.0:
@@ -344,22 +319,20 @@ def select_action_adaptive(pre_metrics, forecast_df, sla_dynamic):
             return ("reroute", "No history; predicted deficit -> reroute")
         return ("none", "No history; default monitor")
 
-    return best_action  # (action, reason)
+    return best_action
 
 # -----------------------
-# Apply action to Ryu (optional)
+# Apply action
 # -----------------------
 def apply_action_to_ryu(action):
-    # This is a placeholder; adapt to your Ryu rule formats
     if not RYU_REST_URL:
         return False, "Ryu URL not configured"
     try:
         if action == "scale_up":
-            # Example: install flow to prioritize certain traffic (customize)
             flow_rule = {
                 "dpid": 1,
                 "priority": 200,
-                "match": {"ip_proto":6},  # example
+                "match": {"ip_proto":6},
                 "actions": [{"type":"OUTPUT","port":3}]
             }
             r = requests.post(RYU_REST_URL, json=flow_rule, timeout=5)
@@ -374,10 +347,8 @@ def apply_action_to_ryu(action):
             r = requests.post(RYU_REST_URL, json=flow_rule, timeout=5)
             return r.status_code == 200, f"Ryu status {r.status_code}"
         elif action == "rate_limit":
-            # Many Ryu setups need external policer; this is placeholder
             return False, "rate_limit requires external policer integration"
         elif action == "alert":
-            # Just log / send alert (not integrated here)
             return False, "alert (no Ryu rule)"
         elif action == "none":
             return True, "no-op"
@@ -387,17 +358,15 @@ def apply_action_to_ryu(action):
         return False, str(e)
 
 # -----------------------
-# Logging & reward computation
+# Logging
 # -----------------------
 def log_action_and_outcome(action, reason, window_start, window_end, pre_metrics, post_metrics, meta=None):
-    # Reward definition (deterministic): positive reward if metrics improved after action:
-    # reward = reduction in (burstiness + anomaly_count) normalized by pre values
     pre_score = float(pre_metrics.get('burstiness',0.0) + pre_metrics.get('anomaly',0.0))
     post_score = float(post_metrics.get('burstiness',0.0) + post_metrics.get('anomaly',0.0))
     if pre_score == 0:
         reward = 0.0
     else:
-        reward = round(max(-1.0, min(1.0, (pre_score - post_score) / (pre_score))), 6)  # in [-1,1]
+        reward = round(max(-1.0, min(1.0, (pre_score - post_score) / (pre_score))), 6)
 
     run_sql("""
         INSERT INTO forecast_actions_log
@@ -418,12 +387,12 @@ def log_action_and_outcome(action, reason, window_start, window_end, pre_metrics
         post_metrics.get('anomaly'),
         post_metrics.get('throughput_mbps'),
         reward,
-        json.dumps(meta or {})
+        json.dumps(meta or {}, default=str)
     ))
     return reward
 
 # -----------------------
-# Gemini explanation (optional, deterministic prompt)
+# Gemini
 # -----------------------
 def ask_gemini_long_reasoning(metrics, forecast_df):
     if not GEMINI_AVAILABLE or GEMINI_API_KEY is None:
@@ -447,7 +416,7 @@ def ask_gemini_long_reasoning(metrics, forecast_df):
     return resp.text
 
 # -----------------------
-# Main orchestration
+# Metrics
 # -----------------------
 def compute_current_metrics(traffic_df, category_df):
     traffic_df = traffic_df.copy()
@@ -475,37 +444,45 @@ def compute_current_metrics(traffic_df, category_df):
         'loss_prob': loss_prob
     }
 
+# -----------------------
+# Main
+# -----------------------
 def main_run():
     ensure_tables_exist()
-    print(f"[{datetime.now()}] Starting adaptive forecast run...")
 
-    # 1) Load data
-    traffic_df = load_recent_traffic_data(minutes=OBS_WINDOW_MINUTES)
-    category_df = load_category_traffic_data(minutes=OBS_WINDOW_MINUTES)
-    if traffic_df is None or traffic_df.empty:
-        print("No traffic data available. Exiting.")
-        return
+    traffic_df = load_recent_traffic_data()
+    category_df = load_category_traffic_data()
 
-    # 2) Compute current metrics
     pre_metrics = compute_current_metrics(traffic_df, category_df)
-    window_start = pd.to_datetime(traffic_df['timestamp'].min())
-    window_end = pd.to_datetime(traffic_df['timestamp'].max())
+    window_start = traffic_df['timestamp'].min() if not traffic_df.empty else datetime.now() - timedelta(minutes=OBS_WINDOW_MINUTES)
+    window_end = traffic_df['timestamp'].max() if not traffic_df.empty else datetime.now()
 
-    # 3) Dynamic SLA
-    sla_dynamic = dynamic_sla_from_history(traffic_df, method='percentile', percentile=5)
-    print(f"Dynamic SLA throughput (5th percentile): {sla_dynamic} Mbps")
-
-    # 4) Forecast
     forecast_df = forecast_throughput_prophet(traffic_df, periods=30)
-    if forecast_df.empty:
-        print("Forecast unavailable (insufficient data). Proceeding with exact metrics only.")
+    sla_dynamic = dynamic_sla_from_history(traffic_df, method='percentile', percentile=5)
 
-    # 5) Prepare and save summary (DB)
+    action, reason = select_action_adaptive(pre_metrics, forecast_df, sla_dynamic)
+    success, msg = apply_action_to_ryu(action)
+    print(f"[ACTION] {action} - {reason} (Ryu: {msg})")
+
+    time.sleep(5)
+
+    post_df = load_recent_traffic_data(minutes=POST_ACTION_OBS_MINUTES)
+    post_metrics = compute_current_metrics(post_df, category_df)
+
+    reward = log_action_and_outcome(action, reason, window_start, window_end, pre_metrics, post_metrics, meta={"ryu_msg": msg})
+    print(f"[REWARD] {reward}")
+
+    # Insert summary forecast
+    forecast_records = forecast_df.tail(10).copy()
+    if not forecast_records.empty:
+        forecast_records['ds'] = forecast_records['ds'].astype(str)
+    forecast_json = forecast_records.to_dict(orient='records')
+
     run_sql("""
         INSERT INTO summary_forecast_hybrid
         (window_start, window_end, burstiness_index, anomaly_score, traffic_trend,
          latency_sla_prob, jitter_sla_prob, loss_sla_prob, category_sla_prob, forecast_json)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, (
         window_start,
         window_end,
@@ -515,51 +492,16 @@ def main_run():
         pre_metrics['latency_prob'],
         pre_metrics['jitter_prob'],
         pre_metrics['loss_prob'],
-        json.dumps({}),
-        json.dumps(forecast_df.tail(10).to_dict(orient='records') if not forecast_df.empty else [])
+        json.dumps({}, default=str),
+        json.dumps(forecast_json, default=str)
     ))
 
-    # 6) Choose action adaptively (deterministic)
-    action, reason = select_action_adaptive(pre_metrics, forecast_df, sla_dynamic)
-    print(f"Selected action: {action} — Reason: {reason}")
-
-    # 7) Apply action to Ryu (or simulate)
-    success, ryu_msg = apply_action_to_ryu(action)
-    print(f"Action apply result: success={success}, info={ryu_msg}")
-
-    # 8) Wait (or schedule) to collect post-action metrics for reward computation.
-    # In a real deployment you'd wait POST_ACTION_OBS_MINUTES. Here we perform a short deterministic wait
-    # to allow data to accumulate. You can increase this or run a separate collector later.
-    wait_seconds = 5  # small, deterministic; in production use >= POST_ACTION_OBS_MINUTES * 60
-    print(f"Gathering post-action metrics (waiting {wait_seconds}s)...")
-    time.sleep(wait_seconds)
-
-    # 9) Load recent data again for post metrics (using a slightly shorter window to focus on after-action)
-    post_df = load_recent_traffic_data(minutes=POST_ACTION_OBS_MINUTES)
-    if post_df is None or post_df.empty:
-        print("No post-action data available; logging with zeroed post metrics.")
-        post_metrics = {'throughput_mbps': pre_metrics['throughput_mbps'], 'burstiness': pre_metrics['burstiness'], 'anomaly': pre_metrics['anomaly']}
-    else:
-        post_metrics = compute_current_metrics(post_df, category_df)
-
-    # 10) Log action outcome and compute reward
-    reward = log_action_and_outcome(action, reason, window_start, window_end, pre_metrics, post_metrics, meta={"ryu_msg": ryu_msg, "success": success})
-    print(f"Logged action with reward {reward}")
-
-    # 11) Optional: get Gemini long reasoning for human operator
     if GEMINI_AVAILABLE and GEMINI_API_KEY:
         try:
-            reasoning = ask_gemini_long_reasoning(pre_metrics, forecast_df if not forecast_df.empty else pd.DataFrame())
-            print("\n--- GEMINI LONG REASONING ---\n")
-            print(reasoning)
-            print("\n--- END GEMINI ---\n")
+            reasoning = ask_gemini_long_reasoning(pre_metrics, forecast_df)
+            print("[GEMINI]\n", reasoning)
         except Exception as e:
-            print(f"Gemini reasoning failed: {e}")
+            print("[GEMINI ERROR]", e)
 
-    print(f"[{datetime.now()}] Adaptive run completed.")
-
-# -----------------------
-# Entrypoint
-# -----------------------
 if __name__ == "__main__":
     main_run()
