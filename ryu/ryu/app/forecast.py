@@ -231,7 +231,7 @@ def forecast_throughput_prophet(traffic_df, periods=30):
     if traffic_df is None or traffic_df.empty:
         return pd.DataFrame()
     df = traffic_df[['timestamp', 'total_bytes']].copy()
-    df['ds'] = pd.to_datetime(df['timestamp'])
+    df['ds'] = pd.to_datetime(df['timestamp']).dt.tz_localize(None)
     df['y'] = (df['total_bytes'] * 8) / 1e6  # bytes -> Mbps
     df = df[['ds', 'y']].dropna()
     if len(df) < 5:
@@ -451,7 +451,7 @@ def ask_gemini_long_reasoning(metrics, forecast_df):
 # -----------------------
 def compute_current_metrics(traffic_df, category_df):
     traffic_df = traffic_df.copy()
-    traffic_df['timestamp'] = pd.to_datetime(traffic_df['timestamp'])
+    traffic_df['timestamp'] = pd.to_datetime(traffic_df['timestamp']).dt.tz_localize(None)
     bytes_series = traffic_df['total_bytes'].dropna() if 'total_bytes' in traffic_df else pd.Series(dtype=float)
     latency_series = traffic_df['avg_latency'].dropna() if 'avg_latency' in traffic_df else pd.Series(dtype=float)
     jitter_series = traffic_df['avg_jitter'].dropna() if 'avg_jitter' in traffic_df else pd.Series(dtype=float)
