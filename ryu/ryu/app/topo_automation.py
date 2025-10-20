@@ -8,7 +8,10 @@ from mininet.log import setLogLevel, info
 import time
 import subprocess
 import threading
+import random
+from datetime import datetime
 
+# Kelas LinuxRouter dan ComplexTopo tetap sama persis
 class LinuxRouter(Node):
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
@@ -49,8 +52,49 @@ class ComplexTopo(Topo):
         self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
         self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
 
+# --- PERUBAHAN UTAMA DIMULAI DI SINI ---
+
+def generate_client_traffic(client, server_ip, port, base_bw_off_peak, base_bw_peak):
+    """
+    Fungsi ini berjalan dalam thread terpisah untuk satu klien.
+    Secara terus-menerus menghasilkan traffic dengan bandwidth yang bervariasi
+    berdasarkan waktu dan faktor acak.
+    """
+    info(f"Starting dynamic traffic for {client.name} -> {server_ip}\n")
+    while True:
+        try:
+            current_hour = datetime.now().hour
+            
+            # Tentukan base bandwidth berdasarkan jam (pola harian)
+            # Jam 18:00 - 23:00 dianggap jam sibuk (peak hours)
+            if 18 <= current_hour < 24:
+                base_bw = base_bw_peak
+            else:
+                base_bw = base_bw_off_peak
+
+            # Tambahkan faktor acak (-20% s/d +20% dari base) agar tidak sama persis
+            random_factor = random.uniform(0.8, 1.2)
+            target_bw = base_bw * random_factor
+            
+            # Format bandwidth untuk iperf (misal: 3.87M)
+            bw_str = f"{target_bw:.2f}M"
+            
+            # Konstruksi dan jalankan perintah iperf
+            duration = 10 # durasi iperf dalam detik
+            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {duration}"
+            
+            # info(f"Executing for {client.name}: {cmd}\n") # Uncomment untuk debugging
+            client.cmd(cmd)
+            
+            # Jeda antar pengiriman traffic
+            time.sleep(random.uniform(1, 5)) # Jeda acak antara 1-5 detik
+
+        except Exception as e:
+            info(f"Error in traffic generation for {client.name}: {e}\n")
+            time.sleep(10) # Jika error, tunggu sebentar sebelum mencoba lagi
+
 def start_traffic(net):
-    """Jalankan traffic otomatis"""
+    """Jalankan traffic otomatis menggunakan thread untuk setiap klien."""
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
     h4, h5, h6 = net.get('h4', 'h5', 'h6')
     h7 = net.get('h7')
@@ -62,14 +106,32 @@ def start_traffic(net):
     h5.cmd("iperf -s -u -p 443 &")
     # Twitch server
     h7.cmd("iperf -u -s -p 1935 &")
+    
+    time.sleep(1) # Beri waktu server untuk siap
 
-    info("*** Starting iperf clients\n")
-    # YouTube client
-    h1.cmd("bash -c 'while true; do iperf -u -c 10.0.1.1 -p 443 -b 4M -t 10 -i 5; sleep 1; done &'")
-    # Netflix client
-    h2.cmd("bash -c 'while true; do iperf -u -c 10.0.1.2 -p 443 -b 2M -t 10 -i 5; sleep 1; done &'")
-    # Twitch client
-    h3.cmd("bash -c 'while true; do iperf -u -c 10.0.2.1 -p 1935 -b 1M -t 10 -i 5; sleep 1; done &'")
+    info("*** Starting dynamic iperf clients in background threads\n")
+    
+    # Klien 1 (YouTube)
+    # Siang/Pagi: ~1.5 Mbps, Malam: ~4 Mbps
+    t1 = threading.Thread(target=generate_client_traffic, 
+                          args=(h1, '10.0.1.1', 443, 1.5, 4.0), daemon=True)
+                          
+    # Klien 2 (Netflix)
+    # Siang/Pagi: ~1 Mbps, Malam: ~2.5 Mbps
+    t2 = threading.Thread(target=generate_client_traffic, 
+                          args=(h2, '10.0.1.2', 443, 1.0, 2.5), daemon=True)
+                          
+    # Klien 3 (Twitch)
+    # Siang/Pagi: ~0.5 Mbps, Malam: ~1.5 Mbps
+    t3 = threading.Thread(target=generate_client_traffic, 
+                          args=(h3, '10.0.2.1', 1935, 0.5, 1.5), daemon=True)
+
+    # Jalankan semua thread
+    t1.start()
+    t2.start()
+    t3.start()
+
+# --- PERUBAHAN UTAMA SELESAI ---
 
 def run_forecast_loop():
     """Loop tiap 15 menit panggil forecast.py"""
@@ -89,12 +151,12 @@ if __name__ == "__main__":
                   link=TCLink)
     net.start()
 
-    # mulai generate traffic
+    # Mulai generate traffic
     start_traffic(net)
 
-    # jalanin forecast loop di background
-    t = threading.Thread(target=run_forecast_loop, daemon=True)
-    t.start()
+    # Jalankan forecast loop di background
+    t_forecast = threading.Thread(target=run_forecast_loop, daemon=True)
+    t_forecast.start()
 
-    CLI(net)  # biar bisa cek manual juga
+    CLI(net)
     net.stop()

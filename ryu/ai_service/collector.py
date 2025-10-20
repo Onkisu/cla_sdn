@@ -249,7 +249,7 @@ def insert_pg(rows):
     except Exception as e:
         print(f"DB error: {e}", file=sys.stderr)
         return 0
-
+        
 if __name__ == "__main__":
     if not load_cache():
         refresh_ip_mapping()
