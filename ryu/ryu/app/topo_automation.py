@@ -12,14 +12,22 @@ import random
 import math
 from datetime import datetime
 
+# ---------------------- GLOBAL LOCK ----------------------
+cmd_lock = threading.Lock()
+
+def safe_cmd(node, cmd):
+    """Execute node.cmd() safely with lock to avoid Mininet poll() conflict."""
+    with cmd_lock:
+        return node.cmd(cmd)
+
 # ---------------------- ROUTER & TOPOLOGY ----------------------
 class LinuxRouter(Node):
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
-        self.cmd("sysctl -w net.ipv4.ip_forward=1")
+        safe_cmd(self, "sysctl -w net.ipv4.ip_forward=1")
 
     def terminate(self):
-        self.cmd("sysctl -w net.ipv4.ip_forward=0")
+        safe_cmd(self, "sysctl -w net.ipv4.ip_forward=0")
         super(LinuxRouter, self).terminate()
 
 class ComplexTopo(Topo):
@@ -65,17 +73,17 @@ def generate_client_traffic(client, server_ip, port, base_bw_off_peak, base_bw_p
             # Smooth variation
             sine_variation = 0.2 * math.sin(t / 10)
             # Occasional spike
-            spike = random.choices([0, random.uniform(0.5, 1.5)], weights=[0.9, 0.1])[0]
+            spike = random.choices([0, random.uniform(0.5, 1.5)], weights=[0.9,0.1])[0]
 
             target_bw = base_bw * (1 + sine_variation) + spike
             bw_str = f"{target_bw:.2f}M"
 
             duration = 10
             cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {duration}"
-            client.cmd(cmd)
+            safe_cmd(client, cmd)
 
             t += 1
-            time.sleep(random.uniform(1,5))  # random pause between flows
+            time.sleep(random.uniform(1,5))  # random pause
 
         except Exception as e:
             info(f"Error traffic for {client.name}: {e}\n")
@@ -87,9 +95,9 @@ def start_traffic(net):
     h7 = net.get('h7')
 
     info("*** Starting iperf servers\n")
-    h4.cmd("iperf -s -u -p 443 &")   # YouTube server
-    h5.cmd("iperf -s -u -p 443 &")   # Netflix server
-    h7.cmd("iperf -s -u -p 1935 &")  # Twitch server
+    safe_cmd(h4, "iperf -s -u -p 443 &")   # YouTube server
+    safe_cmd(h5, "iperf -s -u -p 443 &")   # Netflix server
+    safe_cmd(h7, "iperf -s -u -p 1935 &")  # Twitch server
 
     time.sleep(1)  # Give servers time to start
 
@@ -128,5 +136,6 @@ if __name__ == "__main__":
     t_forecast = threading.Thread(target=run_forecast_loop, daemon=True)
     t_forecast.start()
 
+    # Start CLI safely while traffic threads run
     CLI(net)
     net.stop()
