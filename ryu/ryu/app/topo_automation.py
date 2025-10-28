@@ -11,10 +11,15 @@ import time
 import subprocess
 import math
 
-# ---------------------- GLOBAL LOCK ----------------------
+# ---------------------- GLOBAL LOCK & STOP EVENT ----------------------
 cmd_lock = threading.Lock()
+stop_event = threading.Event() # <-- [FIX] Ini "lampu merah" global kita
+
 def safe_cmd(node, cmd):
     """Execute node.cmd() safely with lock."""
+    # Jangan eksekusi cmd baru jika "lampu merah" sudah nyala
+    if stop_event.is_set():
+        return
     with cmd_lock:
         return node.cmd(cmd)
 
@@ -72,42 +77,40 @@ def generate_client_traffic(client, server_ip, port, min_bw, max_bw):
     """
     info(f"Starting random traffic for {client.name} -> {server_ip}\n")
     
-    while True:
+    # [FIX] Cek "lampu merah" di sini, bukan 'while True:'
+    while not stop_event.is_set():
         try:
             # 1. Randomly determine the target bandwidth (e.g., 0.5 Mbps to 4.0 Mbps)
             target_bw = random.uniform(min_bw, max_bw)
             bw_str = f"{target_bw:.2f}M"
             
-            # --- MODIFIKASI: Durasi burst juga diacak ---
             # Durasi burst time diacak antara 0.5 detik - 2.5 detik
-            # Ini akan membuat byte_count yang dilihat Ryu jauh lebih variatif
             burst_time = random.uniform(0.5, 2.5) 
             burst_time_str = f"{burst_time:.1f}"
-            # --- END MODIFIKASI ---
 
             # 2. Execute iperf burst (actual traffic generation)
-            # Menggunakan burst_time_str (yang acak) BUKAN '1'
             cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str}"
             safe_cmd(client, cmd)
 
             # 3. Calculate a randomized byte count estimate (HANYA UNTUK INFO DI KONSOL)
-            # Perhitungan ini HANYA untuk log di terminal, tidak mempengaruhi data Ryu
             expected_bytes = (target_bw * 1000000 / 8) * burst_time
-            
-            # Add a random fluctuation (e.g., +/- 10%) for a randomized byte value
             fluctuation = random.uniform(0.9, 1.1)
             delta = int(expected_bytes * fluctuation)
             
             # 4. Display the randomized result
-            # Use math.ceil to ensure non-zero byte count
             info(f"{client.name} *simulated* sending {math.ceil(delta):,} bytes in last {burst_time:.1f}s burst (Target BW: {bw_str}ps)\n")
 
             # 5. Random pause 0.5–2s
-            time.sleep(random.uniform(0.5, 2))
+            # [FIX] Ganti time.sleep() jadi stop_event.wait()
+            # Ini sama kayak sleep, tapi bisa "bangun" kalo "lampu merah" nyala
+            stop_event.wait(random.uniform(0.5, 2))
 
         except Exception as e:
+            # Kalo ada error, cek lagi "lampu merah"-nya
+            if stop_event.is_set():
+                break
             info(f"Error traffic for {client.name}: {e}\n")
-            time.sleep(3)
+            stop_event.wait(3) # [FIX] Ganti time.sleep()
 
 def start_traffic(net):
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
@@ -115,7 +118,6 @@ def start_traffic(net):
     h7 = net.get('h7')
 
     info("\n*** Starting iperf servers (Simulating services)\n")
-    # Port 443 dan 1935 TIDAK DIUBAH (Aman untuk collector)
     safe_cmd(h4, "iperf -s -u -p 443 &")   # Server H4: YouTube (Port 443)
     safe_cmd(h5, "iperf -s -u -p 443 &")   # Server H5: Netflix (Port 443)
     safe_cmd(h7, "iperf -s -u -p 1935 &")  # Server H7: Twitch (Port 1935)
@@ -123,7 +125,6 @@ def start_traffic(net):
 
     info("\n*** Starting client traffic threads (Simulating users)\n")
     threads = [
-        # IP 10.0.1.1 dan 10.0.1.2 dan 10.0.2.1 TIDAK DIUBAH (Aman untuk collector)
         # h1 -> h4 (YouTube): High bandwidth range
         threading.Thread(target=generate_client_traffic, args=(h1, '10.0.1.1', 443, 1.5, 5.0), daemon=True), 
         # h2 -> h5 (Netflix): Moderate bandwidth range
@@ -133,17 +134,23 @@ def start_traffic(net):
     ]
     for t in threads:
         t.start()
+    return threads # [FIX] Kembalikan list threads biar bisa di-join nanti
 
 # ---------------------- FORECAST LOOP ----------------------
 def run_forecast_loop():
-    while True:
+    # [FIX] Cek "lampu merah" di sini juga
+    while not stop_event.is_set():
         info("\n*** Running AI Forecast...\n")
         try:
             # Assuming 'forecast.py' exists and uses the traffic data
             subprocess.call(["sudo", "python3", "forecast.py"])
         except Exception as e:
+            if stop_event.is_set():
+                break
             info(f"*** Forecast error: {e}\n")
-        time.sleep(900) # Wait 15 minutes
+        
+        # [FIX] Ganti time.sleep()
+        stop_event.wait(900) # Wait 15 minutes
 
 # ---------------------- MAIN ----------------------
 if __name__ == "__main__":
@@ -154,10 +161,22 @@ if __name__ == "__main__":
                   link=TCLink)
     net.start()
 
-    start_traffic(net)
+    traffic_threads = start_traffic(net) # [FIX] Tangkap list threads
 
     # t_forecast = threading.Thread(target=run_forecast_loop, daemon=True)
     # t_forecast.start()
 
     CLI(net)
+
+    # --- [FIX] BLOK CLEANUP SEBELUM NET.STOP() ---
+    info("\n*** CLI exited. Stopping traffic threads...\n")
+    stop_event.set() # Nyalakan "lampu merah"
+
+    # Kasih waktu 1-2 detik buat semua thread mati dengan sopan
+    time.sleep(1) 
+    
+    info("*** Stopping Mininet network...\n")
+    # --- [SELESAI FIX] ---
+
     net.stop()
+    info("*** Mininet stopped.\n")
