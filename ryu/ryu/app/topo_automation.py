@@ -60,30 +60,32 @@ class ComplexTopo(Topo):
 # ---------------------- RANDOM TRAFFIC ----------------------
 def generate_client_traffic(client, server_ip, port, min_bw, max_bw):
     """
-    Purely random traffic. Measures instantaneous bytes per iteration.
+    Random traffic with 1-second bursts and delta bytes calculation.
     """
     info(f"Starting random traffic for {client.name} -> {server_ip}\n")
     prev_bytes = 0
 
     while True:
         try:
+            # Random bandwidth 0.2 – 4 Mbps (adjust as needed)
             target_bw = random.uniform(min_bw, max_bw)
             bw_str = f"{target_bw:.2f}M"
 
-            # Short iperf bursts
-            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t 2"
+            # 1-second iperf burst
+            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t 1"
             safe_cmd(client, cmd)
 
-            # Record current bytes sent
-            output = safe_cmd(client, "cat /sys/class/net/%s/statistics/tx_bytes" % client.defaultIntf())
+            # Calculate delta bytes
+            output = safe_cmd(client, f"cat /sys/class/net/{client.defaultIntf()}/statistics/tx_bytes")
             current_bytes = int(output.strip())
-            diff = current_bytes - prev_bytes
+            delta = current_bytes - prev_bytes
             prev_bytes = current_bytes
 
-            # You can log diff or send to API
-            info(f"{client.name} sent {diff} bytes in last interval\n")
+            info(f"{client.name} sent {delta} bytes in last burst\n")
 
-            time.sleep(random.uniform(1,2))
+            # Random pause 0.5–2s
+            time.sleep(random.uniform(0.5, 2))
+
         except Exception as e:
             info(f"Error traffic for {client.name}: {e}\n")
             time.sleep(3)
@@ -94,9 +96,9 @@ def start_traffic(net):
     h7 = net.get('h7')
 
     info("*** Starting iperf servers\n")
-    safe_cmd(h4, "iperf -s -u -p 443 &")
-    safe_cmd(h5, "iperf -s -u -p 443 &")
-    safe_cmd(h7, "iperf -s -u -p 1935 &")
+    safe_cmd(h4, "iperf -s -u -p 443 &")   # YouTube
+    safe_cmd(h5, "iperf -s -u -p 443 &")   # Netflix
+    safe_cmd(h7, "iperf -s -u -p 1935 &")  # Twitch
     time.sleep(1)
 
     threads = [
@@ -128,8 +130,8 @@ if __name__ == "__main__":
 
     start_traffic(net)
 
-    # t_forecast = threading.Thread(target=run_forecast_loop, daemon=True)
-    # t_forecast.start()
+    t_forecast = threading.Thread(target=run_forecast_loop, daemon=True)
+    t_forecast.start()
 
     CLI(net)
     net.stop()
