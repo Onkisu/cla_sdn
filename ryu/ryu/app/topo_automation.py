@@ -24,6 +24,7 @@ def safe_cmd(node, cmd):
 
 # ---------------------- ROUTER & TOPOLOGY ----------------------
 class LinuxRouter(Node):
+# ... (Topologi Class - TIDAK BERUBAH) ...
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
         safe_cmd(self, "sysctl -w net.ipv4.ip_forward=1")
@@ -58,11 +59,10 @@ class ComplexTopo(Topo):
         self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
         self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
 
-# ---------------------- RANDOM TRAFFIC (FIX v6 - PISAH FUNGSI) ----------------------
+# ---------------------- RANDOM TRAFFIC (FIX v7 - HARDCODE SEED) ----------------------
 
 def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
-    """Helper
-    fungsi logging biar nggak repetitif."""
+    """Helper fungsi logging."""
     try:
         csv_line = output.strip().split('\n')[-1]
         parts = csv_line.split(',')
@@ -71,99 +71,57 @@ def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
     except Exception as e:
         info(f"Could not parse iperf output for {client_name}: {e}\nOutput was: {output}\n")
 
-# --- FUNGSI A: YOUTUBE (MOODY/SWING BESAR) ---
-def generate_youtube_traffic(client, server_ip, port, base_min_bw, base_max_bw):
-    rng = random.Random(hash(client.name))
-    info(f"Starting YouTube (Moody) traffic for {client.name} (Seed: {hash(client.name)})\n")
+# [FIX v7] Kita kembali ke SATU FUNGSI, tapi kita tambahin 'seed'
+def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, seed):
+    """
+    Generates random UDP traffic bursts using a DEDICATED random generator
+    seeded with a hardcoded, unique value.
+    """
+    
+    # [FIX v7] Buat "mesin random" (generator) baru yang 100% LOKAL/PRIVAT.
+    rng = random.Random()
+    
+    # [FIX v7] Seed (kocok) "mesin" LOKAL ini pake 'seed' yang kita paksa
+    rng.seed(seed) 
+
+    info(f"Starting random traffic for {client.name} (Seed: {seed}) -> {server_ip} (Base Range: [{base_min_bw}M - {base_max_bw}M])\n")
+    
     while not stop_event.is_set():
         try:
-            # Aturan main 'Moody': swing-nya besar (bisa 20% - 120% dari base)
-            current_max_bw = rng.uniform(base_max_bw * 0.2, base_max_bw * 1.2)
-            current_min_bw = rng.uniform(base_min_bw * 0.1, current_max_bw * 0.7)
+            # 1. Buat range (skala/limit) yang dinamis/acak di setiap loop
+            # Logika ini (0.4 - 1.1) sekarang sama buat semua
+            current_max_bw = rng.uniform(base_max_bw * 0.4, base_max_bw * 1.1)
+            current_min_bw = rng.uniform(base_min_bw * 0.4, current_max_bw * 0.8)
+
             current_min_bw = max(0.1, current_min_bw)
             current_max_bw = max(current_min_bw + 0.2, current_max_bw)
 
+            # 2. Tentukan target bandwidth dari range *baru* yang dinamis
             target_bw = rng.uniform(current_min_bw, current_max_bw)
             bw_str = f"{target_bw:.2f}M"
             
-            # Burst time normal
+            # 3. Durasi burst time (tetap acak)
             burst_time = rng.uniform(0.5, 2.5) 
             burst_time_str = f"{burst_time:.1f}"
 
+            # 4. Execute iperf burst
             cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str} -y C"
+            
             output = safe_cmd(client, cmd)
-            if not output: continue
 
+            if not output:
+                continue
+
+            # 5. Parsing dan log output asli iperf
             _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
-            
-            # Pause normal
-            stop_event.wait(rng.uniform(0.5, 2.0))
+
+            # 6. Random pause 0.5–2s
+            pause_duration = rng.uniform(0.5, 2.0)
+            stop_event.wait(pause_duration)
+
         except Exception as e:
-            if stop_event.is_set(): break
-            info(f"Error traffic for {client.name}: {e}\n")
-            stop_event.wait(3)
-
-# --- FUNGSI B: NETFLIX (STABIL) ---
-def generate_netflix_traffic(client, server_ip, port, base_min_bw, base_max_bw):
-    rng = random.Random(hash(client.name))
-    info(f"Starting Netflix (Stable) traffic for {client.name} (Seed: {hash(client.name)})\n")
-    while not stop_event.is_set():
-        try:
-            # Aturan main 'Stabil': swing-nya kecil (selalu 70% - 100% dari base)
-            current_max_bw = rng.uniform(base_max_bw * 0.7, base_max_bw * 1.0)
-            current_min_bw = rng.uniform(base_min_bw * 0.6, current_max_bw * 0.9)
-            current_min_bw = max(0.1, current_min_bw)
-            current_max_bw = max(current_min_bw + 0.2, current_max_bw)
-
-            target_bw = rng.uniform(current_min_bw, current_max_bw)
-            bw_str = f"{target_bw:.2f}M"
-            
-            # Burst time lebih lama (simulasi buffering/chunk)
-            burst_time = rng.uniform(1.0, 3.0) 
-            burst_time_str = f"{burst_time:.1f}"
-
-            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str} -y C"
-            output = safe_cmd(client, cmd)
-            if not output: continue
-
-            _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
-            
-            # Pause lebih lama
-            stop_event.wait(rng.uniform(1.0, 3.0))
-        except Exception as e:
-            if stop_event.is_set(): break
-            info(f"Error traffic for {client.name}: {e}\n")
-            stop_event.wait(3)
-
-# --- FUNGSI C: TWITCH (SPIKY/NOISE) ---
-def generate_twitch_traffic(client, server_ip, port, base_min_bw, base_max_bw):
-    rng = random.Random(hash(client.name))
-    info(f"Starting Twitch (Spiky) traffic for {client.name} (Seed: {hash(client.name)})\n")
-    while not stop_event.is_set():
-        try:
-            # Aturan main 'Spiky': range normal, tapi burst-nya pendek2
-            current_max_bw = rng.uniform(base_max_bw * 0.5, base_max_bw * 1.1)
-            current_min_bw = rng.uniform(base_min_bw * 0.4, current_max_bw * 0.8)
-            current_min_bw = max(0.1, current_min_bw)
-            current_max_bw = max(current_min_bw + 0.2, current_max_bw)
-
-            target_bw = rng.uniform(current_min_bw, current_max_bw)
-            bw_str = f"{target_bw:.2f}M"
-            
-            # Burst time pendek (spiky)
-            burst_time = rng.uniform(0.2, 1.0) 
-            burst_time_str = f"{burst_time:.1f}"
-
-            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str} -y C"
-            output = safe_cmd(client, cmd)
-            if not output: continue
-
-            _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
-            
-            # Pause juga pendek
-            stop_event.wait(rng.uniform(0.3, 1.5))
-        except Exception as e:
-            if stop_event.is_set(): break
+            if stop_event.is_set():
+                break
             info(f"Error traffic for {client.name}: {e}\n")
             stop_event.wait(3)
 
@@ -189,14 +147,24 @@ def start_traffic(net):
 
     info("\n*** Starting client traffic threads (Simulating users)\n")
     
-    # [FIX v6] Panggil FUNGSI YANG BEDA untuk tiap thread
+    # [FIX v7] SAMAIN SEMUA BASE RANGE (sesuai request lu)
+    base_range_min = 0.5
+    base_range_max = 5.0
+    
+    # [FIX v7] Panggil FUNGSI YANG SAMA, tapi pake SEED BEDA
     threads = [
-        # h1 -> YouTube (Moody)
-        threading.Thread(target=generate_youtube_traffic, args=(h1, '10.0.1.1', 443, 1.5, 5.0), daemon=True), 
-        # h2 -> Netflix (Stable)
-        threading.Thread(target=generate_netflix_traffic, args=(h2, '10.0.1.2', 443, 0.8, 3.5), daemon=True), 
-        # h3 -> Twitch (Spiky)
-        threading.Thread(target=generate_twitch_traffic, args=(h3, '10.0.2.1', 1935, 0.2, 1.8), daemon=True)
+        # h1 -> YouTube
+        threading.Thread(target=generate_client_traffic, 
+                         args=(h1, '10.0.1.1', 443, base_range_min, base_range_max, 12345), # Seed 12345
+                         daemon=True), 
+        # h2 -> Netflix
+        threading.Thread(target=generate_client_traffic, 
+                         args=(h2, '10.0.1.2', 443, base_range_min, base_range_max, 67890), # Seed 67890
+                         daemon=True), 
+        # h3 -> Twitch
+        threading.Thread(target=generate_client_traffic, 
+                         args=(h3, '10.0.2.1', 1935, base_range_min, base_range_max, 98765), # Seed 98765
+                         daemon=True)
     ]
     for t in threads:
         t.start()
@@ -205,6 +173,8 @@ def start_traffic(net):
 
 # ---------------------- FORECAST LOOP ----------------------
 def run_forecast_loop():
+# ... (sisa kode MAIN sama persis, tidak perlu diubah) ...
+# ... (scroll ke bawah) ...
     while not stop_event.is_set():
         info("\n*** Running AI Forecast...\n")
         try:
