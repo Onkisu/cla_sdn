@@ -24,7 +24,6 @@ def safe_cmd(node, cmd):
 
 # ---------------------- ROUTER & TOPOLOGY ----------------------
 class LinuxRouter(Node):
-# ... (kode router tidak berubah) ...
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
         safe_cmd(self, "sysctl -w net.ipv4.ip_forward=1")
@@ -34,7 +33,6 @@ class LinuxRouter(Node):
 
 class ComplexTopo(Topo):
     def build(self):
-# ... (kode topologi tidak berubah) ...
         # Router
         r1 = self.addNode('r1', cls=LinuxRouter, ip='10.0.0.254/24')
 
@@ -68,6 +66,11 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw):
     [MODIFIKASI] The *range* (min/max) is also randomized in each loop
     to simulate different user behaviors (e.g., switching video quality).
     """
+    
+    # [FIX] Re-seed generator di tiap thread biar polanya beda!
+    # Ini "mengocok ulang" mesin random untuk thread ini saja.
+    random.seed() 
+
     info(f"Starting random traffic for {client.name} -> {server_ip} (Base Range: [{base_min_bw}M - {base_max_bw}M])\n")
     
     while not stop_event.is_set():
@@ -128,7 +131,6 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw):
             stop_event.wait(3)
 
 def start_traffic(net):
-# ... (kode start_traffic tidak berubah) ...
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
     h4, h5, h6 = net.get('h4', 'h5', 'h6')
     h7 = net.get('h7')
@@ -158,7 +160,6 @@ def start_traffic(net):
 
 # ---------------------- FORECAST LOOP ----------------------
 def run_forecast_loop():
-# ... (kode forecast loop tidak berubah) ...
     while not stop_event.is_set():
         info("\n*** Running AI Forecast...\n")
         try:
@@ -171,7 +172,6 @@ def run_forecast_loop():
 
 # ---------------------- MAIN ----------------------
 if __name__ == "__main__":
-# ... (kode main tidak berubah) ...
     setLogLevel("info")
     net = Mininet(topo=ComplexTopo(),
                   switch=OVSSwitch,
@@ -203,3 +203,4 @@ if __name__ == "__main__":
     info("*** Menghentikan jaringan Mininet...\n")
     net.stop()
     info("*** Mininet berhenti.\n")
+
