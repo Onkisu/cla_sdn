@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from collections import defaultdict
 
-DB_CONN = "dbname=development user=dev_one password=hijack332 host=127.0.0.1"
+DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 RYU_REST = "http://127.0.0.1:8080"
 DPIDS = [1, 2, 3]
 
