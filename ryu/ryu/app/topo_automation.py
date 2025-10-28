@@ -77,15 +77,21 @@ def generate_client_traffic(client, server_ip, port, min_bw, max_bw):
             # 1. Randomly determine the target bandwidth (e.g., 0.5 Mbps to 4.0 Mbps)
             target_bw = random.uniform(min_bw, max_bw)
             bw_str = f"{target_bw:.2f}M"
-            burst_time = 1 # iperf burst time is 1 second
+            
+            # --- MODIFIKASI: Durasi burst juga diacak ---
+            # Durasi burst time diacak antara 0.5 detik - 2.5 detik
+            # Ini akan membuat byte_count yang dilihat Ryu jauh lebih variatif
+            burst_time = random.uniform(0.5, 2.5) 
+            burst_time_str = f"{burst_time:.1f}"
+            # --- END MODIFIKASI ---
 
             # 2. Execute iperf burst (actual traffic generation)
-            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time}"
+            # Menggunakan burst_time_str (yang acak) BUKAN '1'
+            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str}"
             safe_cmd(client, cmd)
 
-            # 3. Calculate a randomized byte count estimate
-            # Expected bytes = (BW in bits/s / 8) * time
-            # 1,000,000 converts Mbps to bits/s
+            # 3. Calculate a randomized byte count estimate (HANYA UNTUK INFO DI KONSOL)
+            # Perhitungan ini HANYA untuk log di terminal, tidak mempengaruhi data Ryu
             expected_bytes = (target_bw * 1000000 / 8) * burst_time
             
             # Add a random fluctuation (e.g., +/- 10%) for a randomized byte value
@@ -94,7 +100,7 @@ def generate_client_traffic(client, server_ip, port, min_bw, max_bw):
             
             # 4. Display the randomized result
             # Use math.ceil to ensure non-zero byte count
-            info(f"{client.name} *simulated* sending {math.ceil(delta):,} bytes in last burst (Target BW: {bw_str}ps)\n")
+            info(f"{client.name} *simulated* sending {math.ceil(delta):,} bytes in last {burst_time:.1f}s burst (Target BW: {bw_str}ps)\n")
 
             # 5. Random pause 0.5–2s
             time.sleep(random.uniform(0.5, 2))
@@ -109,6 +115,7 @@ def start_traffic(net):
     h7 = net.get('h7')
 
     info("\n*** Starting iperf servers (Simulating services)\n")
+    # Port 443 dan 1935 TIDAK DIUBAH (Aman untuk collector)
     safe_cmd(h4, "iperf -s -u -p 443 &")   # Server H4: YouTube (Port 443)
     safe_cmd(h5, "iperf -s -u -p 443 &")   # Server H5: Netflix (Port 443)
     safe_cmd(h7, "iperf -s -u -p 1935 &")  # Server H7: Twitch (Port 1935)
@@ -116,6 +123,7 @@ def start_traffic(net):
 
     info("\n*** Starting client traffic threads (Simulating users)\n")
     threads = [
+        # IP 10.0.1.1 dan 10.0.1.2 dan 10.0.2.1 TIDAK DIUBAH (Aman untuk collector)
         # h1 -> h4 (YouTube): High bandwidth range
         threading.Thread(target=generate_client_traffic, args=(h1, '10.0.1.1', 443, 1.5, 5.0), daemon=True), 
         # h2 -> h5 (Netflix): Moderate bandwidth range

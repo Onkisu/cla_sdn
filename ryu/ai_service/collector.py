@@ -12,11 +12,15 @@ import random
 from datetime import datetime
 from collections import defaultdict
 
+# ---------------------- KONFIGURASI ----------------------
+# Konfigurasi Database (Ganti sesuai lingkungan Anda)
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
+# Alamat REST API Ryu
 RYU_REST = "http://127.0.0.1:8080"
+# DataPath IDs (DPIDs) Switch yang akan dimonitor
 DPIDS = [1, 2, 3]
 
-# Global storage for traffic aggregation
+# Penyimpanan global untuk agregasi lalu lintas
 traffic_aggregator = defaultdict(lambda: {
     "bytes_tx": 0,
     "bytes_rx": 0, 
@@ -32,21 +36,31 @@ traffic_aggregator = defaultdict(lambda: {
     "proto": "any"
 })
 
+# Peta untuk resolusi IP/MAC dan Aplikasi
 ip_mac_map = {}
 ip_app_map = {}   
 port_app_map = {} 
 
-with open("apps.yaml") as f:
-    apps_conf = yaml.safe_load(f)
+# Memuat konfigurasi aplikasi dari apps.yaml
+try:
+    with open("apps.yaml") as f:
+        apps_conf = yaml.safe_load(f)
+except FileNotFoundError:
+    print("ERROR: File apps.yaml tidak ditemukan!", file=sys.stderr)
+    sys.exit(1)
 
 app_category_map = {}
 for cat, catconf in apps_conf.get("categories", {}).items():
     for app in catconf.get("apps", []):
         app_category_map[app] = cat
 
+# Konfigurasi Caching
 CACHE_FILE = "ip_cache.json"
 CACHE_EXPIRE = 3600
 
+# Rentang Metrik Sintetik (untuk Latency & Loss, karena tidak ada di Ryu Flow Stats)
+# Data Byte MURNI dari Topologi, tetapi Latency dan Loss dihitung sintetik 
+# berdasarkan kualitas layanan yang diasumsikan
 app_latency_ranges = {
     "youtube": (20, 60),
     "netflix": (25, 70), 
@@ -65,16 +79,20 @@ app_loss_ranges = {
     "unknown": (0, 10)
 }
 
+# ---------------------- FUNGSI PEMBANTU ----------------------
+
 def get_controller_mappings():
+    """Mengambil pemetaan IP ke MAC dari Ryu."""
     try:
         response = requests.get(f"{RYU_REST}/ip_mac_map", timeout=3)
         if response.status_code == 200:
             return response.json()
     except Exception as e:
-        print(f"Failed to get controller mappings: {e}")
+        print(f"Gagal mendapatkan pemetaan kontroler: {e}", file=sys.stderr)
     return {}
 
 def load_cache():
+    """Memuat pemetaan IP/Port Aplikasi dari cache."""
     global ip_app_map, port_app_map
     if not os.path.exists(CACHE_FILE):
         return False
@@ -85,12 +103,14 @@ def load_cache():
         if time.time() - ts_saved > CACHE_EXPIRE:
             return False
         ip_app_map.update(data.get("ip_app_map", {}))
+        # Mengubah kunci port kembali ke integer
         port_app_map.update({int(k): v for k, v in data.get("port_app_map", {}).items()})
         return True
     except:
         return False
 
 def save_cache():
+    """Menyimpan pemetaan IP/Port Aplikasi ke cache."""
     try:
         data = {
             "_timestamp": time.time(),
@@ -103,6 +123,7 @@ def save_cache():
         pass
 
 def refresh_ip_mapping():
+    """Memperbarui pemetaan IP/Port Aplikasi dari apps.yaml."""
     global ip_app_map, port_app_map
     ip_app_map = {}
     port_app_map = {}
@@ -114,9 +135,12 @@ def refresh_ip_mapping():
     save_cache()
 
 def match_app(src_ip, dst_ip, tp_src, tp_dst):
+    """Mencocokkan IP atau Port dengan nama Aplikasi."""
     def clean_ip(ip):
         return ip.split('/')[0] if ip and '/' in ip else ip
     s, d = clean_ip(src_ip), clean_ip(dst_ip)
+    
+    # Pencocokan berdasarkan CIDR
     for net, app_name in ip_app_map.items():
         try:
             if s and ipaddress.ip_address(s) in ipaddress.ip_network(net):
@@ -125,19 +149,25 @@ def match_app(src_ip, dst_ip, tp_src, tp_dst):
                 return app_name
         except:
             continue
+            
+    # Pencocokan berdasarkan Port
     if tp_src in port_app_map:
         return port_app_map[tp_src]
     if tp_dst in port_app_map:
         return port_app_map[tp_dst]
+        
     return "unknown"
 
 def get_synthetic_metrics(app):
+    """Menghasilkan nilai Latency dan Loss sintetik acak."""
     lat_range = app_latency_ranges.get(app, app_latency_ranges["unknown"])
     loss_range = app_loss_ranges.get(app, app_loss_ranges["unknown"])
     return random.uniform(*lat_range), random.uniform(*loss_range)
 
+# ---------------------- FUNGSI UTAMA KOLEKSI ----------------------
+
 def collect_current_traffic():
-    """Collect current traffic and add to aggregator"""
+    """Mengumpulkan lalu lintas saat ini dan menambahkannya ke agregator."""
     global ip_mac_map, traffic_aggregator
     ip_mac_map.update(get_controller_mappings())
     
@@ -146,6 +176,7 @@ def collect_current_traffic():
 
     for dpid in DPIDS:
         try:
+            # Mengambil flow stats dari Ryu
             res = requests.get(f"{RYU_REST}/stats/flow/{dpid}", timeout=5).json()
         except Exception as e:
             print(f"Error fetch dpid {dpid}: {e}", file=sys.stderr)
@@ -161,6 +192,7 @@ def collect_current_traffic():
             if not src_ip or not dst_ip:
                 continue
             
+            # Mendapatkan port transport
             tp_src = int(match.get("tcp_src") or match.get("udp_src") or 0)
             tp_dst = int(match.get("tcp_dst") or match.get("udp_dst") or 0)
 
@@ -168,17 +200,21 @@ def collect_current_traffic():
             category = app_category_map.get(app_name, "data")
             proto = {6:"tcp", 17:"udp"}.get(match.get("ip_proto", 0), "any")
             
+            # >>> TIDAK ADA MODIFIKASI RANDOMNESS DI SINI <<<
+            # byte_count diambil MURNI dari Ryu (hasil simulasi 'Super Random' di Mininet)
             bytes_count = flow.get("byte_count", 0)
             pkts_count = flow.get("packet_count", 0)
             
+            # Metrik Sintetik untuk Latency dan Loss
             latency, loss = get_synthetic_metrics(app_name)
             pkts_rx = max(0, int(pkts_count * (1 - loss/100)))
             
-            # Aggregate key: (dpid, app_name, category)
+            # Kunci Agregasi: (dpid, app_name, category)
             agg_key = (dpid, app_name, category)
             
+            # Agregasi data
             traffic_aggregator[agg_key]["bytes_tx"] += bytes_count
-            traffic_aggregator[agg_key]["bytes_rx"] += bytes_count
+            traffic_aggregator[agg_key]["bytes_rx"] += bytes_count # bytes_rx dibuat sama dengan bytes_tx untuk simulasi
             traffic_aggregator[agg_key]["pkts_tx"] += pkts_count
             traffic_aggregator[agg_key]["pkts_rx"] += pkts_rx
             traffic_aggregator[agg_key]["latency_sum"] += latency
@@ -196,7 +232,7 @@ def collect_current_traffic():
     return current_bytes > 0 or current_packets > 0
 
 def get_aggregated_traffic():
-    """Return aggregated traffic data and reset aggregator"""
+    """Mengembalikan data yang diagregasi dan me-reset agregator."""
     global traffic_aggregator
     
     if not traffic_aggregator:
@@ -212,7 +248,7 @@ def get_aggregated_traffic():
         avg_latency = data["latency_sum"] / data["count"] if data["count"] > 0 else 0
         avg_loss = data["loss_sum"] / data["count"] if data["count"] > 0 else 0
         
-        # Determine host (client is 10.0.0.x network)
+        # Menentukan host (klien adalah jaringan 10.0.0.x)
         host = data["src_ip"] if data["src_ip"].startswith('10.0.0.') else data["dst_ip"]
         
         rows.append((
@@ -225,12 +261,13 @@ def get_aggregated_traffic():
         
         print(f"[AGG] dpid={dpid}, app={app}, bytes={data['bytes_tx']}, pkts={data['pkts_tx']}, latency={avg_latency:.2f}ms, loss={avg_loss:.2f}%")
     
-    # Reset aggregator for next 5-second window
+    # Reset agregator untuk jendela 5 detik berikutnya
     traffic_aggregator.clear()
     
     return rows
 
 def insert_pg(rows):
+    """Memasukkan data agregasi ke PostgreSQL."""
     try:
         conn = psycopg2.connect(DB_CONN)
         cur = conn.cursor()
@@ -250,35 +287,37 @@ def insert_pg(rows):
         print(f"DB error: {e}", file=sys.stderr)
         return 0
         
+# ---------------------- MAIN LOOP ----------------------
+
 if __name__ == "__main__":
     if not load_cache():
         refresh_ip_mapping()
     last_refresh = time.time()
     
-    print("Starting traffic aggregator (5-second intervals)...")
+    print("Memulai agregator lalu lintas (interval 5 detik)...")
     
     while True:
-        # Refresh IP mapping every 10 minutes
+        # Perbarui pemetaan IP/Port setiap 10 menit
         if time.time() - last_refresh > 600:
             refresh_ip_mapping()
             last_refresh = time.time()
         
-        # Collect traffic continuously for 5 seconds
+        # Kumpulkan lalu lintas secara terus menerus selama 5 detik
         start_time = time.time()
         has_traffic = False
         
         while time.time() - start_time < 5:
             if collect_current_traffic():
                 has_traffic = True
-            time.sleep(0.5)  # Collect every 500ms
+            time.sleep(0.5)  # Kumpulkan setiap 500ms
         
-        # After 5 seconds, aggregate and save to DB
+        # Setelah 5 detik, agregasi dan simpan ke DB
         if has_traffic:
             aggregated_rows = get_aggregated_traffic()
             if aggregated_rows:
                 inserted = insert_pg(aggregated_rows)
-                print(f"{inserted} baris agregasi masuk DB (5-second window).", file=sys.stderr)
+                print(f"{inserted} baris agregasi masuk DB (jendela 5 detik).", file=sys.stderr)
             else:
-                print("Tidak ada traffic dalam 5 detik terakhir.", file=sys.stderr)
+                print("Tidak ada traffic yang diagregasi dalam 5 detik terakhir.", file=sys.stderr)
         else:
             print("Tidak ada delta baru.", file=sys.stderr)
