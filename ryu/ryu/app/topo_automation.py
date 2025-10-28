@@ -64,26 +64,32 @@ class ComplexTopo(Topo):
 # ---------------------- DYNAMIC TRAFFIC ----------------------
 def generate_client_traffic(client, server_ip, port, base_bw_off_peak, base_bw_peak):
     info(f"Starting traffic for {client.name} -> {server_ip}\n")
-    t = 0
     while True:
         try:
+            now = time.time()  # seconds since epoch
             hour = datetime.now().hour
+
+            # Peak/off-peak base bandwidth
             base_bw = base_bw_peak if 18 <= hour < 24 else base_bw_off_peak
 
-            # Smooth variation
-            sine_variation = 0.2 * math.sin(t / 10)
-            # Occasional spike
+            # Smooth sine-based variation with real time
+            sine_variation = 0.2 * math.sin(now / 60 + random.uniform(0, 2*math.pi))
+
+            # Fast random jitter
+            fast_random = random.uniform(-0.1, 0.1)
+
+            # Occasional spike (10% chance)
             spike = random.choices([0, random.uniform(0.5, 1.5)], weights=[0.9,0.1])[0]
 
-            target_bw = base_bw * (1 + sine_variation) + spike
+            target_bw = base_bw * (1 + sine_variation + fast_random) + spike
             bw_str = f"{target_bw:.2f}M"
 
             duration = 10
             cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {duration}"
             safe_cmd(client, cmd)
 
-            t += 1
-            time.sleep(random.uniform(1,5))  # random pause
+            # Random pause 1-5s
+            time.sleep(random.uniform(1,5))
 
         except Exception as e:
             info(f"Error traffic for {client.name}: {e}\n")
