@@ -39,7 +39,8 @@ class ComplexTopo(Topo):
         # Switches
         s1 = self.addSwitch('s1')
         s2 = self.addSwitch('s2')
-        s3 = self.addSwitchB('s3')
+        # [FIX] Ganti dari 'addSwitchB' (typo) ke 'addSwitch'
+        s3 = self.addSwitch('s3')
 
         # Hosts
         h1 = self.addHost('h1', ip='10.0.0.1/24', defaultRoute='via 10.0.0.254')
