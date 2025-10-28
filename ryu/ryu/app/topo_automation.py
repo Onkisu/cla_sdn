@@ -24,6 +24,7 @@ def safe_cmd(node, cmd):
 
 # ---------------------- ROUTER & TOPOLOGY ----------------------
 class LinuxRouter(Node):
+# ... (kode router tidak berubah) ...
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
         safe_cmd(self, "sysctl -w net.ipv4.ip_forward=1")
@@ -33,6 +34,7 @@ class LinuxRouter(Node):
 
 class ComplexTopo(Topo):
     def build(self):
+# ... (kode topologi tidak berubah) ...
         # Router
         r1 = self.addNode('r1', cls=LinuxRouter, ip='10.0.0.254/24')
 
@@ -59,24 +61,43 @@ class ComplexTopo(Topo):
         self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
 
 # ---------------------- RANDOM TRAFFIC ----------------------
-def generate_client_traffic(client, server_ip, port, min_bw, max_bw):
+# [MODIFIKASI] Nama argumen diubah jadi base_min/max
+def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw):
     """
-    Generates random UDP traffic bursts using iperf and logs the *actual*
-    byte count reported by iperf.
+    Generates random UDP traffic bursts using iperf.
+    [MODIFIKASI] The *range* (min/max) is also randomized in each loop
+    to simulate different user behaviors (e.g., switching video quality).
     """
-    info(f"Starting random traffic for {client.name} -> {server_ip}\n")
+    info(f"Starting random traffic for {client.name} -> {server_ip} (Base Range: [{base_min_bw}M - {base_max_bw}M])\n")
     
     while not stop_event.is_set():
         try:
-            # 1. Randomly determine the target bandwidth
-            target_bw = random.uniform(min_bw, max_bw)
+            # === [MODIFIKASI INTI] ===
+            # 1. Buat range (skala/limit) yang dinamis/acak di setiap loop
+            #    berdasarkan 'base' range yang kita kasih.
+            
+            # Tentukan max baru: bisa 40% s/d 110% dari base_max
+            current_max_bw = random.uniform(base_max_bw * 0.4, base_max_bw * 1.1)
+            
+            # Tentukan min baru: bisa 40% dari base_min s/d 80% dari *max_baru*
+            current_min_bw = random.uniform(base_min_bw * 0.4, current_max_bw * 0.8)
+
+            # Pastiin min/max-nya waras (nggak 0 atau min > max)
+            current_min_bw = max(0.1, current_min_bw) # Minimal 0.1M
+            current_max_bw = max(current_min_bw + 0.2, current_max_bw) # Max minimal 0.2M di atas min
+
+            # info(f"PROFILE: {client.name} new dynamic range: [{current_min_bw:.2f}M - {current_max_bw:.2f}M]\n")
+            # === [SELESAI MODIFIKASI INTI] ===
+
+            # 2. Tentukan target bandwidth dari range *baru* yang dinamis
+            target_bw = random.uniform(current_min_bw, current_max_bw)
             bw_str = f"{target_bw:.2f}M"
             
-            # Durasi burst time diacak antara 0.5 detik - 2.5 detik
+            # Durasi burst time (tetap acak)
             burst_time = random.uniform(0.5, 2.5) 
             burst_time_str = f"{burst_time:.1f}"
 
-            # 2. Execute iperf burst
+            # 3. Execute iperf burst
             cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str} -y C"
             
             output = safe_cmd(client, cmd)
@@ -84,20 +105,20 @@ def generate_client_traffic(client, server_ip, port, min_bw, max_bw):
             if not output:
                 continue
 
-            # 3. Parsing output asli iperf
+            # 4. Parsing output asli iperf
             try:
                 csv_line = output.strip().split('\n')[-1]
                 parts = csv_line.split(',')
                 actual_bytes = int(parts[7])
                 
-                # 4. Cetak log ASLI di CLI utama
+                # 5. Cetak log ASLI di CLI utama
                 info(f"CLIENT LOG: {client.name} -> {server_ip} SENT {actual_bytes:,} bytes in {burst_time:.1f}s (Target BW: {bw_str}ps)\n")
 
             except Exception as e:
                 info(f"Could not parse iperf output for {client.name}: {e}\nOutput was: {output}\n")
 
 
-            # 5. Random pause 0.5–2s
+            # 6. Random pause 0.5–2s
             stop_event.wait(random.uniform(0.5, 2))
 
         except Exception as e:
@@ -107,27 +128,25 @@ def generate_client_traffic(client, server_ip, port, min_bw, max_bw):
             stop_event.wait(3)
 
 def start_traffic(net):
+# ... (kode start_traffic tidak berubah) ...
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
     h4, h5, h6 = net.get('h4', 'h5', 'h6')
     h7 = net.get('h7')
 
     info("\n*** Starting iperf servers (Simulating services)\n")
     
-    # [TELEMETRY FIX] Hapus '> /tmp/...'
-    # Log per detik (-i 1) dari server sekarang akan tampil 
-    # LANGSUNG di console Mininet utama.
     safe_cmd(h4, "iperf -s -u -p 443 -i 1 &")
     safe_cmd(h5, "iperf -s -u -p 443 -i 1 &")
     safe_cmd(h7, "iperf -s -u -p 1935 -i 1 &")
     time.sleep(1)
 
-    # [TELEMETRY FIX] Hapus 'PRO TIP' karena sudah tidak perlu xterm
     info("-----------------------------------------------------------\n")
     info("💡 TELEMETRI LIVE (dari server) akan muncul di bawah ini:\n")
     info("-----------------------------------------------------------\n")
 
 
     info("\n*** Starting client traffic threads (Simulating users)\n")
+    # Argumen di sini (1.5, 5.0, dll) sekarang jadi 'base' range
     threads = [
         threading.Thread(target=generate_client_traffic, args=(h1, '10.0.1.1', 443, 1.5, 5.0), daemon=True), 
         threading.Thread(target=generate_client_traffic, args=(h2, '10.0.1.2', 443, 0.8, 3.5), daemon=True), 
@@ -139,6 +158,7 @@ def start_traffic(net):
 
 # ---------------------- FORECAST LOOP ----------------------
 def run_forecast_loop():
+# ... (kode forecast loop tidak berubah) ...
     while not stop_event.is_set():
         info("\n*** Running AI Forecast...\n")
         try:
@@ -150,8 +170,8 @@ def run_forecast_loop():
         stop_event.wait(900)
 
 # ---------------------- MAIN ----------------------
-# ---------------------- MAIN ----------------------
 if __name__ == "__main__":
+# ... (kode main tidak berubah) ...
     setLogLevel("info")
     net = Mininet(topo=ComplexTopo(),
                   switch=OVSSwitch,
