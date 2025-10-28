@@ -63,37 +63,43 @@ class ComplexTopo(Topo):
 
 # ---------------------- DYNAMIC TRAFFIC ----------------------
 def generate_client_traffic(client, server_ip, port, base_bw_off_peak, base_bw_peak):
-    info(f"Starting traffic for {client.name} -> {server_ip}\n")
+    """
+    Generates traffic with:
+    - Smooth sine pattern (short period)
+    - Random jitter
+    - Frequent spikes
+    """
+    info(f"Starting dynamic traffic for {client.name} -> {server_ip}\n")
+
     while True:
         try:
-            now = time.time()  # seconds since epoch
+            # Base bandwidth based on time of day
             hour = datetime.now().hour
-
-            # Peak/off-peak base bandwidth
             base_bw = base_bw_peak if 18 <= hour < 24 else base_bw_off_peak
 
-            # Smooth sine-based variation with real time
-            sine_variation = 0.2 * math.sin(now / 60 + random.uniform(0, 2*math.pi))
+            # Smooth sine variation (short cycle, changes every second)
+            sine_variation = 0.2 * math.sin(time.time() * 2 * math.pi / 15)  # 15-second cycle
 
-            # Fast random jitter
-            fast_random = random.uniform(-0.1, 0.1)
+            # Fast random jitter ±30%
+            fast_random = random.uniform(-0.3, 0.3)
 
-            # Occasional spike (10% chance)
-            spike = random.choices([0, random.uniform(0.5, 1.5)], weights=[0.9,0.1])[0]
+            # Occasional spike, 50% chance per iteration
+            spike = random.choice([0, random.uniform(0.5, 1.5)])
 
-            target_bw = base_bw * (1 + sine_variation + fast_random) + spike
+            # Compute final target bandwidth
+            target_bw = max(0.1, base_bw * (1 + sine_variation + fast_random) + spike)
             bw_str = f"{target_bw:.2f}M"
 
-            duration = 10
-            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {duration}"
+            # Run iperf for 10 seconds
+            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t 10"
             safe_cmd(client, cmd)
 
-            # Random pause 1-5s
-            time.sleep(random.uniform(1,5))
+            # Random pause 1-3s between iterations
+            time.sleep(random.uniform(1,3))
 
         except Exception as e:
             info(f"Error traffic for {client.name}: {e}\n")
-            time.sleep(10)
+            time.sleep(5)
 
 def start_traffic(net):
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
@@ -101,9 +107,9 @@ def start_traffic(net):
     h7 = net.get('h7')
 
     info("*** Starting iperf servers\n")
-    safe_cmd(h4, "iperf -s -u -p 443 &")   # YouTube server
-    safe_cmd(h5, "iperf -s -u -p 443 &")   # Netflix server
-    safe_cmd(h7, "iperf -s -u -p 1935 &")  # Twitch server
+    safe_cmd(h4, "iperf -s -u -p 443 &")   # YouTube
+    safe_cmd(h5, "iperf -s -u -p 443 &")   # Netflix
+    safe_cmd(h7, "iperf -s -u -p 1935 &")  # Twitch
 
     time.sleep(1)  # Give servers time to start
 
@@ -135,7 +141,7 @@ if __name__ == "__main__":
                   link=TCLink)
     net.start()
 
-    # Start traffic
+    # Start traffic threads
     start_traffic(net)
 
     # Start forecast loop
