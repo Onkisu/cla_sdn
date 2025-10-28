@@ -150,6 +150,7 @@ def run_forecast_loop():
         stop_event.wait(900)
 
 # ---------------------- MAIN ----------------------
+# ---------------------- MAIN ----------------------
 if __name__ == "__main__":
     setLogLevel("info")
     net = Mininet(topo=ComplexTopo(),
@@ -163,12 +164,22 @@ if __name__ == "__main__":
     # t_forecast = threading.Thread(target=run_forecast_loop, daemon=True)
     # t_forecast.start()
 
-    CLI(net)
-
-    info("\n*** CLI exited. Stopping traffic threads...\n")
-    stop_event.set() 
-    time.sleep(1) 
+    # [FIX] Ganti CLI(net) dengan loop ini
+    info("\n*** Skrip berjalan. Telemetri akan muncul di bawah.")
+    info("*** Tekan Ctrl+C untuk berhenti kapan saja.\n")
+    try:
+        while True:
+            # Biarin main thread tetep idup buat nampung log
+            time.sleep(30) 
+            
+    except KeyboardInterrupt:
+        info("\n\n*** Ctrl+C diterima. Menghentikan semua proses...\n")
     
-    info("*** Stopping Mininet network...\n")
+    # [FIX] Cleanup dipindah ke sini
+    info("*** Mengirim sinyal stop ke semua thread...\n")
+    stop_event.set() 
+    time.sleep(1) # Kasih waktu thread buat mati
+    
+    info("*** Menghentikan jaringan Mininet...\n")
     net.stop()
-    info("*** Mininet stopped.\n")
+    info("*** Mininet berhenti.\n")
