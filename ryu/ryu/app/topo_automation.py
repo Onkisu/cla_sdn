@@ -18,7 +18,7 @@ stop_event = threading.Event()
 def safe_cmd(node, cmd):
     """Execute node.cmd() safely with lock."""
     if stop_event.is_set():
-        return None # [FIX] Kembalikan None kalo udah distop
+        return None 
     with cmd_lock:
         return node.cmd(cmd) # Kembalikan output dari command
 
@@ -76,31 +76,24 @@ def generate_client_traffic(client, server_ip, port, min_bw, max_bw):
             burst_time = random.uniform(0.5, 2.5) 
             burst_time_str = f"{burst_time:.1f}"
 
-            # 2. Execute iperf burst (actual traffic generation)
-            # [LOGGING FIX] Tambah '-y C' untuk output CSV (gampang diparsing)
+            # 2. Execute iperf burst
             cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str} -y C"
             
-            # [LOGGING FIX] Tangkap outputnya
             output = safe_cmd(client, cmd)
 
-            # Kalo outputnya None, artinya stop_event nyala, langsung keluar
             if not output:
                 continue
 
-            # 3. [LOGGING FIX] Parsing output asli iperf
+            # 3. Parsing output asli iperf
             try:
-                # Ambil baris terakhir dari output, itu baris CSV-nya
                 csv_line = output.strip().split('\n')[-1]
                 parts = csv_line.split(',')
-                
-                # Di format CSV, kolom ke-8 (index 7) adalah total bytes
                 actual_bytes = int(parts[7])
                 
-                # 4. [LOGGING FIX] Cetak log ASLI, bukan simulasi
-                info(f"iperf LOG: {client.name} -> {server_ip} SENT {actual_bytes:,} bytes in {burst_time:.1f}s (Target BW: {bw_str}ps)\n")
+                # 4. Cetak log ASLI di CLI utama
+                info(f"CLIENT LOG: {client.name} -> {server_ip} SENT {actual_bytes:,} bytes in {burst_time:.1f}s (Target BW: {bw_str}ps)\n")
 
             except Exception as e:
-                # Kalo parsing gagal (jarang terjadi), cetak error aja
                 info(f"Could not parse iperf output for {client.name}: {e}\nOutput was: {output}\n")
 
 
@@ -119,10 +112,20 @@ def start_traffic(net):
     h7 = net.get('h7')
 
     info("\n*** Starting iperf servers (Simulating services)\n")
-    safe_cmd(h4, "iperf -s -u -p 443 &")   # Server H4: YouTube (Port 443)
-    safe_cmd(h5, "iperf -s -u -p 443 &")   # Server H5: Netflix (Port 443)
-    safe_cmd(h7, "iperf -s -u -p 1935 &")  # Server H7: Twitch (Port 1935)
+    
+    # [TELEMETRY FIX] Hapus '> /tmp/...'
+    # Log per detik (-i 1) dari server sekarang akan tampil 
+    # LANGSUNG di console Mininet utama.
+    safe_cmd(h4, "iperf -s -u -p 443 -i 1 &")
+    safe_cmd(h5, "iperf -s -u -p 443 -i 1 &")
+    safe_cmd(h7, "iperf -s -u -p 1935 -i 1 &")
     time.sleep(1)
+
+    # [TELEMETRY FIX] Hapus 'PRO TIP' karena sudah tidak perlu xterm
+    info("-----------------------------------------------------------\n")
+    info("💡 TELEMETRI LIVE (dari server) akan muncul di bawah ini:\n")
+    info("-----------------------------------------------------------\n")
+
 
     info("\n*** Starting client traffic threads (Simulating users)\n")
     threads = [
