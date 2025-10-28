@@ -9,13 +9,11 @@ import threading
 import random
 import time
 import subprocess
-from datetime import datetime
 
 # ---------------------- GLOBAL LOCK ----------------------
 cmd_lock = threading.Lock()
-
 def safe_cmd(node, cmd):
-    """Execute node.cmd() safely with lock to avoid Mininet poll() conflict."""
+    """Execute node.cmd() safely with lock."""
     with cmd_lock:
         return node.cmd(cmd)
 
@@ -24,7 +22,6 @@ class LinuxRouter(Node):
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
         safe_cmd(self, "sysctl -w net.ipv4.ip_forward=1")
-
     def terminate(self):
         safe_cmd(self, "sysctl -w net.ipv4.ip_forward=0")
         super(LinuxRouter, self).terminate()
@@ -55,7 +52,7 @@ class ComplexTopo(Topo):
         self.addLink(h4, s2, bw=10, delay='32ms', loss=2); self.addLink(h5, s2, bw=10, delay='47ms', loss=2); self.addLink(h6, s2, bw=10)
         self.addLink(h7, s3, bw=2, delay='50ms', loss=2)
 
-        # Links router to switches (gateway per subnet)
+        # Links router to switches
         self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip': '10.0.0.254/24'}) 
         self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
         self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
@@ -63,22 +60,33 @@ class ComplexTopo(Topo):
 # ---------------------- RANDOM TRAFFIC ----------------------
 def generate_client_traffic(client, server_ip, port, min_bw, max_bw):
     """
-    Generate purely random traffic between min_bw and max_bw Mbps.
+    Purely random traffic. Measures instantaneous bytes per iteration.
     """
     info(f"Starting random traffic for {client.name} -> {server_ip}\n")
+    prev_bytes = 0
 
     while True:
         try:
             target_bw = random.uniform(min_bw, max_bw)
             bw_str = f"{target_bw:.2f}M"
 
-            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t 10"
+            # Short iperf bursts
+            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t 2"
             safe_cmd(client, cmd)
 
-            time.sleep(random.uniform(1,3))
+            # Record current bytes sent
+            output = safe_cmd(client, "cat /sys/class/net/%s/statistics/tx_bytes" % client.defaultIntf())
+            current_bytes = int(output.strip())
+            diff = current_bytes - prev_bytes
+            prev_bytes = current_bytes
+
+            # You can log diff or send to API
+            info(f"{client.name} sent {diff} bytes in last interval\n")
+
+            time.sleep(random.uniform(1,2))
         except Exception as e:
             info(f"Error traffic for {client.name}: {e}\n")
-            time.sleep(5)
+            time.sleep(3)
 
 def start_traffic(net):
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
@@ -86,13 +94,11 @@ def start_traffic(net):
     h7 = net.get('h7')
 
     info("*** Starting iperf servers\n")
-    safe_cmd(h4, "iperf -s -u -p 443 &")   # YouTube
-    safe_cmd(h5, "iperf -s -u -p 443 &")   # Netflix
-    safe_cmd(h7, "iperf -s -u -p 1935 &")  # Twitch
-
+    safe_cmd(h4, "iperf -s -u -p 443 &")
+    safe_cmd(h5, "iperf -s -u -p 443 &")
+    safe_cmd(h7, "iperf -s -u -p 1935 &")
     time.sleep(1)
 
-    info("*** Starting random traffic clients\n")
     threads = [
         threading.Thread(target=generate_client_traffic, args=(h1, '10.0.1.1', 443, 1.0, 4.0), daemon=True),
         threading.Thread(target=generate_client_traffic, args=(h2, '10.0.1.2', 443, 0.5, 3.0), daemon=True),
@@ -122,7 +128,8 @@ if __name__ == "__main__":
 
     start_traffic(net)
 
-
+    # t_forecast = threading.Thread(target=run_forecast_loop, daemon=True)
+    # t_forecast.start()
 
     CLI(net)
     net.stop()
