@@ -39,7 +39,7 @@ class ComplexTopo(Topo):
         # Switches
         s1 = self.addSwitch('s1')
         s2 = self.addSwitch('s2')
-        s3 = self.addSwitch('s3')
+        s3 = self.addSwitchB('s3')
 
         # Hosts
         h1 = self.addHost('h1', ip='10.0.0.1/24', defaultRoute='via 10.0.0.254')
@@ -66,27 +66,23 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw):
     to simulate different user behaviors (e.g., switching video quality).
     """
     
-    # [FIX v3] Buat "mesin random" (generator) baru yang 100% privat
-    # untuk thread ini. Ini adalah cara paling thread-safe.
-    rng = random.Random()
-    
-    # Seed (kocok) "mesin" baru ini pake ID thread
-    rng.seed(threading.current_thread().ident) 
+    # [FIX v4] Seed (kocok) mesin random GLOBAL, tapi gunakan
+    # hash(client.name) yang DIJAMIN unik untuk tiap thread.
+    # Kita gabung juga dengan time() biar tiap run beda.
+    seed_value = hash(client.name) + int(time.time() * 1000)
+    random.seed(seed_value) 
 
-    info(f"Starting random traffic for {client.name} -> {server_ip} (Base Range: [{base_min_bw}M - {base_max_bw}M])\n")
+    info(f"Starting random traffic for {client.name} (Seed: {seed_value}) -> {server_ip} (Base Range: [{base_min_bw}M - {base_max_bw}M])\n")
     
     while not stop_event.is_set():
         try:
             # === [MODIFIKASI INTI] ===
             # 1. Buat range (skala/limit) yang dinamis/acak di setiap loop
             
-            # [FIX v3] Gunakan generator privat: rng.uniform()
-            # Tentukan max baru: bisa 40% s/d 110% dari base_max
-            current_max_bw = rng.uniform(base_max_bw * 0.4, base_max_bw * 1.1)
-            
-            # [FIX v3] Gunakan generator privat: rng.uniform()
-            # Tentukan min baru: bisa 40% dari base_min s/d 80% dari *max_baru*
-            current_min_bw = rng.uniform(base_min_bw * 0.4, current_max_bw * 0.8)
+            # [FIX v4] Kita kembali pakai random.uniform() (global)
+            # karena kita udah seed di atas.
+            current_max_bw = random.uniform(base_max_bw * 0.4, base_max_bw * 1.1)
+            current_min_bw = random.uniform(base_min_bw * 0.4, current_max_bw * 0.8)
 
             # Pastiin min/max-nya waras (nggak 0 atau min > max)
             current_min_bw = max(0.1, current_min_bw) # Minimal 0.1M
@@ -96,13 +92,11 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw):
             # === [SELESAI MODIFIKASI INTI] ===
 
             # 2. Tentukan target bandwidth dari range *baru* yang dinamis
-            # [FIX v3] Gunakan generator privat: rng.uniform()
-            target_bw = rng.uniform(current_min_bw, current_max_bw)
+            target_bw = random.uniform(current_min_bw, current_max_bw)
             bw_str = f"{target_bw:.2f}M"
             
             # Durasi burst time (tetap acak)
-            # [FIX v3] Gunakan generator privat: rng.uniform()
-            burst_time = rng.uniform(0.5, 2.5) 
+            burst_time = random.uniform(0.5, 2.5) 
             burst_time_str = f"{burst_time:.1f}"
 
             # 3. Execute iperf burst
@@ -127,8 +121,7 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw):
 
 
             # 6. Random pause 0.5–2s
-            # [FIX v3] Gunakan generator privat: rng.uniform()
-            pause_duration = rng.uniform(0.5, 2.0)
+            pause_duration = random.uniform(0.5, 2.0)
             stop_event.wait(pause_duration)
 
         except Exception as e:
@@ -163,10 +156,16 @@ def start_traffic(net):
     ]
     for t in threads:
         t.start()
+        # [FIX v4] Kasih jeda dikit banget antar start,
+        # biar sistem sempet ngubah time() untuk seed berikutnya
+        time.sleep(0.01) 
+        
     return threads 
 
 # ---------------------- FORECAST LOOP ----------------------
 def run_forecast_loop():
+# ... (sisa kode MAIN sama persis, tidak perlu diubah) ...
+# ... (scroll ke bawah) ...
     while not stop_event.is_set():
         info("\n*** Running AI Forecast...\n")
         try:
