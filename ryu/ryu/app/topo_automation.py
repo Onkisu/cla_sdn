@@ -24,7 +24,6 @@ def safe_cmd(node, cmd):
 
 # ---------------------- ROUTER & TOPOLOGY ----------------------
 class LinuxRouter(Node):
-# ... (Topologi Class - TIDAK BERUBAH) ...
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
         safe_cmd(self, "sysctl -w net.ipv4.ip_forward=1")
@@ -59,29 +58,33 @@ class ComplexTopo(Topo):
         self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
         self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
 
-# ---------------------- RANDOM TRAFFIC (FIX v7 - HARDCODE SEED) ----------------------
+# ---------------------- RANDOM TRAFFIC (FIX v7.1) ----------------------
 
 def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
     """Helper fungsi logging."""
     try:
-        csv_line = output.strip().split('\n')[-1]
+        # [FIX] Ambil baris PERTAMA [0], bukan baris TERAKHIR [-1]
+        # Ini karena iperf nge-print CSV dulu, baru nge-print error "Connection refused"
+        csv_line = output.strip().split('\n')[0]
+        
         parts = csv_line.split(',')
         actual_bytes = int(parts[7])
         info(f"CLIENT LOG: {client_name} -> {server_ip} SENT {actual_bytes:,} bytes in {burst_time_str}s (Target BW: {bw_str}ps)\n")
     except Exception as e:
+        # Kalo parsing baris pertama GAGAL, baru kita print error
         info(f"Could not parse iperf output for {client_name}: {e}\nOutput was: {output}\n")
 
-# [FIX v7] Kita kembali ke SATU FUNGSI, tapi kita tambahin 'seed'
+# Kita kembali ke SATU FUNGSI, tapi kita tambahin 'seed'
 def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, seed):
     """
     Generates random UDP traffic bursts using a DEDICATED random generator
     seeded with a hardcoded, unique value.
     """
     
-    # [FIX v7] Buat "mesin random" (generator) baru yang 100% LOKAL/PRIVAT.
+    # Buat "mesin random" (generator) baru yang 100% LOKAL/PRIVAT.
     rng = random.Random()
     
-    # [FIX v7] Seed (kocok) "mesin" LOKAL ini pake 'seed' yang kita paksa
+    # Seed (kocok) "mesin" LOKAL ini pake 'seed' yang kita paksa
     rng.seed(seed) 
 
     info(f"Starting random traffic for {client.name} (Seed: {seed}) -> {server_ip} (Base Range: [{base_min_bw}M - {base_max_bw}M])\n")
@@ -89,10 +92,8 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, s
     while not stop_event.is_set():
         try:
             # 1. Buat range (skala/limit) yang dinamis/acak di setiap loop
-            # Logika ini (0.4 - 1.1) sekarang sama buat semua
             current_max_bw = rng.uniform(base_max_bw * 0.4, base_max_bw * 1.1)
             current_min_bw = rng.uniform(base_min_bw * 0.4, current_max_bw * 0.8)
-
             current_min_bw = max(0.1, current_min_bw)
             current_max_bw = max(current_min_bw + 0.2, current_max_bw)
 
@@ -113,7 +114,14 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, s
                 continue
 
             # 5. Parsing dan log output asli iperf
-            _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
+            # Cek dulu apa outputnya ada error 'refused'
+            if "Connection refused" in output or "read failed" in output:
+                # Kalo error, kita coba log, tapi siap-siap kalo gagal
+                _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
+            else:
+                # Kalo output bersih (kayak h1), parsing aman
+                _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
+
 
             # 6. Random pause 0.5–2s
             pause_duration = rng.uniform(0.5, 2.0)
@@ -147,11 +155,11 @@ def start_traffic(net):
 
     info("\n*** Starting client traffic threads (Simulating users)\n")
     
-    # [FIX v7] SAMAIN SEMUA BASE RANGE (sesuai request lu)
+    # SAMAIN SEMUA BASE RANGE (sesuai request lu)
     base_range_min = 0.5
     base_range_max = 5.0
     
-    # [FIX v7] Panggil FUNGSI YANG SAMA, tapi pake SEED BEDA
+    # Panggil FUNGSI YANG SAMA, tapi pake SEED BEDA
     threads = [
         # h1 -> YouTube
         threading.Thread(target=generate_client_traffic, 
@@ -173,8 +181,6 @@ def start_traffic(net):
 
 # ---------------------- FORECAST LOOP ----------------------
 def run_forecast_loop():
-# ... (sisa kode MAIN sama persis, tidak perlu diubah) ...
-# ... (scroll ke bawah) ...
     while not stop_event.is_set():
         info("\n*** Running AI Forecast...\n")
         try:
