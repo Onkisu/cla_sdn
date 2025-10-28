@@ -5,11 +5,10 @@ from mininet.link import TCLink
 from mininet.topo import Topo
 from mininet.cli import CLI
 from mininet.log import setLogLevel, info
-import time
-import subprocess
 import threading
 import random
-import math
+import time
+import subprocess
 from datetime import datetime
 
 # ---------------------- GLOBAL LOCK ----------------------
@@ -61,42 +60,22 @@ class ComplexTopo(Topo):
         self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
         self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
 
-# ---------------------- DYNAMIC TRAFFIC ----------------------
-def generate_client_traffic(client, server_ip, port, base_bw_off_peak, base_bw_peak):
+# ---------------------- RANDOM TRAFFIC ----------------------
+def generate_client_traffic(client, server_ip, port, min_bw, max_bw):
     """
-    Generates traffic with:
-    - Smooth sine pattern (short period)
-    - Random jitter
-    - Frequent spikes
+    Generate purely random traffic between min_bw and max_bw Mbps.
     """
-    info(f"Starting dynamic traffic for {client.name} -> {server_ip}\n")
+    info(f"Starting random traffic for {client.name} -> {server_ip}\n")
 
     while True:
         try:
-            # Base bandwidth based on time of day
-            hour = datetime.now().hour
-            base_bw = base_bw_peak if 18 <= hour < 24 else base_bw_off_peak
-
-            # Smooth sine variation (short cycle, changes every second)
-            sine_variation = 0.2 * math.sin(time.time() * 2 * math.pi / 15)  # 15-second cycle
-
-            # Fast random jitter ±30%
-            fast_random = random.uniform(-0.3, 0.3)
-
-            # Occasional spike, 50% chance per iteration
-            spike = random.choice([0, random.uniform(0.5, 1.5)])
-
-            # Compute final target bandwidth
-            target_bw = max(0.1, base_bw * (1 + sine_variation + fast_random) + spike)
+            target_bw = random.uniform(min_bw, max_bw)
             bw_str = f"{target_bw:.2f}M"
 
-            # Run iperf for 10 seconds
             cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t 10"
             safe_cmd(client, cmd)
 
-            # Random pause 1-3s between iterations
             time.sleep(random.uniform(1,3))
-
         except Exception as e:
             info(f"Error traffic for {client.name}: {e}\n")
             time.sleep(5)
@@ -111,13 +90,13 @@ def start_traffic(net):
     safe_cmd(h5, "iperf -s -u -p 443 &")   # Netflix
     safe_cmd(h7, "iperf -s -u -p 1935 &")  # Twitch
 
-    time.sleep(1)  # Give servers time to start
+    time.sleep(1)
 
-    info("*** Starting dynamic iperf clients\n")
+    info("*** Starting random traffic clients\n")
     threads = [
-        threading.Thread(target=generate_client_traffic, args=(h1, '10.0.1.1', 443, 1.5, 4.0), daemon=True),
-        threading.Thread(target=generate_client_traffic, args=(h2, '10.0.1.2', 443, 1.0, 2.5), daemon=True),
-        threading.Thread(target=generate_client_traffic, args=(h3, '10.0.2.1', 1935, 0.5, 1.5), daemon=True)
+        threading.Thread(target=generate_client_traffic, args=(h1, '10.0.1.1', 443, 1.0, 4.0), daemon=True),
+        threading.Thread(target=generate_client_traffic, args=(h2, '10.0.1.2', 443, 0.5, 3.0), daemon=True),
+        threading.Thread(target=generate_client_traffic, args=(h3, '10.0.2.1', 1935, 0.2, 2.0), daemon=True)
     ]
     for t in threads:
         t.start()
@@ -130,7 +109,7 @@ def run_forecast_loop():
             subprocess.call(["sudo", "python3", "forecast.py"])
         except Exception as e:
             info(f"*** Forecast error: {e}\n")
-        time.sleep(900)  # 15 minutes
+        time.sleep(900)
 
 # ---------------------- MAIN ----------------------
 if __name__ == "__main__":
@@ -141,13 +120,9 @@ if __name__ == "__main__":
                   link=TCLink)
     net.start()
 
-    # Start traffic threads
     start_traffic(net)
 
-    # Start forecast loop
-    t_forecast = threading.Thread(target=run_forecast_loop, daemon=True)
-    t_forecast.start()
 
-    # Start CLI safely while traffic threads run
+
     CLI(net)
     net.stop()
