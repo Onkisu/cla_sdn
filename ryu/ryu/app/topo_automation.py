@@ -67,9 +67,10 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw):
     to simulate different user behaviors (e.g., switching video quality).
     """
     
-    # [FIX] Re-seed generator di tiap thread biar polanya beda!
-    # Ini "mengocok ulang" mesin random untuk thread ini saja.
-    random.seed() 
+    # [FIX v2] Re-seed generator di tiap thread biar polanya beda!
+    # Gunakan ID unik dari thread sebagai seed, karena random.seed() 
+    # (tanpa arg) bisa kembar kalo thread-nya di-start terlalu cepat.
+    random.seed(threading.current_thread().ident) 
 
     info(f"Starting random traffic for {client.name} -> {server_ip} (Base Range: [{base_min_bw}M - {base_max_bw}M])\n")
     
