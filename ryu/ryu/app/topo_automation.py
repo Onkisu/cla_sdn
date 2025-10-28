@@ -39,7 +39,6 @@ class ComplexTopo(Topo):
         # Switches
         s1 = self.addSwitch('s1')
         s2 = self.addSwitch('s2')
-        # [FIX] Ganti dari 'addSwitchB' (typo) ke 'addSwitch'
         s3 = self.addSwitch('s3')
 
         # Hosts
@@ -59,77 +58,117 @@ class ComplexTopo(Topo):
         self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
         self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
 
-# ---------------------- RANDOM TRAFFIC ----------------------
-def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw):
-    """
-    Generates random UDP traffic bursts using iperf.
-    The *range* (min/max) is also randomized in each loop
-    to simulate different user behaviors (e.g., switching video quality).
-    """
-    
-    # [FIX v4] Seed (kocok) mesin random GLOBAL, tapi gunakan
-    # hash(client.name) yang DIJAMIN unik untuk tiap thread.
-    # Kita gabung juga dengan time() biar tiap run beda.
-    seed_value = hash(client.name) + int(time.time() * 1000)
-    random.seed(seed_value) 
+# ---------------------- RANDOM TRAFFIC (FIX v6 - PISAH FUNGSI) ----------------------
 
-    info(f"Starting random traffic for {client.name} (Seed: {seed_value}) -> {server_ip} (Base Range: [{base_min_bw}M - {base_max_bw}M])\n")
-    
+def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
+    """Helper
+    fungsi logging biar nggak repetitif."""
+    try:
+        csv_line = output.strip().split('\n')[-1]
+        parts = csv_line.split(',')
+        actual_bytes = int(parts[7])
+        info(f"CLIENT LOG: {client_name} -> {server_ip} SENT {actual_bytes:,} bytes in {burst_time_str}s (Target BW: {bw_str}ps)\n")
+    except Exception as e:
+        info(f"Could not parse iperf output for {client_name}: {e}\nOutput was: {output}\n")
+
+# --- FUNGSI A: YOUTUBE (MOODY/SWING BESAR) ---
+def generate_youtube_traffic(client, server_ip, port, base_min_bw, base_max_bw):
+    rng = random.Random(hash(client.name))
+    info(f"Starting YouTube (Moody) traffic for {client.name} (Seed: {hash(client.name)})\n")
     while not stop_event.is_set():
         try:
-            # === [MODIFIKASI INTI] ===
-            # 1. Buat range (skala/limit) yang dinamis/acak di setiap loop
-            
-            # [FIX v4] Kita kembali pakai random.uniform() (global)
-            # karena kita udah seed di atas.
-            current_max_bw = random.uniform(base_max_bw * 0.4, base_max_bw * 1.1)
-            current_min_bw = random.uniform(base_min_bw * 0.4, current_max_bw * 0.8)
+            # Aturan main 'Moody': swing-nya besar (bisa 20% - 120% dari base)
+            current_max_bw = rng.uniform(base_max_bw * 0.2, base_max_bw * 1.2)
+            current_min_bw = rng.uniform(base_min_bw * 0.1, current_max_bw * 0.7)
+            current_min_bw = max(0.1, current_min_bw)
+            current_max_bw = max(current_min_bw + 0.2, current_max_bw)
 
-            # Pastiin min/max-nya waras (nggak 0 atau min > max)
-            current_min_bw = max(0.1, current_min_bw) # Minimal 0.1M
-            current_max_bw = max(current_min_bw + 0.2, current_max_bw) # Max minimal 0.2M di atas min
-
-            # info(f"PROFILE: {client.name} new dynamic range: [{current_min_bw:.2f}M - {current_max_bw:.2f}M]\n")
-            # === [SELESAI MODIFIKASI INTI] ===
-
-            # 2. Tentukan target bandwidth dari range *baru* yang dinamis
-            target_bw = random.uniform(current_min_bw, current_max_bw)
+            target_bw = rng.uniform(current_min_bw, current_max_bw)
             bw_str = f"{target_bw:.2f}M"
             
-            # Durasi burst time (tetap acak)
-            burst_time = random.uniform(0.5, 2.5) 
+            # Burst time normal
+            burst_time = rng.uniform(0.5, 2.5) 
             burst_time_str = f"{burst_time:.1f}"
 
-            # 3. Execute iperf burst
             cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str} -y C"
-            
             output = safe_cmd(client, cmd)
+            if not output: continue
 
-            if not output:
-                continue
-
-            # 4. Parsing output asli iperf
-            try:
-                csv_line = output.strip().split('\n')[-1]
-                parts = csv_line.split(',')
-                actual_bytes = int(parts[7])
-                
-                # 5. Cetak log ASLI di CLI utama
-                info(f"CLIENT LOG: {client.name} -> {server_ip} SENT {actual_bytes:,} bytes in {burst_time:.1f}s (Target BW: {bw_str}ps)\n")
-
-            except Exception as e:
-                info(f"Could not parse iperf output for {client.name}: {e}\nOutput was: {output}\n")
-
-
-            # 6. Random pause 0.5–2s
-            pause_duration = random.uniform(0.5, 2.0)
-            stop_event.wait(pause_duration)
-
+            _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
+            
+            # Pause normal
+            stop_event.wait(rng.uniform(0.5, 2.0))
         except Exception as e:
-            if stop_event.is_set():
-                break
+            if stop_event.is_set(): break
             info(f"Error traffic for {client.name}: {e}\n")
             stop_event.wait(3)
+
+# --- FUNGSI B: NETFLIX (STABIL) ---
+def generate_netflix_traffic(client, server_ip, port, base_min_bw, base_max_bw):
+    rng = random.Random(hash(client.name))
+    info(f"Starting Netflix (Stable) traffic for {client.name} (Seed: {hash(client.name)})\n")
+    while not stop_event.is_set():
+        try:
+            # Aturan main 'Stabil': swing-nya kecil (selalu 70% - 100% dari base)
+            current_max_bw = rng.uniform(base_max_bw * 0.7, base_max_bw * 1.0)
+            current_min_bw = rng.uniform(base_min_bw * 0.6, current_max_bw * 0.9)
+            current_min_bw = max(0.1, current_min_bw)
+            current_max_bw = max(current_min_bw + 0.2, current_max_bw)
+
+            target_bw = rng.uniform(current_min_bw, current_max_bw)
+            bw_str = f"{target_bw:.2f}M"
+            
+            # Burst time lebih lama (simulasi buffering/chunk)
+            burst_time = rng.uniform(1.0, 3.0) 
+            burst_time_str = f"{burst_time:.1f}"
+
+            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str} -y C"
+            output = safe_cmd(client, cmd)
+            if not output: continue
+
+            _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
+            
+            # Pause lebih lama
+            stop_event.wait(rng.uniform(1.0, 3.0))
+        except Exception as e:
+            if stop_event.is_set(): break
+            info(f"Error traffic for {client.name}: {e}\n")
+            stop_event.wait(3)
+
+# --- FUNGSI C: TWITCH (SPIKY/NOISE) ---
+def generate_twitch_traffic(client, server_ip, port, base_min_bw, base_max_bw):
+    rng = random.Random(hash(client.name))
+    info(f"Starting Twitch (Spiky) traffic for {client.name} (Seed: {hash(client.name)})\n")
+    while not stop_event.is_set():
+        try:
+            # Aturan main 'Spiky': range normal, tapi burst-nya pendek2
+            current_max_bw = rng.uniform(base_max_bw * 0.5, base_max_bw * 1.1)
+            current_min_bw = rng.uniform(base_min_bw * 0.4, current_max_bw * 0.8)
+            current_min_bw = max(0.1, current_min_bw)
+            current_max_bw = max(current_min_bw + 0.2, current_max_bw)
+
+            target_bw = rng.uniform(current_min_bw, current_max_bw)
+            bw_str = f"{target_bw:.2f}M"
+            
+            # Burst time pendek (spiky)
+            burst_time = rng.uniform(0.2, 1.0) 
+            burst_time_str = f"{burst_time:.1f}"
+
+            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str} -y C"
+            output = safe_cmd(client, cmd)
+            if not output: continue
+
+            _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
+            
+            # Pause juga pendek
+            stop_event.wait(rng.uniform(0.3, 1.5))
+        except Exception as e:
+            if stop_event.is_set(): break
+            info(f"Error traffic for {client.name}: {e}\n")
+            stop_event.wait(3)
+
+# ---------------------- END RANDOM TRAFFIC ----------------------
+
 
 def start_traffic(net):
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
@@ -149,24 +188,23 @@ def start_traffic(net):
 
 
     info("\n*** Starting client traffic threads (Simulating users)\n")
-    # Argumen di sini (1.5, 5.0, dll) sekarang jadi 'base' range
+    
+    # [FIX v6] Panggil FUNGSI YANG BEDA untuk tiap thread
     threads = [
-        threading.Thread(target=generate_client_traffic, args=(h1, '10.0.1.1', 443, 1.5, 5.0), daemon=True), 
-        threading.Thread(target=generate_client_traffic, args=(h2, '10.0.1.2', 443, 0.8, 3.5), daemon=True), 
-        threading.Thread(target=generate_client_traffic, args=(h3, '10.0.2.1', 1935, 0.2, 1.8), daemon=True)
+        # h1 -> YouTube (Moody)
+        threading.Thread(target=generate_youtube_traffic, args=(h1, '10.0.1.1', 443, 1.5, 5.0), daemon=True), 
+        # h2 -> Netflix (Stable)
+        threading.Thread(target=generate_netflix_traffic, args=(h2, '10.0.1.2', 443, 0.8, 3.5), daemon=True), 
+        # h3 -> Twitch (Spiky)
+        threading.Thread(target=generate_twitch_traffic, args=(h3, '10.0.2.1', 1935, 0.2, 1.8), daemon=True)
     ]
     for t in threads:
         t.start()
-        # [FIX v4] Kasih jeda dikit banget antar start,
-        # biar sistem sempet ngubah time() untuk seed berikutnya
-        time.sleep(0.01) 
         
     return threads 
 
 # ---------------------- FORECAST LOOP ----------------------
 def run_forecast_loop():
-# ... (sisa kode MAIN sama persis, tidak perlu diubah) ...
-# ... (scroll ke bawah) ...
     while not stop_event.is_set():
         info("\n*** Running AI Forecast...\n")
         try:
@@ -191,21 +229,18 @@ if __name__ == "__main__":
     # t_forecast = threading.Thread(target=run_forecast_loop, daemon=True)
     # t_forecast.start()
 
-    # [FIX] Ganti CLI(net) dengan loop ini
     info("\n*** Skrip berjalan. Telemetri akan muncul di bawah.")
     info("*** Tekan Ctrl+C untuk berhenti kapan saja.\n")
     try:
         while True:
-            # Biarin main thread tetep idup buat nampung log
             time.sleep(30) 
             
     except KeyboardInterrupt:
         info("\n\n*** Ctrl+C diterima. Menghentikan semua proses...\n")
     
-    # [FIX] Cleanup dipindah ke sini
     info("*** Mengirim sinyal stop ke semua thread...\n")
     stop_event.set() 
-    time.sleep(1) # Kasih waktu thread buat mati
+    time.sleep(1) 
     
     info("*** Menghentikan jaringan Mininet...\n")
     net.stop()
