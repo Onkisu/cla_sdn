@@ -13,15 +13,14 @@ import math
 
 # ---------------------- GLOBAL LOCK & STOP EVENT ----------------------
 cmd_lock = threading.Lock()
-stop_event = threading.Event() # <-- [FIX] Ini "lampu merah" global kita
+stop_event = threading.Event() 
 
 def safe_cmd(node, cmd):
     """Execute node.cmd() safely with lock."""
-    # Jangan eksekusi cmd baru jika "lampu merah" sudah nyala
     if stop_event.is_set():
-        return
+        return None # [FIX] Kembalikan None kalo udah distop
     with cmd_lock:
-        return node.cmd(cmd)
+        return node.cmd(cmd) # Kembalikan output dari command
 
 # ---------------------- ROUTER & TOPOLOGY ----------------------
 class LinuxRouter(Node):
@@ -43,28 +42,18 @@ class ComplexTopo(Topo):
         s3 = self.addSwitch('s3')
 
         # Hosts
-        # Subnet 1 (10.0.0.x) - High-Priority
         h1 = self.addHost('h1', ip='10.0.0.1/24', defaultRoute='via 10.0.0.254')
         h2 = self.addHost('h2', ip='10.0.0.2/24', defaultRoute='via 10.0.0.254')
         h3 = self.addHost('h3', ip='10.0.0.3/24', defaultRoute='via 10.0.0.254')
-
-        # Subnet 2 (10.0.1.x) - Servers
         h4 = self.addHost('h4', ip='10.0.1.1/24', defaultRoute='via 10.0.1.254')
         h5 = self.addHost('h5', ip='10.0.1.2/24', defaultRoute='via 10.0.1.254')
         h6 = self.addHost('h6', ip='10.0.1.3/24', defaultRoute='via 10.0.1.254')
-
-        # Subnet 3 (10.0.2.x) - Low-Priority
         h7 = self.addHost('h7', ip='10.0.2.1/24', defaultRoute='via 10.0.2.254')
 
-        # Links hosts to switches
-        # S1 (Clients)
+        # Links
         self.addLink(h1, s1, bw=5); self.addLink(h2, s1, bw=5); self.addLink(h3, s1, bw=5)
-        # S2 (Servers) - High delay/loss to simulate a remote network
         self.addLink(h4, s2, bw=10, delay='32ms', loss=2); self.addLink(h5, s2, bw=10, delay='47ms', loss=2); self.addLink(h6, s2, bw=10)
-        # S3 (Single Client) - Very restrictive link
         self.addLink(h7, s3, bw=2, delay='50ms', loss=2)
-
-        # Links router to switches (Inter-VLAN/Subnet routing via R1)
         self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip': '10.0.0.254/24'}) 
         self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
         self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
@@ -72,15 +61,14 @@ class ComplexTopo(Topo):
 # ---------------------- RANDOM TRAFFIC ----------------------
 def generate_client_traffic(client, server_ip, port, min_bw, max_bw):
     """
-    Generates random UDP traffic bursts using iperf and calculates a randomized 
-    byte count estimate based on the target bandwidth.
+    Generates random UDP traffic bursts using iperf and logs the *actual*
+    byte count reported by iperf.
     """
     info(f"Starting random traffic for {client.name} -> {server_ip}\n")
     
-    # [FIX] Cek "lampu merah" di sini, bukan 'while True:'
     while not stop_event.is_set():
         try:
-            # 1. Randomly determine the target bandwidth (e.g., 0.5 Mbps to 4.0 Mbps)
+            # 1. Randomly determine the target bandwidth
             target_bw = random.uniform(min_bw, max_bw)
             bw_str = f"{target_bw:.2f}M"
             
@@ -89,28 +77,41 @@ def generate_client_traffic(client, server_ip, port, min_bw, max_bw):
             burst_time_str = f"{burst_time:.1f}"
 
             # 2. Execute iperf burst (actual traffic generation)
-            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str}"
-            safe_cmd(client, cmd)
-
-            # 3. Calculate a randomized byte count estimate (HANYA UNTUK INFO DI KONSOL)
-            expected_bytes = (target_bw * 1000000 / 8) * burst_time
-            fluctuation = random.uniform(0.9, 1.1)
-            delta = int(expected_bytes * fluctuation)
+            # [LOGGING FIX] Tambah '-y C' untuk output CSV (gampang diparsing)
+            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str} -y C"
             
-            # 4. Display the randomized result
-            info(f"{client.name} *simulated* sending {math.ceil(delta):,} bytes in last {burst_time:.1f}s burst (Target BW: {bw_str}ps)\n")
+            # [LOGGING FIX] Tangkap outputnya
+            output = safe_cmd(client, cmd)
+
+            # Kalo outputnya None, artinya stop_event nyala, langsung keluar
+            if not output:
+                continue
+
+            # 3. [LOGGING FIX] Parsing output asli iperf
+            try:
+                # Ambil baris terakhir dari output, itu baris CSV-nya
+                csv_line = output.strip().split('\n')[-1]
+                parts = csv_line.split(',')
+                
+                # Di format CSV, kolom ke-8 (index 7) adalah total bytes
+                actual_bytes = int(parts[7])
+                
+                # 4. [LOGGING FIX] Cetak log ASLI, bukan simulasi
+                info(f"iperf LOG: {client.name} -> {server_ip} SENT {actual_bytes:,} bytes in {burst_time:.1f}s (Target BW: {bw_str}ps)\n")
+
+            except Exception as e:
+                # Kalo parsing gagal (jarang terjadi), cetak error aja
+                info(f"Could not parse iperf output for {client.name}: {e}\nOutput was: {output}\n")
+
 
             # 5. Random pause 0.5–2s
-            # [FIX] Ganti time.sleep() jadi stop_event.wait()
-            # Ini sama kayak sleep, tapi bisa "bangun" kalo "lampu merah" nyala
             stop_event.wait(random.uniform(0.5, 2))
 
         except Exception as e:
-            # Kalo ada error, cek lagi "lampu merah"-nya
             if stop_event.is_set():
                 break
             info(f"Error traffic for {client.name}: {e}\n")
-            stop_event.wait(3) # [FIX] Ganti time.sleep()
+            stop_event.wait(3)
 
 def start_traffic(net):
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
@@ -125,32 +126,25 @@ def start_traffic(net):
 
     info("\n*** Starting client traffic threads (Simulating users)\n")
     threads = [
-        # h1 -> h4 (YouTube): High bandwidth range
         threading.Thread(target=generate_client_traffic, args=(h1, '10.0.1.1', 443, 1.5, 5.0), daemon=True), 
-        # h2 -> h5 (Netflix): Moderate bandwidth range
         threading.Thread(target=generate_client_traffic, args=(h2, '10.0.1.2', 443, 0.8, 3.5), daemon=True), 
-        # h3 -> h7 (Twitch): Lower bandwidth range
         threading.Thread(target=generate_client_traffic, args=(h3, '10.0.2.1', 1935, 0.2, 1.8), daemon=True)
     ]
     for t in threads:
         t.start()
-    return threads # [FIX] Kembalikan list threads biar bisa di-join nanti
+    return threads 
 
 # ---------------------- FORECAST LOOP ----------------------
 def run_forecast_loop():
-    # [FIX] Cek "lampu merah" di sini juga
     while not stop_event.is_set():
         info("\n*** Running AI Forecast...\n")
         try:
-            # Assuming 'forecast.py' exists and uses the traffic data
             subprocess.call(["sudo", "python3", "forecast.py"])
         except Exception as e:
             if stop_event.is_set():
                 break
             info(f"*** Forecast error: {e}\n")
-        
-        # [FIX] Ganti time.sleep()
-        stop_event.wait(900) # Wait 15 minutes
+        stop_event.wait(900)
 
 # ---------------------- MAIN ----------------------
 if __name__ == "__main__":
@@ -161,22 +155,17 @@ if __name__ == "__main__":
                   link=TCLink)
     net.start()
 
-    traffic_threads = start_traffic(net) # [FIX] Tangkap list threads
+    traffic_threads = start_traffic(net) 
 
     # t_forecast = threading.Thread(target=run_forecast_loop, daemon=True)
     # t_forecast.start()
 
     CLI(net)
 
-    # --- [FIX] BLOK CLEANUP SEBELUM NET.STOP() ---
     info("\n*** CLI exited. Stopping traffic threads...\n")
-    stop_event.set() # Nyalakan "lampu merah"
-
-    # Kasih waktu 1-2 detik buat semua thread mati dengan sopan
+    stop_event.set() 
     time.sleep(1) 
     
     info("*** Stopping Mininet network...\n")
-    # --- [SELESAI FIX] ---
-
     net.stop()
     info("*** Mininet stopped.\n")
