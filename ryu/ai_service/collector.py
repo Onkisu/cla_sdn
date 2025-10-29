@@ -13,7 +13,7 @@ from datetime import datetime
 from collections import defaultdict
 
 # ---------------------- KONFIGURASI ----------------------
-DB_CONN = "dbname=development user=dev_one password=hijack322. host=127.0.0.1"
+DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 RYU_REST = "http://127.0.0.1:8080"
 DPIDS = [1, 2, 3]
 
@@ -85,7 +85,7 @@ def load_cache():
     if not os.path.exists(CACHE_FILE): return False
     try:
         with open(CACHE_FILE, "r") as f: data = json.load(f)
-        if time.time() - data.get("_timestamp", 0) > CAIX_EXPIRE: return False
+        if time.time() - data.get("_timestamp", 0) > CACHE_EXPIRE: return False
         ip_app_map.update(data.get("ip_app_map", {}))
         port_app_map.update({int(k): v for k, v in data.get("port_app_map", {}).items()})
         return True
@@ -202,7 +202,7 @@ def collect_current_traffic():
             traffic_aggregator[agg_key]["src_ip"] = src_ip
             traffic_aggregator[agg_key]["dst_ip"] = dst_ip
             traffic_aggregator[agg_key]["src_mac"] = match.get("eth_src") or ip_mac_map.get(src_ip, "")
-            traffic_aggregator[agg_key]["dst_mac"] = match.get("dst_eth") or ip_mac_map.get(dst_ip, "")
+            traffic_aggregator[agg_key]["dst_mac"] = match.get("eth_dst") or ip_mac_map.get(dst_ip, "")
             traffic_aggregator[agg_key]["proto"] = proto
             
             current_bytes += delta_bytes
@@ -288,3 +288,4 @@ if __name__ == "__main__":
             print("Tidak ada delta baru (flow tidak berubah).", file=sys.stderr)
             
         time.sleep(5)
+
