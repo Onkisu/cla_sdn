@@ -13,20 +13,19 @@ from datetime import datetime
 from collections import defaultdict
 
 # ---------------------- KONFIGURASI ----------------------
-DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
+DB_CONN = "dbname=development user=dev_one password=hijack322. host=127.0.0.1"
 RYU_REST = "http://127.0.0.1:8080"
 DPIDS = [1, 2, 3]
 
-# [MODIFIKASI] Nama file diubah biar jelas
-print("Memulai collector_simple.py (Non-Agregasi, 1 poll / 5 detik)...")
+print("Memulai collector_FIXED.py (Delta per Flow, 1 poll / 5 detik)...")
 
 
 # [WAJIB] Penyimpanan global untuk TOTAL KUMULATIF terakhir
-# Ini adalah 'memori' kolektor untuk hitung DELTA
+# Kunci: (dpid, src_ip, dst_ip, tp_src, tp_dst, proto)
 last_flow_stats = defaultdict(lambda: {"bytes": 0, "pkts": 0})
 
 # Penyimpanan global untuk agregasi DELTA (perubahan)
-# Ini akan DIKOSONGKAN setiap 5 detik
+# Kunci: (dpid, app_name, category)
 traffic_aggregator = defaultdict(lambda: {
     "bytes_tx": 0,
     "bytes_rx": 0, 
@@ -86,7 +85,7 @@ def load_cache():
     if not os.path.exists(CACHE_FILE): return False
     try:
         with open(CACHE_FILE, "r") as f: data = json.load(f)
-        if time.time() - data.get("_timestamp", 0) > CACHE_EXPIRE: return False
+        if time.time() - data.get("_timestamp", 0) > CAIX_EXPIRE: return False
         ip_app_map.update(data.get("ip_app_map", {}))
         port_app_map.update({int(k): v for k, v in data.get("port_app_map", {}).items()})
         return True
@@ -124,12 +123,11 @@ def get_synthetic_metrics(app):
     loss_range = app_loss_ranges.get(app, app_loss_ranges["unknown"])
     return random.uniform(*lat_range), random.uniform(*loss_range)
 
-# ---------------------- FUNGSI UTAMA KOLEKSI (SAMA) ----------------------
-# Fungsi ini ngitung DELTA dari poll terakhir
+# ---------------------- FUNGSI UTAMA KOLEKSI (FIXED) ----------------------
 def collect_current_traffic():
     """
-    Mengumpulkan lalu lintas, menghitung DELTA (perubahan) dari poll terakhir,
-    dan menambahkannya ke agregator.
+    Mengumpulkan lalu lintas, menghitung DELTA (perubahan) per FLOW,
+    dan meng-agregasi DELTA tersebut per APLIKASI.
     """
     global ip_mac_map, traffic_aggregator, last_flow_stats
     ip_mac_map.update(get_controller_mappings())
@@ -156,29 +154,33 @@ def collect_current_traffic():
             
             tp_src = int(match.get("tcp_src") or match.get("udp_src") or 0)
             tp_dst = int(match.get("tcp_dst") or match.get("udp_dst") or 0)
+            proto = {6:"tcp", 17:"udp"}.get(match.get("ip_proto", 0), "any")
 
             app_name = match_app(src_ip, dst_ip, tp_src, tp_dst)
             category = app_category_map.get(app_name, "data")
-            proto = {6:"tcp", 17:"udp"}.get(match.get("ip_proto", 0), "any")
             
-            # --- LOGIKA PENGHITUNGAN DELTA ---
+            # --- LOGIKA PENGHITUNGAN DELTA (FIXED) ---
             current_total_bytes = flow.get("byte_count", 0)
             current_total_pkts = flow.get("packet_count", 0)
             
-            # Kunci agregasi utama (buat 'memori' dan 'agregator')
-            agg_key = (dpid, app_name, category)
+            # [FIX] Kunci "memori" HARUS spesifik per flow
+            flow_key = (dpid, src_ip, dst_ip, tp_src, tp_dst, proto)
             
-            last_total_bytes = last_flow_stats[agg_key]["bytes"]
-            last_total_pkts = last_flow_stats[agg_key]["pkts"]
+            last_total_bytes = last_flow_stats[flow_key]["bytes"]
+            last_total_pkts = last_flow_stats[flow_key]["pkts"]
             
             delta_bytes = current_total_bytes - last_total_bytes
             delta_pkts = current_total_pkts - last_total_pkts
             
-            if delta_bytes < 0: delta_bytes = current_total_bytes
-            if delta_pkts < 0: delta_pkts = current_total_pkts
+            # Cek jika flow di-reset (counter < 0) atau flow baru
+            if delta_bytes < 0: 
+                delta_bytes = current_total_bytes
+            if delta_pkts < 0: 
+                delta_pkts = current_total_pkts
                 
-            last_flow_stats[agg_key]["bytes"] = current_total_bytes
-            last_flow_stats[agg_key]["pkts"] = current_total_pkts
+            # [FIX] Simpan total kumulatif ke "memori" spesifik flow
+            last_flow_stats[flow_key]["bytes"] = current_total_bytes
+            last_flow_stats[flow_key]["pkts"] = current_total_pkts
             
             # --- SELESAI LOGIKA DELTA ---
 
@@ -186,7 +188,10 @@ def collect_current_traffic():
             latency, loss = get_synthetic_metrics(app_name)
             pkts_rx = max(0, int(delta_pkts * (1 - loss/100)))
             
-            # Agregasi data (HANYA MENAMBAHKAN DELTA)
+            # [FIX] Agregasi DELTA berdasarkan APLIKASI
+            # Kunci agregator (tetap per app)
+            agg_key = (dpid, app_name, category)
+            
             traffic_aggregator[agg_key]["bytes_tx"] += delta_bytes
             traffic_aggregator[agg_key]["bytes_rx"] += delta_bytes 
             traffic_aggregator[agg_key]["pkts_tx"] += delta_pkts
@@ -197,7 +202,7 @@ def collect_current_traffic():
             traffic_aggregator[agg_key]["src_ip"] = src_ip
             traffic_aggregator[agg_key]["dst_ip"] = dst_ip
             traffic_aggregator[agg_key]["src_mac"] = match.get("eth_src") or ip_mac_map.get(src_ip, "")
-            traffic_aggregator[agg_key]["dst_mac"] = match.get("eth_dst") or ip_mac_map.get(dst_ip, "")
+            traffic_aggregator[agg_key]["dst_mac"] = match.get("dst_eth") or ip_mac_map.get(dst_ip, "")
             traffic_aggregator[agg_key]["proto"] = proto
             
             current_bytes += delta_bytes
@@ -223,7 +228,6 @@ def get_aggregated_traffic():
         avg_loss = data["loss_sum"] / data["count"] if data["count"] > 0 else 0
         host = data["src_ip"] if data["src_ip"].startswith('10.0.0.') else data["dst_ip"]
         
-        # [MODIFIKASI] Data yang di-print adalah data DELTA (per 5 detik)
         print(f"[SNAPSHOT] app={app}, bytes={data['bytes_tx']}, pkts={data['pkts_tx']}, lat={avg_latency:.2f}ms, loss={avg_loss:.2f}%")
         
         rows.append((
@@ -234,7 +238,6 @@ def get_aggregated_traffic():
             avg_latency, category
         ))
     
-    # [WAJIB] Reset agregator DELTA untuk jendela 5 detik berikutnya
     traffic_aggregator.clear()
     
     return rows
@@ -260,7 +263,7 @@ def insert_pg(rows):
         print(f"DB error: {e}", file=sys.stderr)
         return 0
         
-# ---------------------- MAIN LOOP (DIUBAH) ----------------------
+# ---------------------- MAIN LOOP (SAMA) ----------------------
 
 if __name__ == "__main__":
     if not load_cache():
@@ -268,29 +271,20 @@ if __name__ == "__main__":
     last_refresh = time.time()
     
     while True:
-        # Perbarui pemetaan IP/Port setiap 10 menit
         if time.time() - last_refresh > 600:
             refresh_ip_mapping()
             last_refresh = time.time()
         
-        # [MODIFIKASI] Hapus loop agregasi 5 detik
-        
-        # 1. Panggil koleksi SATU KALI. 
-        #    Fungsi ini akan mengisi 'traffic_aggregator' dengan DELTA
         has_traffic_delta = collect_current_traffic()
         
-        # 2. Cek jika ada DELTA (perubahan)
         if has_traffic_delta:
-            # Ambil data dari agregator (dan kosongkan)
             aggregated_rows = get_aggregated_traffic()
             if aggregated_rows:
                 inserted = insert_pg(aggregated_rows)
-                print(f"{inserted} baris DELTA (non-agregasi) masuk DB.", file=sys.stderr)
+                print(f"{inserted} baris DELTA (FIXED) masuk DB.", file=sys.stderr)
             else:
                 print("Tidak ada data baru (agregator kosong).", file=sys.stderr)
         else:
-            # Ini akan terjadi jika tidak ada flow baru / tidak ada traffic sama sekali
             print("Tidak ada delta baru (flow tidak berubah).", file=sys.stderr)
             
-        # 3. Tunggu 5 detik sebelum polling berikutnya
         time.sleep(5)
