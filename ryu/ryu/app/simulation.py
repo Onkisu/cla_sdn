@@ -8,7 +8,7 @@ from mininet.cli import CLI
 import threading
 import random
 import time
-from config import HOST_INFO
+from shared_config import HOST_INFO
 
 # ---------------------- TOPOLOGY DEFINISI ----------------------
 class DataCenterTopo(Topo):
