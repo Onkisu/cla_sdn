@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
 # ---------------------- KONFIGURASI DB & KOLEKSI ----------------------
-DB_CONN = "dbname=development user=dev_one password=hijack332 host=127.0.0.1"
+DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 COLLECT_INTERVAL = 5  # Detik
 
 # Daftar host yang akan dimonitor
