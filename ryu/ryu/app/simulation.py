@@ -199,6 +199,7 @@ if __name__ == "__main__":
     
     net = Mininet(topo=topo,
                   switch=OVSSwitch,
+                  protocols='OpenFlow13',
                   controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
                   link=TCLink)
 
