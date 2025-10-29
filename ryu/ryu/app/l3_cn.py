@@ -120,14 +120,10 @@ class L3SpineLeafController(app_manager.RyuApp):
                 self.logger.info(f"Belajar: DPID={dpid} | IP={src_ip} | Port={in_port}")
             
             # RESPON: Cek apakah kita tahu di mana tujuan ARP (dst_ip)
-            # Ini adalah logika L3 routing sederhana
             out_port = None
             for dp_id, ip_map in self.ip_to_port.items():
                 if dst_ip in ip_map:
                     # Kita tahu IP itu ada di switch 'dp_id'
-                    # Untuk topologi Spine-Leaf, kita harus merutekannya
-                    # Tapi untuk controller L2/L3 hybrid sederhana, kita flood saja
-                    # *Kontroler L3 sejati akan menghitung jalur*
                     # Untuk sekarang, kita flood ARP agar pingAll berhasil
                     out_port = ofproto.OFPP_FLOOD
                     break
@@ -140,7 +136,7 @@ class L3SpineLeafController(app_manager.RyuApp):
             return
 
         # ----------------------------------------------------
-        # Bagian 2: Logika IP (Routing)
+        # Bagian 2: Logika IP (Routing) - [PERBAIKAN DI SINI]
         # ----------------------------------------------------
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         if ip_pkt:
@@ -153,27 +149,29 @@ class L3SpineLeafController(app_manager.RyuApp):
             # ROUTING: Cari port untuk IP tujuan
             out_port = None
             
-            # 1. Apakah IP tujuan ada di switch ini?
+            # 1. Apakah IP tujuan ada di switch ini? (Intra-Leaf)
             if dst_ip in self.ip_to_port[dpid]:
                 out_port = self.ip_to_port[dpid][dst_ip]
                 self.logger.debug(f"IP {dst_ip} ditemukan di switch {dpid} port {out_port}")
-            
-            # 2. (TODO) Jika tidak, ini adalah TUGAS TESIS Anda:
-            #    - Cari di switch mana (Leaf) IP itu berada
-            #    - Hitung jalur (Path) via Spine
-            #    - Pasang flow di sL1, sS1, sL2
-            
-            # 3. Untuk sekarang (agar pingAll berhasil), kita flood
-            if out_port is None:
+
+                # --- [FIX LOGIKA] ---
+                # HANYA PASANG FLOW JIKA KITA TAHU PASTI PORT-NYA
+                actions = [parser.OFPActionOutput(out_port)]
+                match = parser.OFPMatch(eth_type=ETH_TYPE_IP, ipv4_dst=dst_ip)
+                self.add_flow(datapath, 10, match, actions, f"Route {src_ip}->{dst_ip}")
+
+            else:
+                # 2. (TODO) Ini adalah TUGAS TESIS Anda:
+                #    - Cari di switch mana (Leaf) IP itu berada
+                #    - Hitung jalur (Path) via Spine
+                
+                # 3. UNTUK SEKARANG (Inter-Leaf):
+                #    JANGAN PASANG FLOW RULE. HANYA KIRIM PAKET INI.
+                self.logger.debug(f"IP {dst_ip} TIDAK dikenal di {dpid}. Flooding paket.")
                 out_port = ofproto.OFPP_FLOOD
-
-            actions = [parser.OFPActionOutput(out_port)]
-
-            # Pasang flow rule agar paket berikutnya tidak ke controller
-            match = parser.OFPMatch(eth_type=ETH_TYPE_IP, ipv4_dst=dst_ip)
-            self.add_flow(datapath, 10, match, actions, f"Route {src_ip}->{dst_ip}")
-
-            # Kirim paket pertama ini
+                # --- [AKHIR FIX] ---
+            
+            # Kirim paket pertama ini (baik yang di-route atau di-flood)
             self._send_packet_out(datapath, msg.buffer_id, in_port, out_port, msg.data)
             return
 

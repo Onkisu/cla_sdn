@@ -76,7 +76,6 @@ class SpineLeafTopo(Topo):
                 )
 
 # ---------------------- FUNGSI TRAFFIC (SAMA) ----------------------
-# (Fungsi _log_iperf, generate_client_traffic, generate_elephant_traffic SAMA PERSIS)
 def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
     if not output: return
     try:
