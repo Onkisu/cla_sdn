@@ -18,12 +18,12 @@ class MappingController(ControllerBase):
     @route('mappings', '/ip_mac_map', methods=['GET'])
     def get_ip_mac_map(self, req, **kwargs):
         body = json.dumps(self.controller_app.get_ip_mac_map())
-        return Response(content_type='application/json', body=body)
+        return Response(content_type='application/json', body=body.encode('utf-8'))
 
     @route('mappings', '/mac_ip_map', methods=['GET'])
     def get_mac_ip_map(self, req, **kwargs):
         body = json.dumps(self.controller_app.get_mac_ip_map())
-        return Response(content_type='application/json', body=body)
+        return Response(content_type='application/json', body=body.encode('utf-8'))
 
 class CollectorFriendlyController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
