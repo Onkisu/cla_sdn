@@ -4,7 +4,7 @@ import re
 import time
 import subprocess
 import math
-import random # Tetap import untuk (siapa tahu butuh fallback)
+import random 
 from collections import defaultdict
 from datetime import datetime
 import threading
@@ -12,7 +12,6 @@ import threading
 # Import konfigurasi bersama
 from shared_config import DB_CONN, COLLECT_INTERVAL, HOSTS_TO_MONITOR, HOST_INFO, APP_TO_CATEGORY
 
-# [WAJIB] Memori untuk total byte TERAKHIR per host (dari 'ip link')
 # [UPDATE] Kita lacak keempat statistik
 last_host_bytes_tx = defaultdict(int)
 last_host_pkts_tx = defaultdict(int)
@@ -24,7 +23,6 @@ stop_event = threading.Event()
 def get_host_interface_bytes(host_name):
     """
     [UPDATE] Mendapatkan total TX dan RX bytes/packets dari interface eth0 host
-    Menggunakan 'ip netns exec'
     """
     tx_bytes, tx_packets, rx_bytes, rx_packets = None, None, None, None
     try:
@@ -35,22 +33,26 @@ def get_host_interface_bytes(host_name):
         if cmd_output is None:
              return None, None, None, None
 
-        # [UPDATE] Regex untuk TX (baris Transmitted)
-        tx_match = re.search(r'TX:.*?bytes\s+packets\s+errors.*?(\d+)\s+(\d+)\s+(\d+)', cmd_output, re.DOTALL)
+        # [FIX] Regex yang lebih robust, mencari baris DATA setelah baris HEADER
+        # Mencari "TX:" diikuti newline, lalu spasi, lalu 3 grup angka
+        tx_match = re.search(r'TX:.*\n\s*(\d+)\s+(\d+)\s+(\d+)', cmd_output)
         if tx_match:
             tx_bytes = int(tx_match.group(1))
             tx_packets = int(tx_match.group(2))
+        else:
+            print(f"  [Collector DEBUG] Gagal parsing TX stats untuk {host_name}")
             
-        # [UPDATE] Regex untuk RX (baris Received)
-        rx_match = re.search(r'RX:.*?bytes\s+packets\s+errors.*?(\d+)\s+(\d+)\s+(\d+)', cmd_output, re.DOTALL)
+        # [FIX] Regex yang sama untuk RX
+        rx_match = re.search(r'RX:.*\n\s*(\d+)\s+(\d+)\s+(\d+)', cmd_output)
         if rx_match:
             rx_bytes = int(rx_match.group(1))
             rx_packets = int(rx_match.group(2))
+        else:
+            print(f"  [Collector DEBUG] Gagal parsing RX stats untuk {host_name}")
             
         return tx_bytes, tx_packets, rx_bytes, rx_packets
 
     except Exception as e:
-        # Kita tidak print error lagi biar tidak spam, cukup return None
         # print(f"  [Collector DEBUG] Gagal get bytes/pkts untuk {host_name}: {e}\n")
         return None, None, None, None
 
@@ -61,24 +63,17 @@ def get_host_latency(host_name, server_ip):
     if not server_ip:
         return None
     try:
-        # Jalankan ping dari namespace host:
-        # -c 3 = kirim 3 paket
-        # -i 0.2 = interval 0.2 detik
-        # -W 1 = timeout 1 detik
         cmd = ['sudo', 'ip', 'netns', 'exec', host_name, 'ping', '-c', '3', '-i', '0.2', '-W', '1', server_ip]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         
-        # Parse output untuk baris summary, cth: rtt min/avg/max/mdev = 32.1/32.2/32.3/0.1 ms
         match = re.search(r'rtt min/avg/max/mdev = [\d.]+/([\d.]+)/[\d.]+/[\d.]+', result.stdout)
         if match:
             avg_rtt_ms = float(match.group(1))
             return avg_rtt_ms
         else:
-            # Gagal ping (mungkin server down atau loss 100%)
             return None
             
     except Exception as e:
-        # print(f"  [Collector DEBUG] Gagal ping {server_ip} dari {host_name}: {e}\n")
         return None
 
 
@@ -161,8 +156,8 @@ def run_collector():
             (current_bytes_tx, current_pkts_tx, 
              current_bytes_rx, current_pkts_rx) = stats
 
-            if current_bytes_tx is None or current_bytes_rx is None:
-                # Gagal ambil data (mungkin Mininet belum siap), skip host ini
+            # [FIX] Cek jika salah satu None (parsing gagal)
+            if current_bytes_tx is None or current_pkts_tx is None or current_bytes_rx is None or current_pkts_rx is None:
                 continue 
 
             # --- 2. Ambil Info Konfigurasi ---
@@ -170,12 +165,12 @@ def run_collector():
             app_name = host_cfg.get('app', 'unknown')
             host_ip = host_cfg.get('ip', host_name) 
             host_mac = host_cfg.get('mac', 'mac_dummy')
-            server_ip = host_cfg.get('server_ip', 'server_ip_dummy') # <-- Ambil server IP nyata
+            server_ip = host_cfg.get('server_ip', 'server_ip_dummy')
+            server_mac = host_cfg.get('server_mac', 'mac_dummy') # <-- [BARU] Ambil MAC server
             category = APP_TO_CATEGORY.get(app_name, "data")
             
             # --- 3. Ambil Statistik Latensi (Aktif) ---
             latency = get_host_latency(host_name, server_ip)
-            # Jika ping gagal, masukkan 0 atau None (sesuai skema DB Anda)
             latency_to_db = latency if latency is not None else 0.0
 
             # --- 4. Hitung DELTA untuk semua 4 statistik ---
@@ -204,17 +199,19 @@ def run_collector():
             if delta_bytes_tx > 0 or delta_bytes_rx > 0:
                 has_delta = True
                 
+                # [UPDATE] Log print diperbarui untuk menampilkan paket
                 print(f"  [Collector] Host: {host_name}, App: {app_name}, "
-                      f"Delta_TX_B: {delta_bytes_tx}, Delta_RX_B: {delta_bytes_rx}, "
+                      f"TX_B: {delta_bytes_tx}, TX_P: {delta_pkts_tx}, "
+                      f"RX_B: {delta_bytes_rx}, RX_P: {delta_pkts_rx}, "
                       f"Latency: {latency_to_db:.2f} ms")
 
                 # [UPDATE] Masukkan data nyata ke DB
                 rows_to_insert.append((
                     ts, 1, host_ip, app_name, "udp", 
-                    host_ip, server_ip, host_mac, "mac_dummy", # Ganti "server_ip_dummy"
-                    delta_bytes_tx, delta_bytes_rx, # <-- Data TX/RX nyata
-                    delta_pkts_tx, delta_pkts_rx,   # <-- Data Pkts TX/RX nyata
-                    latency_to_db                   # <-- Data Latency nyata
+                    host_ip, server_ip, host_mac, server_mac, # <-- [FIX] Ganti "mac_dummy"
+                    delta_bytes_tx, delta_bytes_rx, 
+                    delta_pkts_tx, delta_pkts_rx,   
+                    latency_to_db                   
                     , category
                  ))
 

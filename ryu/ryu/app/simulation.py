@@ -24,7 +24,6 @@ def safe_cmd(node, cmd):
         try:
              return node.cmd(cmd, timeout=10)
         except Exception as e:
-             # info(f"  [safe_cmd Error] Node {node.name}, Cmd: '{cmd[:50]}...': {e}\n")
              return None 
 
 # ---------------------- ROUTER & TOPOLOGY ----------------------
@@ -45,32 +44,27 @@ class ComplexTopo(Topo):
         s2 = self.addSwitch('s2')
         s3 = self.addSwitch('s3') 
         
-        # --- [FIX DI SINI] ---
-        # Kita tambahkan 'intfName1='eth0'' untuk host h1, h2, h3
-        # Ini memaksa nama interface di dalam host menjadi 'eth0'
-        # ---------------------
+        # --- Host Klien ---
         h1 = self.addHost('h1', ip='10.0.0.1/24', mac='00:00:00:00:00:01', defaultRoute='via 10.0.0.254')
         h2 = self.addHost('h2', ip='10.0.0.2/24', mac='00:00:00:00:00:02', defaultRoute='via 10.0.0.254')
         h3 = self.addHost('h3', ip='10.0.0.3/24', mac='00:00:00:00:00:03', defaultRoute='via 10.0.0.254')
         
-        h4 = self.addHost('h4', ip='10.0.1.1/24', defaultRoute='via 10.0.1.254')
-        h5 = self.addHost('h5', ip='10.0.1.2/24', defaultRoute='via 10.0.1.254')
-        h6 = self.addHost('h6', ip='10.0.1.3/24', defaultRoute='via 10.0.1.254')
-        h7 = self.addHost('h7', ip='10.0.2.1/24', defaultRoute='via 10.0.2.254')
+        # --- Host Server [UPDATE] Ditambahkan MAC ---
+        h4 = self.addHost('h4', ip='10.0.1.1/24', mac='00:00:00:00:00:04', defaultRoute='via 10.0.1.254')
+        h5 = self.addHost('h5', ip='10.0.1.2/24', mac='00:00:00:00:00:05', defaultRoute='via 10.0.1.254')
+        h6 = self.addHost('h6', ip='10.0.1.3/24', mac='00:00:00:00:00:06', defaultRoute='via 10.0.1.254') # MAC h6
+        h7 = self.addHost('h7', ip='10.0.2.1/24', mac='00:00:00:00:00:07', defaultRoute='via 10.0.2.254')
 
-        # Links
-        # --- [FIX DI SINI] ---
-        # Tambahkan 'intfName1='eth0'' ke link host yang dimonitor
-        # ---------------------
+        # Links Klien (dengan intfName='eth0')
         self.addLink(h1, s1, bw=5, intfName1='eth0')
         self.addLink(h2, s1, bw=5, intfName1='eth0')
         self.addLink(h3, s1, bw=5, intfName1='eth0')
         
-        # Link untuk host/server lain tidak perlu diubah jika tidak dimonitor
-        self.addLink(h4, s2, bw=10, delay='32ms', loss=2)
-        self.addLink(h5, s2, bw=10, delay='47ms', loss=2)
-        self.addLink(h6, s2, bw=10)
-        self.addLink(h7, s3, bw=2, delay='50ms', loss=2)
+        # Links Server [UPDATE] Ditambahkan intfName='eth0' untuk konsistensi
+        self.addLink(h4, s2, bw=10, delay='32ms', loss=2, intfName1='eth0')
+        self.addLink(h5, s2, bw=10, delay='47ms', loss=2, intfName1='eth0')
+        self.addLink(h6, s2, bw=10, intfName1='eth0')
+        self.addLink(h7, s3, bw=2, delay='50ms', loss=2, intfName1='eth0')
         
         # Link router
         self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip': '10.0.0.254/24'})
@@ -97,7 +91,6 @@ def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
              info(f"Could not find valid CSV in iperf output for {client_name}:\nOutput was:\n{output}\n")
     except Exception as e:
         info(f"Could not parse iperf output for {client_name}: {e}\nOutput was:\n{output}\n")
-
 
 def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, seed):
     rng = random.Random()
@@ -131,7 +124,10 @@ def start_traffic(net):
     # --- Membuat link namespace (SAMA, TETAP DIPERLUKAN) ---
     info("\n*** Membuat link network namespace (untuk collector.py)...\n")
     subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=True)
-    for host in [h1, h2, h3]:
+    # [UPDATE] Link namespace untuk SEMUA host, termasuk server
+    all_hosts = [net.get(f'h{i}') for i in range(1, 8)]
+    for host in all_hosts:
+        if not host: continue
         try:
             pid = host.pid
             cmd = ['sudo', 'ip', 'netns', 'attach', host.name, str(pid)]
@@ -214,7 +210,9 @@ if __name__ == "__main__":
                  host.cmd("killall -9 iperf") 
 
         info("*** Membersihkan link network namespace...\n")
-        for host_name in ['h1', 'h2', 'h3']:
+        # [UPDATE] Hapus link untuk SEMUA host
+        for i in range(1, 8):
+            host_name = f'h{i}'
             cmd = ['sudo', 'ip', 'netns', 'del', host_name]
             try:
                 subprocess.run(cmd, check=False, capture_output=True)
