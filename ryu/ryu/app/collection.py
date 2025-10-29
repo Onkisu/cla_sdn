@@ -10,7 +10,7 @@ from datetime import datetime
 import threading
 
 # Import konfigurasi shared
-from config import DB_CONN, COLLECT_INTERVAL, HOSTS_TO_MONITOR, HOST_INFO, ROLE_TO_CATEGORY
+from shared_config import DB_CONN, COLLECT_INTERVAL, HOSTS_TO_MONITOR, HOST_INFO, ROLE_TO_CATEGORY
 
 # ---------------------- STATE & EVENT ----------------------
 last_host_bytes_tx = defaultdict(int)
