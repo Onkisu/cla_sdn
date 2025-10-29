@@ -14,19 +14,16 @@ from collections import defaultdict
 
 # ---------------------- KONFIGURASI ----------------------
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
-# [FIX] Ganti URL API ke PORT STATS
 RYU_REST = "http://127.0.0.1:8080"
-# [FIX] DPID yang kita peduliin cuma 's1' (dpid 1)
-DPID_S1 = 1
+DPID_S1 = 1 # DPID 's1'
 
-print("Memulai collector_PORT_STATS.py (Delta per PORT, 1 poll / 5 detik)...")
-
+print("Memulai collector_FINAL.py (Delta per PORT RX, 1 poll / 5 detik)...")
 
 # [WAJIB] Penyimpanan global untuk TOTAL KUMULATIF PORT terakhir
 # Kunci: (dpid, port_no)
 last_port_stats = defaultdict(lambda: {"tx_bytes": 0, "rx_bytes": 0})
 
-# [FIX] Mapping APLIKASI ke PORT (dari topo.py)
+# Mapping APLIKASI ke PORT (dari topo.py)
 # h1 -> s1-eth1 (Port 1)
 # h2 -> s1-eth2 (Port 2)
 # h3 -> s1-eth3 (Port 3)
@@ -61,10 +58,6 @@ app_loss_ranges = {
 }
 
 # ---------------------- FUNGSI PEMBANTU (SAMA) ----------------------
-# (get_controller_mappings, load_cache, save_cache, refresh_ip_mapping, 
-#  match_app, get_synthetic_metrics... SEMUA SAMA, 
-#  walaupun sebagian besar nggak akan kepake)
-
 def get_synthetic_metrics(app):
     lat_range = app_latency_ranges.get(app, app_latency_ranges["unknown"])
     loss_range = app_loss_ranges.get(app, app_loss_ranges["unknown"])
@@ -78,7 +71,6 @@ def collect_current_traffic():
     """
     global last_port_stats
     
-    # [FIX] Kita cuma butuh 1 agregator, data yang mau dimasukin ke DB
     rows_to_insert = []
     has_delta = False
     
@@ -105,41 +97,37 @@ def collect_current_traffic():
                 app_name = app
                 break
         
-        # Kalo port-nya bukan port 1, 2, atau 3 (misal: port ke router), skip
         if not app_name:
             continue
             
-        # --- LOGIKA PENGHITUNGAN DELTA PORT ---
-        current_total_bytes = port_data.get("tx_bytes", 0)
+        # --- [FIX SAPU JAGAT] ---
+        # Kita ambil 'rx_bytes' (Received by Switch)
+        # Ini adalah data UPLOAD dari host (h1, h2, h3)
+        current_total_bytes = port_data.get("rx_bytes", 0)
         
-        # [FIX] Kunci "memori" HARUS spesifik per port
         port_key = (DPID_S1, port_no)
         
-        last_total_bytes = last_port_stats[port_key]["tx_bytes"]
+        # Ambil 'rx_bytes' dari memori
+        last_total_bytes = last_port_stats[port_key]["rx_bytes"]
         
         delta_bytes = current_total_bytes - last_total_bytes
         
-        # Cek jika flow di-reset (counter < 0) atau flow baru
         if delta_bytes < 0: 
             delta_bytes = current_total_bytes
             
-        # [FIX] Simpan total kumulatif ke "memori" spesifik port
-        last_port_stats[port_key]["tx_bytes"] = current_total_bytes
+        # Simpan 'rx_bytes' ke memori
+        last_port_stats[port_key]["rx_bytes"] = current_total_bytes
         
-        # --- SELESAI LOGIKA DELTA ---
+        # --- SELESAI FIX ---
         
         if delta_bytes > 0:
             has_delta = True
 
-        # Siapin data buat dimasukin ke DB
-        # (Kita isi data 'dummy' buat field yang nggak relevan)
         category = app_category_map.get(app_name, "data")
         latency, loss = get_synthetic_metrics(app_name)
-        
-        # Host (dummy)
         host = f"10.0.0.{port_no}" # h1, h2, h3
         
-        print(f"[PORT SNAPSHOT] app={app_name} (Port {port_no}), delta_bytes={delta_bytes}")
+        print(f"[PORT SNAPSHOT] app={app_name} (Port {port_no}), delta_RX_bytes={delta_bytes}")
         
         rows_to_insert.append((
             ts, DPID_S1, host, app_name, "udp", 
@@ -176,7 +164,6 @@ def insert_pg(rows):
 # ---------------------- MAIN LOOP (FIXED) ----------------------
 
 if __name__ == "__main__":
-    # Kita nggak butuh 'load_cache' atau 'refresh_ip_mapping' lagi
     
     while True:
         
