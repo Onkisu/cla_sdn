@@ -1,83 +1,226 @@
 #!/usr/bin/python3
 from mininet.net import Mininet
-from mininet.node import RemoteController, OVSSwitch
+from mininet.node import RemoteController, OVSSwitch, Node
 from mininet.link import TCLink
 from mininet.topo import Topo
 from mininet.log import setLogLevel, info
-from mininet.cli import CLI
 import threading
 import random
 import time
-from shared_config import HOST_INFO
+import subprocess
+import math
 
-# ---------------------- TOPOLOGY DEFINISI ----------------------
-class DataCenterTopo(Topo):
-    def build(self, spine_count=2, leaf_count=3):
-        spines = []
-        leaves = []
+# ---------------------- GLOBAL LOCK & STOP EVENT ----------------------
+cmd_lock = threading.Lock()
+stop_event = threading.Event()
 
-        # --- Tambah Spine Switches ---
-        for i in range(1, spine_count + 1):
-            sp = self.addSwitch(f"sp{i}")
-            spines.append(sp)
+def safe_cmd(node, cmd):
+    """Execute node.cmd() safely with lock."""
+    if stop_event.is_set():
+        return None
+    with cmd_lock:
+        if stop_event.is_set():
+             return None
+        try:
+             return node.cmd(cmd, timeout=10)
+        except Exception as e:
+             return None 
 
-        # --- Tambah Leaf Switches ---
-        for j in range(1, leaf_count + 1):
-            lf = self.addSwitch(f"lf{j}")
-            leaves.append(lf)
+# ---------------------- ROUTER & TOPOLOGY ----------------------
+class LinuxRouter(Node):
+    def config(self, **params):
+        super(LinuxRouter, self).config(**params)
+        safe_cmd(self, "sysctl -w net.ipv4.ip_forward=1")
+    def terminate(self):
+        if not stop_event.is_set():
+            safe_cmd(self, "sysctl -w net.ipv4.ip_forward=0")
+        super(LinuxRouter, self).terminate()
 
-            # Connect setiap Leaf ke semua Spine
-            for sp in spines:
-                self.addLink(lf, sp, bw=10)
+class ComplexTopo(Topo):
+    def build(self):
+        info("*** Membangun Topologi Sesuai v8.0...\n")
+        r1 = self.addNode('r1', cls=LinuxRouter, ip='10.0.0.254/24')
+        s1 = self.addSwitch('s1')
+        s2 = self.addSwitch('s2')
+        s3 = self.addSwitch('s3') 
+        
+        # --- Host Klien ---
+        h1 = self.addHost('h1', ip='10.0.0.1/24', mac='00:00:00:00:00:01', defaultRoute='via 10.0.0.254')
+        h2 = self.addHost('h2', ip='10.0.0.2/24', mac='00:00:00:00:00:02', defaultRoute='via 10.0.0.254')
+        h3 = self.addHost('h3', ip='10.0.0.3/24', mac='00:00:00:00:00:03', defaultRoute='via 10.0.0.254')
+        
+        # --- Host Server [UPDATE] Ditambahkan MAC ---
+        h4 = self.addHost('h4', ip='10.0.1.1/24', mac='00:00:00:00:00:04', defaultRoute='via 10.0.1.254')
+        h5 = self.addHost('h5', ip='10.0.1.2/24', mac='00:00:00:00:00:05', defaultRoute='via 10.0.1.254')
+        h6 = self.addHost('h6', ip='10.0.1.3/24', mac='00:00:00:00:00:06', defaultRoute='via 10.0.1.254') # MAC h6
+        h7 = self.addHost('h7', ip='10.0.2.1/24', mac='00:00:00:00:00:07', defaultRoute='via 10.0.2.254')
 
-        # --- Tambah Hosts untuk tiap tier ---
-        web1 = self.addHost("web1", ip="10.0.1.10/24", defaultRoute="via 10.0.1.254")
-        app1 = self.addHost("app1", ip="10.0.2.10/24", defaultRoute="via 10.0.2.254")
-        db1 = self.addHost("db1", ip="10.0.3.10/24", defaultRoute="via 10.0.3.254")
+        # Links Klien (dengan intfName='eth0')
+        self.addLink(h1, s1, bw=5, intfName1='eth0')
+        self.addLink(h2, s1, bw=5, intfName1='eth0')
+        self.addLink(h3, s1, bw=5, intfName1='eth0')
+        
+        # Links Server [UPDATE] Ditambahkan intfName='eth0' untuk konsistensi
+        self.addLink(h4, s2, bw=10, delay='32ms', loss=2, intfName1='eth0')
+        self.addLink(h5, s2, bw=10, delay='47ms', loss=2, intfName1='eth0')
+        self.addLink(h6, s2, bw=10, intfName1='eth0')
+        self.addLink(h7, s3, bw=2, delay='50ms', loss=2, intfName1='eth0')
+        
+        # Link router
+        self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip': '10.0.0.254/24'})
+        self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
+        self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
 
-        # Assign host ke leaf berbeda
-        self.addLink(web1, leaves[0], bw=5)
-        self.addLink(app1, leaves[1], bw=5)
-        self.addLink(db1, leaves[2], bw=5)
 
-# ---------------------- TRAFFIC GENERATOR ----------------------
-def simulate_traffic(net):
-    """Generate periodic traffic antar host untuk simulasi inter-tier flow"""
-    hosts = {
-        "web1": net.get("web1"),
-        "app1": net.get("app1"),
-        "db1": net.get("db1")
-    }
+# ---------------------- RANDOM TRAFFIC (SAMA) ----------------------
+def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
+    if not output: 
+        return
+    try:
+        lines = output.strip().split('\n')
+        csv_line = None
+        for line in reversed(lines): 
+             if ',' in line and len(line.split(',')) > 7: 
+                  csv_line = line
+                  break 
+        if csv_line:
+            parts = csv_line.split(',')
+            actual_bytes = int(parts[7])
+            info(f"CLIENT LOG: {client_name} -> {server_ip} SENT {actual_bytes:,} bytes in {burst_time_str}s (Target BW: {bw_str}ps)\n")
+        else:
+             info(f"Could not find valid CSV in iperf output for {client_name}:\nOutput was:\n{output}\n")
+    except Exception as e:
+        info(f"Could not parse iperf output for {client_name}: {e}\nOutput was:\n{output}\n")
 
-    def traffic_loop(src, dst, interval=5):
-        while True:
-            try:
-                size = random.randint(50, 200)
-                info(f"\n[*] {src.name} → {dst.name} sending {size}KB\n")
-                src.cmd(f"iperf -c {dst.IP()} -u -b {size}K -t 3 > /dev/null 2>&1 &")
-            except Exception as e:
-                info(f"[!] Traffic error: {e}\n")
-            time.sleep(interval)
+def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, seed):
+    rng = random.Random()
+    rng.seed(seed)
+    info(f"Starting random traffic for {client.name} (Seed: {seed}) -> {server_ip} (Base Range: [{base_min_bw}M - {base_max_bw}M])\n")
+    while not stop_event.is_set():
+        try:
+            current_max_bw = rng.uniform(base_max_bw * 0.4, base_max_bw * 1.1)
+            current_min_bw = rng.uniform(base_min_bw * 0.4, current_max_bw * 0.8)
+            current_min_bw = max(0.1, current_min_bw)
+            current_max_bw = max(current_min_bw + 0.2, current_max_bw)
+            target_bw = rng.uniform(current_min_bw, current_max_bw)
+            bw_str = f"{target_bw:.2f}M"
+            burst_time = rng.uniform(0.5, 2.5)
+            burst_time_str = f"{burst_time:.1f}"
+            cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str} -y C"
+            output = safe_cmd(client, cmd)
+            _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
+            if stop_event.is_set(): break
+            pause_duration = rng.uniform(0.5, 2.0)
+            stop_event.wait(pause_duration)
+        except Exception as e:
+            if stop_event.is_set(): break
+            stop_event.wait(1) 
 
-    # web1 → app1 → db1 (simulasi request chain)
-    threading.Thread(target=traffic_loop, args=(hosts["web1"], hosts["app1"], 5), daemon=True).start()
-    threading.Thread(target=traffic_loop, args=(hosts["app1"], hosts["db1"], 7), daemon=True).start()
+# ---------------------- START TRAFFIC (SAMA) ----------------------
+def start_traffic(net):
+    h1, h2, h3 = net.get('h1', 'h2', 'h3')
+    h4, h5, h7 = net.get('h4', 'h5', 'h7') 
 
-# ---------------------- MAIN ----------------------
+    # --- Membuat link namespace (SAMA, TETAP DIPERLUKAN) ---
+    info("\n*** Membuat link network namespace (untuk collector.py)...\n")
+    subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=True)
+    # [UPDATE] Link namespace untuk SEMUA host, termasuk server
+    all_hosts = [net.get(f'h{i}') for i in range(1, 8)]
+    for host in all_hosts:
+        if not host: continue
+        try:
+            pid = host.pid
+            cmd = ['sudo', 'ip', 'netns', 'attach', host.name, str(pid)]
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            info(f"  > Link namespace untuk {host.name} (PID: {pid}) dibuat.\n")
+        except Exception as e:
+            info(f"  > GAGAL membuat link namespace for {host.name}: {e}\n")
+            if hasattr(e, 'stderr'):
+                info(f"  > Stderr: {e.stderr}\n")
+    # --- Selesai ---
+
+    info("\n*** Starting iperf servers (Simulating services, v8.0)\n")
+    safe_cmd(h4, "iperf -s -u -p 443 -i 1 &")
+    safe_cmd(h5, "iperf -s -u -p 443 -i 1 &")
+    safe_cmd(h7, "iperf -s -u -p 1935 -i 1 &")
+    time.sleep(1)
+
+    info("\n*** Warming up network with pingAll...\n")
+    try:
+         info("Waiting for switch <-> controller connection...")
+         net.waitConnected()
+         info("Connection established. Starting pingAll...")
+         net.pingAll(timeout='1') 
+         info("*** Warm-up complete.\n")
+    except Exception as e:
+         info(f"*** Warning: pingAll or waitConnected failed: {e}\n")
+
+    info("-----------------------------------------------------------\n")
+    info("💡 TELEMETRI LIVE (dari server iperf) akan muncul di bawah ini:\n")
+    info("-----------------------------------------------------------\n")
+
+    info("\n*** Starting client traffic threads (Simulating users, v8.0)\n")
+    base_range_min = 0.5
+    base_range_max = 5.0
+    threads = [
+        threading.Thread(target=generate_client_traffic, args=(h1, '10.0.1.1', 443, base_range_min, base_range_max, 12345), daemon=False),
+        threading.Thread(target=generate_client_traffic, args=(h2, '10.0.1.2', 443, base_range_min, base_range_max, 67890), daemon=False),
+        threading.Thread(target=generate_client_traffic, args=(h3, '10.0.2.1', 1935, base_range_min, base_range_max, 98765), daemon=False)
+    ]
+    for t in threads:
+        t.start()
+    return threads
+
+# ---------------------- MAIN (SAMA) ----------------------
 if __name__ == "__main__":
     setLogLevel("info")
-
-    topo = DataCenterTopo()
-    net = Mininet(topo=topo,
+    net = Mininet(topo=ComplexTopo(),
                   switch=OVSSwitch,
                   controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
                   link=TCLink)
 
+    info("*** Memulai Jaringan Mininet...\n")
     net.start()
-    info("\n===== Data Center Topology Started =====\n")
 
-    # Start traffic generator
-    simulate_traffic(net)
+    traffic_threads = start_traffic(net)
 
-    CLI(net)
-    net.stop()
+    info("\n*** Skrip Simulasi & Traffic berjalan.")
+    info("*** 'collector.py' harus dijalankan di terminal terpisah.")
+    info("*** Tekan Ctrl+C untuk berhenti kapan saja.\n")
+    
+    try:
+        for t in traffic_threads:
+            if t.is_alive():
+                 t.join() 
+    except KeyboardInterrupt:
+        info("\n\n*** Ctrl+C diterima. Menghentikan semua proses...\n")
+    finally: 
+        info("*** Mengirim sinyal stop ke semua thread traffic...\n")
+        stop_event.set()
+
+        info("*** Menunggu Traffic threads berhenti...\n")
+        for t in traffic_threads:
+            if t.is_alive(): 
+                t.join(timeout=5) 
+            
+        info("*** Membersihkan proses iperf yang mungkin tersisa...\n")
+        for i in range(1, 8):
+            host = net.get(f'h{i}')
+            if host:
+                 host.cmd("killall -9 iperf") 
+
+        info("*** Membersihkan link network namespace...\n")
+        # [UPDATE] Hapus link untuk SEMUA host
+        for i in range(1, 8):
+            host_name = f'h{i}'
+            cmd = ['sudo', 'ip', 'netns', 'del', host_name]
+            try:
+                subprocess.run(cmd, check=False, capture_output=True)
+            except Exception:
+                pass 
+        info("*** Menghentikan jaringan Mininet...\n")
+        try:
+            net.stop()
+            info("*** Mininet berhenti.\n")
+        except Exception as e:
+             info(f"*** ERROR saat net.stop(): {e}. Coba cleanup manual 'sudo mn -c'.\n")

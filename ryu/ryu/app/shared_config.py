@@ -2,39 +2,40 @@
 
 # ---------------------- KONFIGURASI DB & KOLEKSI ----------------------
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
-COLLECT_INTERVAL = 5  # Detik
+COLLECT_INTERVAL = 5 # Detik
 
-# Daftar host yang akan dimonitor
-HOSTS_TO_MONITOR = ['web1', 'app1', 'db1']
+# Daftar host yang akan dimonitor oleh collector.py
+HOSTS_TO_MONITOR = ['h1', 'h2', 'h3']
 
-# Mapping per host di data center
+# [OPSIONAL] Mapping Aplikasi ke Host (buat di DB)
+# [UPDATE] Ditambahkan 'server_ip' dan 'server_mac'
 HOST_INFO = {
-    'web1': {
-        'ip': '10.0.1.10',
-        'role': 'frontend',
-        'mac': '00:00:00:00:01:10',
-        'server_ip': '10.0.2.10',
-        'server_mac': '00:00:00:00:02:10'
+    'h1': {
+        'ip': '10.0.0.1', 
+        'app': 'youtube', 
+        'mac': '00:00:00:00:00:01', 
+        'server_ip': '10.0.1.1', # <-- Server h4
+        'server_mac': '00:00:00:00:00:04' # <-- MAC untuk h4
     },
-    'app1': {
-        'ip': '10.0.2.10',
-        'role': 'application',
-        'mac': '00:00:00:00:02:10',
-        'server_ip': '10.0.3.10',
-        'server_mac': '00:00:00:00:03:10'
+    'h2': {
+        'ip': '10.0.0.2', 
+        'app': 'netflix', 
+        'mac': '00:00:00:00:00:02', 
+        'server_ip': '10.0.1.2', # <-- Server h5
+        'server_mac': '00:00:00:00:00:05' # <-- MAC untuk h5
     },
-    'db1': {
-        'ip': '10.0.3.10',
-        'role': 'database',
-        'mac': '00:00:00:00:03:10',
-        'server_ip': None,
-        'server_mac': None
+    'h3': {
+        'ip': '10.0.0.3', 
+        'app': 'twitch',  
+        'mac': '00:00:00:00:00:03', 
+        'server_ip': '10.0.2.1', # <-- Server h7
+        'server_mac': '00:00:00:00:00:07' # <-- MAC untuk h7
     }
 }
 
-# Kategori layanan di level Data Center
-ROLE_TO_CATEGORY = {
-    'frontend': 'service-access',
-    'application': 'processing',
-    'database': 'storage'
+# Mapping kategori (diambil dari v8.0)
+APP_TO_CATEGORY = { 
+    'youtube': 'video',
+    'netflix': 'video',
+    'twitch': 'gaming' 
 }
