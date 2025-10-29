@@ -13,6 +13,7 @@ import math
 import re # <-- Modul baru buat parsing output 'ip'
 import psycopg2 # <-- Modul baru buat konek DB
 from collections import defaultdict # <-- FIX: Tambahkan import ini
+from datetime import datetime
 
 # ---------------------- KONFIGURASI DB & KOLEKSI ----------------------
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
