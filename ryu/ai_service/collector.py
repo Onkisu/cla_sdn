@@ -17,7 +17,7 @@ DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 RYU_REST = "http://127.0.0.1:8080"
 DPID_S1 = 1 # DPID 's1'
 
-print("Memulai collector_HYBRID.py (Delta Port + Detail Flow, 1 poll / 5 detik)...")
+print("Memulai collector_HYBRID_v2.py (Delta Port + Detail Flow PERTAMA, 1 poll / 5 detik)...")
 
 # [WAJIB] Penyimpanan global untuk TOTAL KUMULATIF PORT terakhir
 # Kunci: (dpid, port_no)
@@ -72,11 +72,11 @@ def get_synthetic_metrics(app):
     loss_range = app_loss_ranges.get(app, app_loss_ranges["unknown"])
     return random.uniform(*lat_range), random.uniform(*loss_range)
 
-# ---------------------- FUNGSI UTAMA KOLEKSI (HYBRID) ----------------------
+# ---------------------- FUNGSI UTAMA KOLEKSI (HYBRID v2) ----------------------
 def collect_current_traffic():
     """
     Mengumpulkan PORT stats (untuk delta bytes) dan FLOW stats (untuk detail).
-    Menggabungkan keduanya untuk data yang lengkap.
+    Menggabungkan keduanya untuk data yang lengkap. Versi ini ambil flow PERTAMA.
     """
     global last_port_stats, last_flow_stats
     
@@ -84,7 +84,7 @@ def collect_current_traffic():
     has_delta = False
     port_deltas = {} # Simpan delta bytes per port di sini
 
-    # === Tahap 1: Hitung Delta Bytes dari Port Stats ===
+    # === Tahap 1: Hitung Delta Bytes dari Port Stats (SAMA) ===
     try:
         res_port = requests.get(f"{RYU_REST}/stats/port/{DPID_S1}", timeout=5).json()
     except Exception as e:
@@ -96,84 +96,80 @@ def collect_current_traffic():
 
     for port_data in res_port[str(DPID_S1)]:
         port_no = port_data.get("port_no")
-        if port_no not in PORT_TO_APP_MAP: # Hanya proses port 1, 2, 3
-            continue
+        if port_no not in PORT_TO_APP_MAP: continue
             
         current_total_bytes = port_data.get("rx_bytes", 0)
         port_key = (DPID_S1, port_no)
         last_total_bytes = last_port_stats[port_key]["rx_bytes"]
         delta_bytes = current_total_bytes - last_total_bytes
         
-        if delta_bytes < 0: 
-            delta_bytes = current_total_bytes
+        if delta_bytes < 0: delta_bytes = current_total_bytes
             
         last_port_stats[port_key]["rx_bytes"] = current_total_bytes
         
         if delta_bytes > 0:
             has_delta = True
-            port_deltas[port_no] = delta_bytes # Simpan delta byte port ini
+            port_deltas[port_no] = delta_bytes 
             app_name = PORT_TO_APP_MAP.get(port_no, "unknown")
             print(f"[PORT DELTA] app={app_name} (Port {port_no}), delta_RX_bytes={delta_bytes}")
 
 
-    # === Tahap 2: Ambil Detail dari Flow Stats ===
+    # === Tahap 2: Ambil Detail dari Flow Stats (MODIFIKASI) ===
     try:
         res_flow = requests.get(f"{RYU_REST}/stats/flow/{DPID_S1}", timeout=5).json()
     except Exception as e:
         print(f"Error fetch FLOW dpid {DPID_S1}: {e}", file=sys.stderr)
-        # Kita masih bisa lanjut pake delta bytes aja kalo flow gagal
         res_flow = {} 
         
-    flow_details = {} # Simpan detail flow terakhir per port di sini
+    flow_details = {} 
 
     if str(DPID_S1) in res_flow:
-        # Cari flow yang relevan (dari h1/h2/h3)
-        relevant_flows = {}
+        # [MODIFIKASI] Kita nggak perlu 'relevant_flows'. Langsung proses aja.
+        
         for flow in res_flow[str(DPID_S1)]:
             match = flow.get("match", {})
-            in_port = match.get("in_port") # Port masuk ke switch
+            in_port = match.get("in_port") 
             src_ip = match.get("ipv4_src") or match.get("nw_src")
             
-            # Kita hanya peduli flow yang MASUK dari port 1, 2, atau 3
-            if in_port in PORT_TO_APP_MAP and src_ip == PORT_TO_HOST_IP.get(in_port):
-                 # Jika ada >1 flow di port yg sama, ambil yg byte_count terbesar (paling aktif)
-                 if in_port not in relevant_flows or flow.get("byte_count", 0) > relevant_flows[in_port].get("byte_count", 0):
-                      relevant_flows[in_port] = flow
+            # Cek apakah flow ini dari host yang kita peduli (h1/h2/h3)
+            # DAN apakah kita BELUM nemu detail buat port ini
+            if in_port in PORT_TO_APP_MAP and src_ip == PORT_TO_HOST_IP.get(in_port) and in_port not in flow_details:
+                
+                 # LANGSUNG AMBIL DETAIL FLOW INI
+                 dst_ip = match.get("ipv4_dst") or match.get("nw_dst")
+                 tp_src = int(match.get("tcp_src") or match.get("udp_src") or 0)
+                 tp_dst = int(match.get("tcp_dst") or match.get("udp_dst") or 0)
+                 proto = {6:"tcp", 17:"udp"}.get(match.get("ip_proto", 0), "any")
+                 src_mac = match.get("eth_src")
+                 dst_mac = match.get("eth_dst")
 
-        # Proses flow yang relevan untuk hitung delta packet & ambil detail
-        for port_no, flow in relevant_flows.items():
-             match = flow.get("match", {})
-             src_ip = match.get("ipv4_src") or match.get("nw_src")
-             dst_ip = match.get("ipv4_dst") or match.get("nw_dst")
-             tp_src = int(match.get("tcp_src") or match.get("udp_src") or 0)
-             tp_dst = int(match.get("tcp_dst") or match.get("udp_dst") or 0)
-             proto = {6:"tcp", 17:"udp"}.get(match.get("ip_proto", 0), "any")
-             src_mac = match.get("eth_src")
-             dst_mac = match.get("eth_dst")
+                 # Hitung Delta Packet
+                 current_total_pkts = flow.get("packet_count", 0)
+                 flow_key = (DPID_S1, src_ip, dst_ip, tp_src, tp_dst, proto) 
+                 last_total_pkts = last_flow_stats[flow_key]["pkts"]
+                 delta_pkts = current_total_pkts - last_total_pkts
+                 if delta_pkts < 0: delta_pkts = current_total_pkts
+                 last_flow_stats[flow_key]["pkts"] = current_total_pkts
 
-             # Hitung Delta Packet
-             current_total_pkts = flow.get("packet_count", 0)
-             flow_key = (DPID_S1, src_ip, dst_ip, tp_src, tp_dst, proto) # Kunci memori flow
-             last_total_pkts = last_flow_stats[flow_key]["pkts"]
-             delta_pkts = current_total_pkts - last_total_pkts
-             if delta_pkts < 0: delta_pkts = current_total_pkts
-             last_flow_stats[flow_key]["pkts"] = current_total_pkts
-
-             # Simpan detail flow
-             flow_details[port_no] = {
-                 "src_ip": src_ip,
-                 "dst_ip": dst_ip,
-                 "src_mac": src_mac,
-                 "dst_mac": dst_mac,
-                 "proto": proto,
-                 "delta_pkts": delta_pkts,
-                 "tp_src": tp_src, # Simpan port utk debug
-                 "tp_dst": tp_dst
-             }
-             print(f"[FLOW DETAIL] Port {port_no}: delta_pkts={delta_pkts}, dst={dst_ip}, src_mac={src_mac}")
+                 # Simpan detail flow
+                 flow_details[in_port] = {
+                     "src_ip": src_ip,
+                     "dst_ip": dst_ip,
+                     "src_mac": src_mac,
+                     "dst_mac": dst_mac,
+                     "proto": proto,
+                     "delta_pkts": delta_pkts,
+                     "tp_src": tp_src, 
+                     "tp_dst": tp_dst
+                 }
+                 print(f"[FLOW DETAIL (First)] Port {in_port}: delta_pkts={delta_pkts}, dst={dst_ip}, src_mac={src_mac}")
+                 
+                 # Kalo udah nemu buat 3 port, stop loop biar cepet
+                 if len(flow_details) == len(PORT_TO_APP_MAP):
+                    break
 
 
-    # === Tahap 3: Gabungkan Data & Siapkan untuk DB ===
+    # === Tahap 3: Gabungkan Data & Siapkan untuk DB (SAMA) ===
     ts = datetime.now()
     for port_no, delta_bytes in port_deltas.items():
         app_name = PORT_TO_APP_MAP.get(port_no, "unknown")
@@ -181,30 +177,27 @@ def collect_current_traffic():
         latency, loss = get_synthetic_metrics(app_name)
         host = PORT_TO_HOST_IP.get(port_no)
         
-        # Ambil detail flow jika ada
         details = flow_details.get(port_no)
         if details:
             delta_pkts = details["delta_pkts"]
-            pkts_rx = max(0, int(delta_pkts * (1 - loss/100))) # Hitung pkts_rx pake loss sintetis
+            pkts_rx = max(0, int(delta_pkts * (1 - loss/100))) 
             
             rows_to_insert.append((
                 ts, DPID_S1, host, app_name, details["proto"], 
                 details["src_ip"], details["dst_ip"], details["src_mac"], details["dst_mac"],
-                delta_bytes, delta_bytes, # tx_bytes dan rx_bytes diisi delta BYTE (dari port)
-                delta_pkts, pkts_rx,     # pkts_tx diisi delta PACKET (dari flow), pkts_rx dihitung
+                delta_bytes, delta_bytes, 
+                delta_pkts, pkts_rx,     
                 latency, category
             ))
         else:
-            # Fallback jika detail flow tidak ditemukan (isi dummy)
              print(f"[WARNING] Flow detail not found for port {port_no}, using dummy values.")
              rows_to_insert.append((
                 ts, DPID_S1, host, app_name, "udp", 
                 host, "server_ip_dummy", "mac_dummy", "mac_dummy",
                 delta_bytes, delta_bytes, 
-                0, 0, # pkts = 0
+                0, 0, 
                 latency, category
             ))
-
 
     return has_delta, rows_to_insert
 
@@ -230,7 +223,7 @@ def insert_pg(rows):
         print(f"DB error: {e}", file=sys.stderr)
         return 0
         
-# ---------------------- MAIN LOOP (FIXED) ----------------------
+# ---------------------- MAIN LOOP (SAMA) ----------------------
 
 if __name__ == "__main__":
     
@@ -240,7 +233,7 @@ if __name__ == "__main__":
         
         if has_traffic_delta and rows:
             inserted = insert_pg(rows)
-            print(f"{inserted} baris DELTA (HYBRID) masuk DB.", file=sys.stderr)
+            print(f"{inserted} baris DELTA (HYBRID v2) masuk DB.", file=sys.stderr)
         else:
             print("Tidak ada delta baru (port/flow tidak berubah).", file=sys.stderr)
             
