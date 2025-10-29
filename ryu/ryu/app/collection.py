@@ -19,10 +19,15 @@ stop_event = threading.Event()
 def get_host_interface_bytes(host_name):
     """
     Mendapatkan total TX bytes dari interface eth0 host
-    MENGGUNAKAN 'sudo mn --node ...' KARENA BERJALAN SEBAGAI PROSES TERPISAH
+    [FIX] MENGGUNAKAN 'ip netns exec' (lebih reliable)
     """
     try:
-        cmd = ['sudo', 'mn', '--node', host_name, 'ip', '-s', 'link', 'show', 'eth0']
+        # Perintah LAMA (tidak reliable):
+        # cmd = ['sudo', 'mn', '--node', host_name, 'ip', '-s', 'link', 'show', 'eth0']
+        
+        # Perintah BARU (lebih stabil):
+        cmd = ['sudo', 'ip', 'netns', 'exec', host_name, 'ip', '-s', 'link', 'show', 'eth0']
+        
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=True)
         cmd_output = result.stdout
 
@@ -35,16 +40,21 @@ def get_host_interface_bytes(host_name):
             tx_bytes = int(match.group(1))
             return tx_bytes
         else:
-            print(f"  [Collector] Gagal parsing output 'ip -s link' (TX) untuk {host_name}\nOutput:\n{cmd_output}\n")
+            # [DEBUG] Aktifkan log ini jika parsing gagal
+            print(f"  [Collector DEBUG] Gagal parsing output 'ip -s link' (TX) untuk {host_name}\nOutput:\n{cmd_output}\n")
             return None
+            
     except subprocess.TimeoutExpired:
-        print(f"  [Collector] Timeout saat menjalankan 'ip -s link' di {host_name}\n")
+        # [DEBUG] Aktifkan log ini
+        print(f"  [Collector DEBUG] Timeout saat menjalankan 'ip netns exec' di {host_name}\n")
         return None
     except subprocess.CalledProcessError as e:
-        # print(f"  [Collector] 'sudo mn' gagal untuk {host_name}. Mininet sudah jalan? Error: {e.stderr}\n")
+        # [DEBUG] Ini adalah error yang paling mungkin terjadi jika Mininet belum jalan
+        print(f"  [Collector DEBUG] 'ip netns exec' GAGAL untuk {host_name}. Mininet sudah jalan? Error: {e.stderr}\n")
         return None 
     except Exception as e:
-        print(f"  [Collector] Exception get bytes for {host_name}: {e}\n")
+        # [DEBUG] Aktifkan log ini
+        print(f"  [Collector DEBUG] Exception get bytes for {host_name}: {e}\n")
         return None
 
 # --- FUNGSI INSERT DB (Diambil dari v8.0, diadaptasi untuk pooling koneksi) ---
@@ -63,8 +73,7 @@ def insert_pg(rows, conn):
             print("  [DB Insert] Berhasil menyambung ulang.")
 
         cur = conn.cursor()
-        # print(f"  [DB Debug] Mencoba insert {len(rows)} baris.") # Ganti info() -> print()
-
+        
         for i, r in enumerate(rows):
             try:
                 cur.execute("""
@@ -83,15 +92,13 @@ def insert_pg(rows, conn):
         if inserted_count > 0:
              conn.commit()
              # print(f"  [DB Debug] Commit {inserted_count} baris berhasil.")
-        # else:
-             # print("  [DB Debug] Tidak ada baris yang berhasil di-execute, tidak ada commit.")
-
+        
     except (psycopg2.InterfaceError, psycopg2.OperationalError) as conn_e:
          print(f"  [DB Connection Error] {conn_e}. Menandai koneksi untuk reset.")
          if conn:
              try: conn.close() 
              except: pass
-         conn = None # Set ke None agar loop berikutnya menyambung ulang
+         conn = None 
          return 0, conn 
     except Exception as e:
         print(f"  [DB Error Lain] {e}\n")
@@ -112,7 +119,7 @@ def run_collector():
     conn = None 
     try:
         conn = psycopg2.connect(DB_CONN)
-        print("\n*** Collector (via 'sudo mn --node') Dimulai ***")
+        print("\n*** Collector (via 'ip netns exec') Dimulai ***") # <-- Nama diubah
         print(f"*** Berhasil terhubung ke DB. Monitoring host: {HOSTS_TO_MONITOR} ***\n")
     except Exception as e:
         print(f"  [Collector] GAGAL terhubung ke DB saat startup: {e}. Collector berhenti.")
@@ -123,13 +130,14 @@ def run_collector():
         rows_to_insert = []
         has_delta = False
 
-        # Loop berdasarkan NAMA host dari config
         for host_name in HOSTS_TO_MONITOR:
             
-            # 1. Ambil total byte (sama seperti v8.0, tapi via subprocess)
+            # 1. Ambil total byte (via 'ip netns')
             current_total_bytes = get_host_interface_bytes(host_name)
 
             if current_total_bytes is None:
+                # Gagal ambil data (mungkin Mininet belum siap), skip host ini
+                # Log DEBUG akan muncul dari fungsi get_host_interface_bytes()
                 continue 
 
             # 2. Ambil total byte sebelumnya
@@ -147,7 +155,6 @@ def run_collector():
             if delta_bytes > 0:
                 has_delta = True
                 
-                # Ambil info dari config (menggantikan 'host.IP()' dll)
                 host_cfg = HOST_INFO.get(host_name, {})
                 app_name = host_cfg.get('app', 'unknown')
                 host_ip = host_cfg.get('ip', host_name) 
@@ -157,14 +164,14 @@ def run_collector():
                 latency = random.uniform(10, 50)
                 loss = random.uniform(0, 1)
 
+                # INI YANG HARUSNYA MUNCUL SEKARANG
                 print(f"  [Collector] Host: {host_name}, App: {app_name}, Delta TX Bytes: {delta_bytes}")
 
-                # Format data insert dari v8.0
                 rows_to_insert.append((
-                    ts, 1, host_ip, app_name, "udp", # dpid=1, host=IP host
-                    host_ip, "server_ip_dummy", host_mac, "mac_dummy", # src=host, dst=dummy
-                    delta_bytes, delta_bytes, # tx/rx diisi delta_bytes
-                    0, 0,                     # pkts_tx/rx diisi 0
+                    ts, 1, host_ip, app_name, "udp", 
+                    host_ip, "server_ip_dummy", host_mac, "mac_dummy",
+                    delta_bytes, delta_bytes, 
+                    0, 0,                     
                     latency, category
                  ))
 
