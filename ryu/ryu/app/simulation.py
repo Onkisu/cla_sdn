@@ -207,6 +207,12 @@ if __name__ == "__main__":
 
     link_netns_for_collector(net, topo)
 
+    # --- [FIX DI SINI] ---
+    info("\n*** Menunggu 30 detik agar STP (Spanning Tree) konvergen...\n")
+    time.sleep(30)
+    info("*** STP seharusnya sudah konvergen. Melanjutkan...\n")
+    # --- [SELESAI FIX] ---
+
     info("\n*** Warming up network (pingAll)...\n")
     net.pingAll(timeout='1')
     info("*** Warm-up complete.\n")
