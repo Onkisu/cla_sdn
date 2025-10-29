@@ -297,27 +297,63 @@ def run_collector(net):
 
 
 # ---------------------- FUNGSI INSERT DB (SAMA) ----------------------
+# ---------------------- FUNGSI INSERT DB (MODIFIKASI DEBUG) ----------------------
 def insert_pg(rows):
-    """Memasukkan data agregasi ke PostgreSQL."""
+    """Memasukkan data agregasi ke PostgreSQL dengan logging error detail."""
+    conn = None # Definisikan di luar try
+    inserted_count = 0
     try:
         conn = psycopg2.connect(DB_CONN)
         cur = conn.cursor()
-        for r in rows:
-            cur.execute("""
-                INSERT INTO traffic.flow_stats(
-                    timestamp, dpid, host, app, proto,
-                    src_ip, dst_ip, src_mac, dst_mac,
-                    bytes_tx, bytes_rx, pkts_tx, pkts_rx, latency_ms, category
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """, r)
-        conn.commit()
-        cur.close()
-        conn.close()
-        return len(rows)
-    except Exception as e:
-        info(f"  [DB Error] {e}\n") # Kasih prefix biar jelas
-        return 0
+        info(f"  [DB Debug] Berhasil konek ke DB. Mencoba insert {len(rows)} baris.") # Log sukses konek
 
+        for i, r in enumerate(rows):
+            try:
+                # Log data yang mau diinsert (opsional, bisa jadi spam)
+                # info(f"  [DB Debug] Inserting row {i+1}: {r}") 
+                cur.execute("""
+                    INSERT INTO traffic.flow_stats(
+                        timestamp, dpid, host, app, proto,
+                        src_ip, dst_ip, src_mac, dst_mac,
+                        bytes_tx, bytes_rx, pkts_tx, pkts_rx, latency_ms, category
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, r)
+                inserted_count += 1 # Tambah counter kalo execute berhasil
+            except Exception as row_e:
+                # Log error spesifik per baris
+                info(f"  [DB Insert Row Error] Gagal insert baris {i+1}. Error: {row_e}")
+                info(f"  [DB Debug] Data baris gagal: {r}") # Tampilkan data yg gagal
+                conn.rollback() # Rollback transaksi baris ini aja (opsional)
+
+        # Commit di akhir setelah loop selesai (jika tidak ada rollback per baris)
+        if inserted_count > 0: # Hanya commit jika ada yg berhasil di-execute
+             conn.commit()
+             info(f"  [DB Debug] Commit {inserted_count} baris berhasil.")
+        else:
+             info("  [DB Debug] Tidak ada baris yang berhasil di-execute, tidak ada commit.")
+
+    except psycopg2.OperationalError as conn_e:
+         # Error spesifik koneksi
+         info(f"  [DB Connection Error] Gagal konek ke DB! Cek DB_CONN. Error: {conn_e}")
+         return 0 # Gagal total
+    except Exception as e:
+        # Error umum lainnya
+        info(f"  [DB Error Lain] {e}\n")
+        if conn: # Coba rollback kalo masih ada koneksi
+             try: conn.rollback() 
+             except: pass
+        return 0 # Gagal
+    finally:
+        # Pastikan koneksi ditutup
+        if conn:
+            try:
+                 cur.close()
+                 conn.close()
+                 # info("  [DB Debug] Koneksi DB ditutup.") # Log penutup (opsional)
+            except:
+                 pass # Abaikan error saat nutup
+
+    return inserted_count # Kembalikan jumlah baris yg *berhasil* dieksekusi
 # ---------------------- MAIN (MODIFIKASI) ----------------------
 if __name__ == "__main__":
     setLogLevel("info")
