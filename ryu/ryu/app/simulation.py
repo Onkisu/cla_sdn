@@ -38,30 +38,19 @@ class LinuxRouter(Node):
         super(LinuxRouter, self).terminate()
 
 class ComplexTopo(Topo):
-    # --- Topologi ini SAMA PERSIS dengan v8.0 ---
     def build(self):
         info("*** Membangun Topologi Sesuai v8.0...\n")
-        # Router
         r1 = self.addNode('r1', cls=LinuxRouter, ip='10.0.0.254/24')
-
-        # Switches
         s1 = self.addSwitch('s1')
         s2 = self.addSwitch('s2')
         s3 = self.addSwitch('s3') 
-
-        # Hosts
-        # [PENTING] Tambahkan MAC address agar KONSISTEN dengan shared_config.py
         h1 = self.addHost('h1', ip='10.0.0.1/24', mac='00:00:00:00:00:01', defaultRoute='via 10.0.0.254')
         h2 = self.addHost('h2', ip='10.0.0.2/24', mac='00:00:00:00:00:02', defaultRoute='via 10.0.0.254')
         h3 = self.addHost('h3', ip='10.0.0.3/24', mac='00:00:00:00:00:03', defaultRoute='via 10.0.0.254')
-        
-        # Host sisanya (server)
         h4 = self.addHost('h4', ip='10.0.1.1/24', defaultRoute='via 10.0.1.254')
         h5 = self.addHost('h5', ip='10.0.1.2/24', defaultRoute='via 10.0.1.254')
         h6 = self.addHost('h6', ip='10.0.1.3/24', defaultRoute='via 10.0.1.254')
         h7 = self.addHost('h7', ip='10.0.2.1/24', defaultRoute='via 10.0.2.254')
-
-        # Links (SAMA PERSIS dengan v8.0)
         self.addLink(h1, s1, bw=5); self.addLink(h2, s1, bw=5); self.addLink(h3, s1, bw=5)
         self.addLink(h4, s2, bw=10, delay='32ms', loss=2); self.addLink(h5, s2, bw=10, delay='47ms', loss=2); self.addLink(h6, s2, bw=10)
         self.addLink(h7, s3, bw=2, delay='50ms', loss=2)
@@ -72,6 +61,7 @@ class ComplexTopo(Topo):
 
 # ---------------------- RANDOM TRAFFIC (SAMA DARI v8.0) ----------------------
 def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
+    # ... (Fungsi ini sama persis, tidak perlu diubah) ...
     if not output: 
         return
     try:
@@ -81,23 +71,21 @@ def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
              if ',' in line and len(line.split(',')) > 7: 
                   csv_line = line
                   break 
-
         if csv_line:
             parts = csv_line.split(',')
             actual_bytes = int(parts[7])
             info(f"CLIENT LOG: {client_name} -> {server_ip} SENT {actual_bytes:,} bytes in {burst_time_str}s (Target BW: {bw_str}ps)\n")
         else:
              info(f"Could not find valid CSV in iperf output for {client_name}:\nOutput was:\n{output}\n")
-
     except Exception as e:
         info(f"Could not parse iperf output for {client_name}: {e}\nOutput was:\n{output}\n")
 
 
 def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, seed):
+    # ... (Fungsi ini sama persis, tidak perlu diubah) ...
     rng = random.Random()
     rng.seed(seed)
     info(f"Starting random traffic for {client.name} (Seed: {seed}) -> {server_ip} (Base Range: [{base_min_bw}M - {base_max_bw}M])\n")
-
     while not stop_event.is_set():
         try:
             current_max_bw = rng.uniform(base_max_bw * 0.4, base_max_bw * 1.1)
@@ -111,7 +99,6 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, s
             cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str} -y C"
             output = safe_cmd(client, cmd)
             _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
-
             if stop_event.is_set(): break
             pause_duration = rng.uniform(0.5, 2.0)
             stop_event.wait(pause_duration)
@@ -119,11 +106,31 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, s
             if stop_event.is_set(): break
             stop_event.wait(1) 
 
-# ---------------------- START TRAFFIC (SAMA DARI v8.0) ----------------------
+# ---------------------- START TRAFFIC (MODIFIKASI) ----------------------
 def start_traffic(net):
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
-    # Ambil server h4, h5, h7 (sesuai v8.0)
     h4, h5, h7 = net.get('h4', 'h5', 'h7') 
+
+    # --- [FIX BARU] MEMBUAT LINK NAMESPACE UNTUK COLLECTOR ---
+    info("\n*** Membuat link network namespace (untuk collector.py)...\n")
+    # Perintah 'ip netns attach' butuh direktori /var/run/netns/
+    subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=True)
+    
+    for host in [h1, h2, h3]:
+        try:
+            # Ambil PID dari proses 'bash' host
+            pid = host.pid
+            # Buat link-nya di /var/run/netns/
+            # Ini adalah perintah 'sudo ip netns attach [nama_host] [pid_host]'
+            cmd = ['sudo', 'ip', 'netns', 'attach', host.name, str(pid)]
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            info(f"  > Link namespace untuk {host.name} (PID: {pid}) dibuat.\n")
+        except Exception as e:
+            info(f"  > GAGAL membuat link namespace for {host.name}: {e}\n")
+            if hasattr(e, 'stderr'):
+                info(f"  > Stderr: {e.stderr}\n")
+            info(f"  > Collector.py kemungkinan akan GAGAL.\n")
+    # --- [FIX] SELESAI ---
 
     info("\n*** Starting iperf servers (Simulating services, v8.0)\n")
     safe_cmd(h4, "iperf -s -u -p 443 -i 1 &")
@@ -149,7 +156,6 @@ def start_traffic(net):
     base_range_min = 0.5
     base_range_max = 5.0
     
-    # Thread traffic SAMA PERSIS dengan v8.0
     threads = [
         threading.Thread(target=generate_client_traffic, args=(h1, '10.0.1.1', 443, base_range_min, base_range_max, 12345), daemon=False),
         threading.Thread(target=generate_client_traffic, args=(h2, '10.0.1.2', 443, base_range_min, base_range_max, 67890), daemon=False),
@@ -162,6 +168,7 @@ def start_traffic(net):
 
 # ---------------------- MAIN (MODIFIKASI, TANPA COLLECTOR) ----------------------
 if __name__ == "__main__":
+    # ... (Fungsi ini sama persis, tidak perlu diubah) ...
     setLogLevel("info")
     net = Mininet(topo=ComplexTopo(),
                   switch=OVSSwitch,
@@ -171,20 +178,16 @@ if __name__ == "__main__":
     info("*** Memulai Jaringan Mininet...\n")
     net.start()
 
-    # Mulai thread traffic generator
     traffic_threads = start_traffic(net)
-
-    # TIDAK ADA LAGI COLLECTOR THREAD DI SINI
 
     info("\n*** Skrip Simulasi & Traffic berjalan.")
     info("*** 'collector.py' harus dijalankan di terminal terpisah.")
     info("*** Tekan Ctrl+C untuk berhenti kapan saja.\n")
     
     try:
-        # Loop utama sekarang hanya menunggu thread traffic selesai
         for t in traffic_threads:
             if t.is_alive():
-                 t.join() # Tunggu semua thread traffic selesai
+                 t.join() 
 
     except KeyboardInterrupt:
         info("\n\n*** Ctrl+C diterima. Menghentikan semua proses...\n")
@@ -193,20 +196,27 @@ if __name__ == "__main__":
         info("*** Mengirim sinyal stop ke semua thread traffic...\n")
         stop_event.set()
 
-        # Tunggu traffic threads berhenti
         info("*** Menunggu Traffic threads berhenti...\n")
         for t in traffic_threads:
             if t.is_alive(): 
                 t.join(timeout=5) 
             
-        # Cleanup iperf dari v8.0
         info("*** Membersihkan proses iperf yang mungkin tersisa...\n")
-        for i in range(1, 8): # Loop h1 sampai h7
+        for i in range(1, 8):
             host = net.get(f'h{i}')
             if host:
-                 # Gunakan safe_cmd untuk kill (meskipun stop_event sdh diset)
-                 # atau cmd() biasa karena ini cleanup
                  host.cmd("killall -9 iperf") 
+
+        # --- [FIX BARU] MEMBERSIHKAN LINK NAMESPACE ---
+        info("*** Membersihkan link network namespace...\n")
+        for host_name in ['h1', 'h2', 'h3']:
+            # Perintah 'sudo ip netns del [nama_host]'
+            cmd = ['sudo', 'ip', 'netns', 'del', host_name]
+            try:
+                subprocess.run(cmd, check=False, capture_output=True)
+            except Exception:
+                pass # Abaikan error jika file sudah tidak ada
+        # --- [FIX] SELESAI ---
 
         info("*** Menghentikan jaringan Mininet...\n")
         try:
