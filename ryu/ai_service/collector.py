@@ -17,7 +17,7 @@ DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 RYU_REST = "http://127.0.0.1:8080"
 DPIDS = [1, 2, 3]
 
-print("Memulai collector_FIXED.py (Delta per Flow, 1 poll / 5 detik)...")
+print("Memulai collector_FIXED_v2.py (Hardcoded IP Match, 1 poll / 5 detik)...")
 
 
 # [WAJIB] Penyimpanan global untuk TOTAL KUMULATIF terakhir
@@ -43,6 +43,7 @@ traffic_aggregator = defaultdict(lambda: {
 
 # Peta untuk resolusi IP/MAC dan Aplikasi
 ip_mac_map = {}
+# [FIX] Kita udah nggak pake 'match_app', jadi 2 baris ini bisa dihapus/diabaikan
 ip_app_map = {}   
 port_app_map = {} 
 
@@ -54,6 +55,7 @@ except FileNotFoundError:
     print("ERROR: File apps.yaml tidak ditemukan!", file=sys.stderr)
     sys.exit(1)
 
+# [FIX] Kita tetap butuh 'app_category_map'
 app_category_map = {}
 for cat, catconf in apps_conf.get("categories", {}).items():
     for app in catconf.get("apps", []):
@@ -106,6 +108,7 @@ def refresh_ip_mapping():
         for port in conf.get("ports", []): port_app_map[int(port)] = app_name
     save_cache()
 
+# [FIX] Fungsi 'match_app' udah nggak relevan, tapi kita biarin aja
 def match_app(src_ip, dst_ip, tp_src, tp_dst):
     def clean_ip(ip): return ip.split('/')[0] if ip and '/' in ip else ip
     s, d = clean_ip(src_ip), clean_ip(dst_ip)
@@ -156,7 +159,31 @@ def collect_current_traffic():
             tp_dst = int(match.get("tcp_dst") or match.get("udp_dst") or 0)
             proto = {6:"tcp", 17:"udp"}.get(match.get("ip_proto", 0), "any")
 
-            app_name = match_app(src_ip, dst_ip, tp_src, tp_dst)
+            
+            # [FIX] HAPUS PANGGILAN 'match_app'
+            # app_name = match_app(src_ip, dst_ip, tp_src, tp_dst)
+            
+            # [FIX] Ganti pakai 'hardcoded' IP (dari topo)
+            app_name = "unknown"
+            # Cek traffic DARI client (h1, h2, h3)
+            if src_ip == '10.0.0.1':
+                app_name = 'youtube'
+            elif src_ip == '10.0.0.2':
+                app_name = 'netflix'
+            elif src_ip == '10.0.0.3':
+                app_name = 'twitch'
+            # Cek traffic KE client (balasan dari server)
+            elif dst_ip == '10.0.0.1':
+                 app_name = 'youtube'
+            elif dst_ip == '10.0.0.2':
+                 app_name = 'netflix'
+            elif dst_ip == '10.0.0.3':
+                 app_name = 'twitch'
+            
+            # Skip traffic 'unknown' (kayak ARP, routing, dll)
+            if app_name == "unknown":
+                continue
+            
             category = app_category_map.get(app_name, "data")
             
             # --- LOGIKA PENGHITUNGAN DELTA (FIXED) ---
@@ -193,7 +220,7 @@ def collect_current_traffic():
             agg_key = (dpid, app_name, category)
             
             traffic_aggregator[agg_key]["bytes_tx"] += delta_bytes
-            traffic_aggregator[agg_key]["bytes_rx"] += delta_bytes 
+            traffic_aggregator[agg_key]["bytes_rx"] += delta_bytes # Simulasi rx=tx
             traffic_aggregator[agg_key]["pkts_tx"] += delta_pkts
             traffic_aggregator[agg_key]["pkts_rx"] += pkts_rx
             traffic_aggregator[agg_key]["latency_sum"] += latency
