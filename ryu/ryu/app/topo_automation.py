@@ -12,7 +12,7 @@ import subprocess
 import math
 import re # <-- Modul baru buat parsing output 'ip'
 import psycopg2 # <-- Modul baru buat konek DB
-import defaultdict
+from collections import defaultdict 
 
 # ---------------------- KONFIGURASI DB & KOLEKSI ----------------------
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
