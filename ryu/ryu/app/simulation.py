@@ -30,9 +30,6 @@ def safe_cmd(node, cmd):
 class SpineLeafTopo(Topo):
     """
     [FIXED] Topologi Spine-Leaf dengan NAMA INTERFACE EKSPLISIT
-    
-    Ini menghindari error 'File exists' yang disebabkan oleh 
-    penomoran otomatis Mininet (cth: sL1-eth1).
     """
     
     def __init__(self, spines=2, leafs=2, hosts_per_leaf=2):
@@ -48,6 +45,7 @@ class SpineLeafTopo(Topo):
         spine_switches = []
         for s in range(1, spines + 1):
             s_name = 'sS%s' % s
+            # self.addSwitch() mengembalikan NAMA (string)
             spine_switches.append(self.addSwitch(s_name))
             info(f"  Menambahkan Spine: {s_name}\n")
 
@@ -56,14 +54,19 @@ class SpineLeafTopo(Topo):
         self.host_list = [] # Untuk melacak nama host
         for l in range(1, leafs + 1):
             l_name = 'sL%s' % l
+            # self.addSwitch() mengembalikan NAMA (string)
             leaf_sw = self.addSwitch(l_name)
             leaf_switches.append(leaf_sw)
             info(f"  Menambahkan Leaf: {l_name}\n")
 
             # 3. [FIX] Hubungkan Leaf ke Spines dengan NAMA EKSPLISIT
-            for s_idx, s_sw in enumerate(spine_switches):
+            for s_idx, s_sw_name in enumerate(spine_switches):
                 s_num = s_idx + 1
-                s_name = s_sw.name # cth: sS1
+                
+                # --- [FIX DI SINI] ---
+                # s_sw_name SUDAH string (cth: "sS1"), tidak perlu .name
+                s_name = s_sw_name 
+                # --- [SELESAI FIX] ---
                 
                 # Nama interface di sisi Leaf (cth: sL1-if-s1)
                 leaf_intf_name = '%s-if-s%s' % (l_name, s_num)
@@ -72,8 +75,8 @@ class SpineLeafTopo(Topo):
                 
                 info(f"    Menambahkan Link: {l_name}({leaf_intf_name}) <-> {s_name}({spine_intf_name})\n")
                 self.addLink(
-                    leaf_sw, 
-                    s_sw, 
+                    leaf_sw,  # Nama leaf (string)
+                    s_name,   # Nama spine (string)
                     bw=100,
                     intfName1=leaf_intf_name,  # Nama di Leaf
                     intfName2=spine_intf_name  # Nama di Spine
@@ -94,8 +97,8 @@ class SpineLeafTopo(Topo):
                 
                 info(f"      Link Host: {host_name}(eth0) <-> {l_name}({switch_intf_name})\n")
                 self.addLink(
-                    host, 
-                    leaf_sw, 
+                    host_name, # Nama host (string)
+                    leaf_sw,   # Nama leaf (string)
                     bw=10, 
                     intfName1='eth0',           # Nama di Host (kritis untuk collector)
                     intfName2=switch_intf_name  # Nama di Switch
@@ -205,8 +208,6 @@ if __name__ == "__main__":
     link_netns_for_collector(net, topo)
 
     info("\n*** Warming up network (pingAll)...\n")
-    # [PENTING] Pingall akan GAGAL sampai Anda punya controller L3
-    # Tapi kita tetap jalankan untuk 'membangunkan' ARP
     net.pingAll(timeout='1')
     info("*** Warm-up complete.\n")
 
