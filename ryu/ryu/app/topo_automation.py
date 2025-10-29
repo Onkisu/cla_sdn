@@ -17,6 +17,7 @@ stop_event = threading.Event()
 
 def safe_cmd(node, cmd):
     """Execute node.cmd() safely with lock."""
+# ... (kode safe_cmd, LinuxRouter, ComplexTopo SAMA PERSIS) ...
     if stop_event.is_set():
         return None 
     with cmd_lock:
@@ -62,9 +63,9 @@ class ComplexTopo(Topo):
 
 def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
     """Helper fungsi logging."""
+# ... (kode _log_iperf SAMA PERSIS) ...
     try:
         # [FIX] Ambil baris PERTAMA [0], bukan baris TERAKHIR [-1]
-        # Ini karena iperf nge-print CSV dulu, baru nge-print error "Connection refused"
         csv_line = output.strip().split('\n')[0]
         
         parts = csv_line.split(',')
@@ -74,7 +75,7 @@ def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
         # Kalo parsing baris pertama GAGAL, baru kita print error
         info(f"Could not parse iperf output for {client_name}: {e}\nOutput was: {output}\n")
 
-# Kita kembali ke SATU FUNGSI, tapi kita tambahin 'seed'
+# ... (kode generate_client_traffic SAMA PERSIS) ...
 def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, seed):
     """
     Generates random UDP traffic bursts using a DEDICATED random generator
@@ -114,12 +115,9 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, s
                 continue
 
             # 5. Parsing dan log output asli iperf
-            # Cek dulu apa outputnya ada error 'refused'
             if "Connection refused" in output or "read failed" in output:
-                # Kalo error, kita coba log, tapi siap-siap kalo gagal
                 _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
             else:
-                # Kalo output bersih (kayak h1), parsing aman
                 _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
 
 
@@ -148,6 +146,15 @@ def start_traffic(net):
     safe_cmd(h7, "iperf -s -u -p 1935 -i 1 &")
     time.sleep(1)
 
+    # --- [FIX "Too many open files"] ---
+    # "Panasin" L2 network-nya dulu. Ini bakal maksa Ryu belajar
+    # semua MAC address dan nginstal flow L2 (MAC-based)
+    info("\n*** Warming up L2 switching paths (pingAll)...\n")
+    net.pingAll(timeout='1s') # Cukup 1 detik buat trigger ARP
+    info("*** L2 paths learned by controller.\n")
+    # --- [SELESAI FIX] ---
+
+
     info("-----------------------------------------------------------\n")
     info("💡 TELEMETRI LIVE (dari server) akan muncul di bawah ini:\n")
     info("-----------------------------------------------------------\n")
@@ -155,6 +162,7 @@ def start_traffic(net):
 
     info("\n*** Starting client traffic threads (Simulating users)\n")
     
+# ... (sisa kode start_traffic dan MAIN SAMA PERSIS) ...
     # SAMAIN SEMUA BASE RANGE (sesuai request lu)
     base_range_min = 0.5
     base_range_max = 5.0
@@ -182,6 +190,7 @@ def start_traffic(net):
 # ---------------------- FORECAST LOOP ----------------------
 def run_forecast_loop():
     while not stop_event.is_set():
+# ... (kode run_forecast_loop SAMA PERSIS) ...
         info("\n*** Running AI Forecast...\n")
         try:
             subprocess.call(["sudo", "python3", "forecast.py"])
@@ -194,6 +203,7 @@ def run_forecast_loop():
 # ---------------------- MAIN ----------------------
 if __name__ == "__main__":
     setLogLevel("info")
+# ... (sisa kode MAIN SAMA PERSIS) ...
     net = Mininet(topo=ComplexTopo(),
                   switch=OVSSwitch,
                   controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
