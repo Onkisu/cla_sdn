@@ -37,5 +37,5 @@ HOST_INFO = {
 APP_TO_CATEGORY = { 
     'youtube': 'video',
     'netflix': 'video',
-    'twitch': 'video' 
+    'twitch': 'gaming' 
 }
