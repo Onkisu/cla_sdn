@@ -1,44 +1,40 @@
 #!/usr/bin/python3
-# config.py
-#
-# TIDAK ADA PERUBAHAN. File ini sudah benar.
-#
 
 # ---------------------- KONFIGURASI DB & KOLEKSI ----------------------
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 COLLECT_INTERVAL = 5 # Detik
 
-# Daftar host yang akan dimonitor oleh collector.py
-HOSTS_TO_MONITOR = ['h1', 'h2', 'h3']
+# Daftar host (klien eksternal) yang akan dimonitor oleh collector.py
+HOSTS_TO_MONITOR = ['user1', 'user2', 'user3']
 
-# [OPSIONAL] Mapping Aplikasi ke Host (buat di DB)
+# Mapping Aplikasi ke Host (untuk klasifikasi lalu lintas North-South)
 HOST_INFO = {
-    'h1': {
-        'ip': '10.0.0.1', 
-        'app': 'youtube', 
-        'mac': '00:00:00:00:00:01', 
-        'server_ip': '10.0.0.4', # <-- Server h4 (IP baru)
-        'server_mac': '00:00:00:00:00:04' # <-- MAC untuk h4
+    'user1': {
+        'ip': '192.168.100.1', 
+        'app': 'web_service_https', 
+        'mac': '00:00:00:00:01:01', 
+        'server_ip': '10.10.1.1', # <-- Server web1
+        'server_mac': '00:00:00:00:0A:01' 
     },
-    'h2': {
-        'ip': '10.0.0.2', 
-        'app': 'netflix', 
-        'mac': '00:00:00:00:00:02', 
-        'server_ip': '10.0.0.5', # <-- Server h5 (IP baru)
-        'server_mac': '00:00:00:00:00:05' # <-- MAC untuk h5
+    'user2': {
+        'ip': '192.168.100.2', 
+        'app': 'web_service_http', 
+        'mac': '00:00:00:00:01:02', 
+        'server_ip': '10.10.1.2', # <-- Server web2
+        'server_mac': '00:00:00:00:0A:02'
     },
-    'h3': {
-        'ip': '10.0.0.3', 
-        'app': 'twitch',  
-        'mac': '00:00:00:00:00:03', 
-        'server_ip': '10.0.0.7', # <-- Server h7 (IP baru)
-        'server_mac': '00:00:00:00:00:07' # <-- MAC untuk h7
+    'user3': {
+        'ip': '192.168.100.3', 
+        'app': 'api_service',  
+        'mac': '00:00:00:00:01:03', 
+        'server_ip': '10.10.2.1', # <-- Server app1
+        'server_mac': '00:00:00:00:0B:01'
     }
 }
 
-# Mapping kategori (tidak berubah)
+# Mapping kategori aplikasi
 APP_TO_CATEGORY = { 
-    'youtube': 'video',
-    'netflix': 'video',
-    'twitch': 'gaming' 
+    'web_service_https': 'web_app',
+    'web_service_http': 'web_app',
+    'api_service': 'backend_api' 
 }
