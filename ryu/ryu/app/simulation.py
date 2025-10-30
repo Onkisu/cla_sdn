@@ -248,7 +248,7 @@ if __name__ == "__main__":
     # [UPDATE] Menggunakan FatTreeTopo(k=4)
     net = Mininet(topo=FatTreeTopo(k=4),
                   switch=OVSSwitch,
-                  controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
+                  controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6653),
                   link=TCLink,
                   autoSetMacs=True) # Biarkan Mininet menangani MAC jika kita tidak set manual
 
