@@ -11,6 +11,7 @@ import subprocess
 import math
 
 # ---------------------- GLOBAL LOCK & STOP EVENT ----------------------
+# (Tidak ada perubahan)
 cmd_lock = threading.Lock()
 stop_event = threading.Event()
 
@@ -27,6 +28,7 @@ def safe_cmd(node, cmd):
              return None 
 
 # ---------------------- ROUTER (TIDAK DIGUNAKAN) ----------------------
+# (Tidak ada perubahan)
 class LinuxRouter(Node):
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
@@ -37,6 +39,7 @@ class LinuxRouter(Node):
         super(LinuxRouter, self).terminate()
 
 # ---------------------- TOPOLOGI DATA CENTER (FAT-TREE) ----------------------
+# (Tidak ada perubahan)
 class FatTreeTopo(Topo):
     def build(self, k=4):
         info(f"*** Membangun Topologi Fat-Tree (k={k})...\n")
@@ -109,6 +112,7 @@ class FatTreeTopo(Topo):
 
 
 # ---------------------- RANDOM TRAFFIC (SAMA) ----------------------
+# (Tidak ada perubahan)
 def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
     if not output: 
         return
@@ -153,6 +157,7 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, s
             stop_event.wait(1) 
 
 # ---------------------- START TRAFFIC [UPDATE] ----------------------
+# (Tidak ada perubahan)
 def start_traffic(net):
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
     h4, h5, h7 = net.get('h4', 'h5', 'h7') 
@@ -166,14 +171,11 @@ def start_traffic(net):
     for host in all_hosts:
         if not host: continue
         try:
-            # [PERBAIKAN] Coba hapus dulu sisaan, baru attach.
-            # Ini mengatasi error 'File exists'
             pid = host.pid
             ns_file = f'/var/run/netns/{host.name}'
             
             # 1. Hapus sisaan link jika ada
             subprocess.run(['sudo', 'rm', '-f', ns_file], check=False, capture_output=True)
-            
             # 2. Hapus sisaan namespace jika ada
             subprocess.run(['sudo', 'ip', 'netns', 'del', host.name], check=False, capture_output=True)
 
@@ -182,7 +184,6 @@ def start_traffic(net):
             subprocess.run(cmd, check=True, capture_output=True, text=True)
             info(f"  > Link namespace untuk {host.name} (PID: {pid}) dibuat.\n")
         except Exception as e:
-            # Jika 'attach' gagal (misal pid-nya beda), coba 'add'
             try:
                 subprocess.run(['sudo', 'ip', 'netns', 'add', host.name], check=True, capture_output=True)
                 subprocess.run(['sudo', 'ip', 'netns', 'attach', host.name, str(pid)], check=True, capture_output=True)
@@ -226,18 +227,17 @@ def start_traffic(net):
         t.start()
     return threads
 
-# ---------------------- MAIN [UPDATE] ----------------------
+# ---------------------- MAIN [UPDATE FINAL] ----------------------
 if __name__ == "__main__":
     setLogLevel("info")
     
-    # [DIHAPUS] Panggilan 'sudo mn -c' di awal dihapus
-    # Ini yang menyebabkan error 'pkill not found' di sistemmu.
-    # Cleanup yang benar ada di net.stop() di 'finally'.
-    
-    # [PERBAIKAN] Port diubah ke 6633 (default Ryu)
-    # Ini adalah PERBAIKAN UTAMA yang bikin pingAll gagal.
+    # [PERBAIKAN FINAL] Ini cara yang BENAR buat maksa OpenFlow 1.3
+    # Kita ngasih tau Mininet buat pake 'lambda' ini setiap kali bikin switch
+    # Lambda ini manggil OVSSwitch DAN ngasih parameter 'protocols'
+    switch_proto = lambda name: OVSSwitch(name, protocols='OpenFlow13')
+
     net = Mininet(topo=FatTreeTopo(k=4),
-                  switch=OVSSwitch,
+                  switch=switch_proto, # <-- [INI PERBAIKANNYA]
                   controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
                   link=TCLink,
                   autoSetMacs=True) 
@@ -273,7 +273,6 @@ if __name__ == "__main__":
                  host.cmd("killall -9 iperf") 
 
         info("*** Membersihkan link network namespace...\n")
-        # Cleanup namespace di akhir (bagian dari net.stop() juga)
         for i in range(1, 17):
             host_name = f'h{i}'
             cmd = ['sudo', 'ip', 'netns', 'del', host_name]
@@ -284,7 +283,6 @@ if __name__ == "__main__":
                 
         info("*** Menghentikan jaringan Mininet...\n")
         try:
-            # net.stop() adalah cara cleanup yang benar dan aman
             net.stop()
             info("*** Mininet berhenti.\n")
         except Exception as e:
