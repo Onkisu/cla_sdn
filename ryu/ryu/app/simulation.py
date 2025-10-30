@@ -44,11 +44,11 @@ class DataCenterTopo(Topo):
         cr1 = self.addNode('cr1', cls=LinuxRouter, ip='192.168.100.254/24')
         
         # Switch Eksternal (Tempat user terhubung)
-        ext_sw = self.addSwitch('ext_sw') # Akan menjadi DPID 1
+        ext_sw = self.addSwitch('ext_sw', dpid='1') # DPID Eksplisit 1
         
         # Switch Internal DC (Top-of-Rack)
-        tor1 = self.addSwitch('tor1') # DPID 2
-        tor2 = self.addSwitch('tor2') # DPID 3
+        tor1 = self.addSwitch('tor1', dpid='2') # DPID Eksplisit 2
+        tor2 = self.addSwitch('tor2', dpid='3') # DPID Eksplisit 3
         
         # --- Klien Eksternal ---
         user1 = self.addHost('user1', ip='192.168.100.1/24', mac='00:00:00:00:01:01', defaultRoute='via 192.168.100.254')
