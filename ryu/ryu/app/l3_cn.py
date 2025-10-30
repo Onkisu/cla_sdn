@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # controller_fattree_stable_fixed.py
-# Ryu controller untuk Fat-Tree, handle reconnect dan multiple connections
+#
+# TIDAK ADA PERUBAHAN. Skrip ini sudah baik.
+# Ia sudah dirancang untuk menangani koneksi ganda (duplicate connection)
+# dengan mencatat log peringatan dan mengganti koneksi lama.
+#
 
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -28,7 +32,8 @@ class FatTreeStableController(app_manager.RyuApp):
         self.datapath_locks = {}   # dpid -> threading.Lock()
         # spawn monitor thread
         self.monitor_thread = hub.spawn(self._monitor)
-        LOG.info("✅ FatTreeStableController initialized")
+        # [CATATAN] Ryu default-nya jalan di port 6633
+        LOG.info("✅ FatTreeStableController initialized (Listening on port 6633 by default)")
 
     # -------------------------
     # State change handler
@@ -39,22 +44,18 @@ class FatTreeStableController(app_manager.RyuApp):
         dpid = dp.id
 
         if ev.state == MAIN_DISPATCHER:
-            # handle multiple connections
+            # [INI BAGIAN PENTING] Ini udah handle duplicate connection
             if dpid in self.datapaths:
                 old_dp = self.datapaths[dpid]
                 if old_dp != dp:
                     LOG.warning(f"Multiple connection detected for DPID {dpid:016x} — replacing old connection")
-                    # optional: keep MAC table, atau reset
-                    # self.mac_to_port.pop(dpid, None)
 
             self.datapaths[dpid] = dp
-            # ensure lock exists per DPID
             if dpid not in self.datapath_locks:
                 self.datapath_locks[dpid] = threading.Lock()
             self.mac_to_port.setdefault(dpid, {})
             LOG.info(f"✅ Switch {dpid:016x} connected.")
         elif ev.state == DEAD_DISPATCHER:
-            # remove dead datapath
             if dpid in self.datapaths and self.datapaths[dpid] == dp:
                 del self.datapaths[dpid]
                 LOG.info(f"❌ Switch {dpid:016x} disconnected.")

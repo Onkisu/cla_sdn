@@ -1,16 +1,16 @@
 #!/usr/bin/python3
+#
+# TIDAK ADA PERUBAHAN. File ini sudah benar.
+#
 
 # ---------------------- KONFIGURASI DB & KOLEKSI ----------------------
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 COLLECT_INTERVAL = 5 # Detik
 
 # Daftar host yang akan dimonitor oleh collector.py
-# Kita tetap memonitor klien h1, h2, h3
 HOSTS_TO_MONITOR = ['h1', 'h2', 'h3']
 
 # [OPSIONAL] Mapping Aplikasi ke Host (buat di DB)
-# [UPDATE] IP dan MAC klien kebetulan sama dengan topologi Fat-Tree
-# [UPDATE] 'server_ip' diubah ke IP baru di subnet 10.0.0.0/24
 HOST_INFO = {
     'h1': {
         'ip': '10.0.0.1', 
