@@ -15,7 +15,6 @@ from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet, ethernet, ether_types
 
 import logging
-import time
 
 LOG = logging.getLogger('ryu.app.controller_fattree_stable')
 LOG.setLevel(logging.INFO)
@@ -46,38 +45,28 @@ class FatTreeStableController(app_manager.RyuApp):
         dpid = dp.id
 
         if ev.state == MAIN_DISPATCHER:
-            # new/active connection
             if dpid in self.datapaths:
                 old_dp = self.datapaths[dpid]
                 if old_dp is not dp:
                     LOG.warning(f"Multiple connection detected for DPID {dpid:016x} — replacing old connection with new one")
-                    # attempt to safely close older datapath connection
                     try:
-                        # try to close the previous datapath socket if implementation allows
                         if hasattr(old_dp, 'close'):
                             old_dp.close()
                             LOG.info(f"Closed previous datapath object for {dpid:016x}")
                     except Exception as e:
                         LOG.exception(f"Failed to close old datapath for {dpid:016x}: {e}")
-                    # keep existing mac table (optional) or reset
-                    # self.mac_to_port.pop(dpid, None)   # uncomment if you want to clear MAC table on reconnect
 
-            # register the (new) datapath
             self.datapaths[dpid] = dp
-            # ensure we have a lock per dpid
             if dpid not in self.datapath_lock:
                 self.datapath_lock[dpid] = hub.Lock()
             self.mac_to_port.setdefault(dpid, {})
             LOG.info(f"✅ Switch {dpid:016x} connected.")
+
         elif ev.state == DEAD_DISPATCHER:
-            # connection dead, remove
             if dpid in self.datapaths and self.datapaths[dpid] is dp:
                 del self.datapaths[dpid]
                 LOG.info(f"❌ Switch {dpid:016x} disconnected.")
-            # optionally remove locks/mac table
             self.datapath_lock.pop(dpid, None)
-            # keep mac_to_port for short time, or delete:
-            # self.mac_to_port.pop(dpid, None)
 
     # -------------------------
     # Switch feature (table-miss)
@@ -88,7 +77,6 @@ class FatTreeStableController(app_manager.RyuApp):
         ofp = dp.ofproto
         parser = dp.ofproto_parser
 
-        # install table-miss: send to controller
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofp.OFPP_CONTROLLER, ofp.OFPCML_NO_BUFFER)]
         self._add_flow(dp, priority=0, match=match, actions=actions)
@@ -108,24 +96,20 @@ class FatTreeStableController(app_manager.RyuApp):
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
-            # ignore LLDP for topology discovery handled by ryu if using observe-links
             return
 
         src = eth.src
         dst = eth.dst
         in_port = msg.match.get('in_port')
 
-        # learning
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
 
         out_port = self.mac_to_port[dpid].get(dst, ofp.OFPP_FLOOD)
         actions = [parser.OFPActionOutput(out_port)]
 
-        # install flow if not flood
         if out_port != ofp.OFPP_FLOOD:
             match = parser.OFPMatch(in_port=in_port, eth_src=src, eth_dst=dst)
-            # install flow with idle timeout to allow dynamics
             self._add_flow(dp, priority=1, match=match, actions=actions, idle_timeout=30)
 
         data = None
@@ -180,6 +164,24 @@ class FatTreeStableController(app_manager.RyuApp):
         dp = ev.msg.datapath
         dpid = dp.id
         body = ev.msg.body
-        # log minimal summary (priority 1 flows)
         for stat in [f for f in body if f.priority == 1]:
             match = stat.match
+            LOG.debug(f"DP {dpid:016x} Flow {match} packets={stat.packet_count} bytes={stat.byte_count}")
+
+    # -------------------------
+    # Keepalive: echo requests
+    # -------------------------
+    def _echo_loop(self):
+        while True:
+            try:
+                for dp in list(self.datapaths.values()):
+                    try:
+                        parser = dp.ofproto_parser
+                        echo = parser.OFPEchoRequest(dp)
+                        dp.send_msg(echo)
+                    except Exception as e:
+                        LOG.debug(f"Echo failed for {getattr(dp,'id',None)}: {e}")
+                hub.sleep(self.ECHO_INTERVAL)
+            except Exception as e:
+                LOG.exception(f"Echo loop exception: {e}")
+                hub.sleep(5)
