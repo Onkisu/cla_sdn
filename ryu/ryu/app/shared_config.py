@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+# config.py
 #
 # TIDAK ADA PERUBAHAN. File ini sudah benar.
 #

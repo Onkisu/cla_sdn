@@ -11,7 +11,6 @@ import subprocess
 import math
 
 # ---------------------- GLOBAL LOCK & STOP EVENT ----------------------
-# (Tidak ada perubahan di bagian ini)
 cmd_lock = threading.Lock()
 stop_event = threading.Event()
 
@@ -23,15 +22,12 @@ def safe_cmd(node, cmd):
         if stop_event.is_set():
              return None
         try:
-             # Timeout sedikit diperpanjang untuk mengakomodasi jaringan yg lebih kompleks
              return node.cmd(cmd, timeout=15)
         except Exception as e:
              return None 
 
-# ---------------------- ROUTER (TIDAK DIGUNAKAN DI FAT-TREE) ----------------------
-# (Tidak ada perubahan di bagian ini)
+# ---------------------- ROUTER (TIDAK DIGUNAKAN) ----------------------
 class LinuxRouter(Node):
-    """Router Linux (Tidak digunakan di FatTreeTopo)."""
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
         safe_cmd(self, "sysctl -w net.ipv4.ip_forward=1")
@@ -41,11 +37,7 @@ class LinuxRouter(Node):
         super(LinuxRouter, self).terminate()
 
 # ---------------------- TOPOLOGI DATA CENTER (FAT-TREE) ----------------------
-# (Tidak ada perubahan di bagian ini)
 class FatTreeTopo(Topo):
-    """
-    Topologi Fat-Tree (k=4) standar untuk Data Center.
-    """
     def build(self, k=4):
         info(f"*** Membangun Topologi Fat-Tree (k={k})...\n")
         if k % 2 != 0:
@@ -61,7 +53,6 @@ class FatTreeTopo(Topo):
         bw_agg_edge = 10
         bw_edge_host = 5
 
-        # --- Membuat Switch ---
         cores = []
         for i in range(num_cores):
             cores.append(self.addSwitch(f'c{i+1}'))
@@ -83,7 +74,7 @@ class FatTreeTopo(Topo):
         info(f"  > Aggregation Switches: {len(aggs) * len(aggs[0])}\n")
         info(f"  > Edge Switches: {len(edges) * len(edges[0])}\n")
 
-        # --- Link Core <-> Aggregation ---
+        # Link Core <-> Aggregation
         for i in range(num_cores):
             core_sw = cores[i]
             agg_index_to_connect = i // (k // 2) 
@@ -91,13 +82,13 @@ class FatTreeTopo(Topo):
                 agg_sw = aggs[p][agg_index_to_connect]
                 self.addLink(core_sw, agg_sw, bw=bw_core_agg)
 
-        # --- Link Aggregation <-> Edge ---
+        # Link Aggregation <-> Edge
         for p in range(num_pods):
             for a in range(num_aggs_per_pod):
                 for e in range(num_edges_per_pod):
                     self.addLink(aggs[p][a], edges[p][e], bw=bw_agg_edge)
 
-        # --- Link Edge <-> Hosts ---
+        # Link Edge <-> Hosts
         host_ip_counter = 1
         host_mac_counter = 1
         for p in range(num_pods):
@@ -105,12 +96,10 @@ class FatTreeTopo(Topo):
                 edge_sw = edges[p][e]
                 for h in range(num_hosts_per_edge):
                     host_ip = f'10.0.0.{host_ip_counter}/24'
-                    # Format MAC: 00:00:00:00:00:XX
                     host_mac = f'00:00:00:00:00:{host_mac_counter:02x}' 
                     host_name = f'h{host_ip_counter}'
                     
                     host = self.addHost(host_name, ip=host_ip, mac=host_mac, intfName1='eth0')
-                    
                     self.addLink(edge_sw, host, bw=bw_edge_host)
                     
                     host_ip_counter += 1
@@ -120,7 +109,6 @@ class FatTreeTopo(Topo):
 
 
 # ---------------------- RANDOM TRAFFIC (SAMA) ----------------------
-# (Tidak ada perubahan di bagian ini)
 def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
     if not output: 
         return
@@ -164,12 +152,12 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, s
             if stop_event.is_set(): break
             stop_event.wait(1) 
 
-# ---------------------- START TRAFFIC (SAMA) ----------------------
-# (Tidak ada perubahan di bagian ini)
+# ---------------------- START TRAFFIC [UPDATE] ----------------------
 def start_traffic(net):
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
     h4, h5, h7 = net.get('h4', 'h5', 'h7') 
 
+    # --- Membuat link namespace ---
     info("\n*** Membuat link network namespace (untuk collector.py)...\n")
     subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=True)
     
@@ -178,14 +166,32 @@ def start_traffic(net):
     for host in all_hosts:
         if not host: continue
         try:
+            # [PERBAIKAN] Coba hapus dulu sisaan, baru attach.
+            # Ini mengatasi error 'File exists'
             pid = host.pid
+            ns_file = f'/var/run/netns/{host.name}'
+            
+            # 1. Hapus sisaan link jika ada
+            subprocess.run(['sudo', 'rm', '-f', ns_file], check=False, capture_output=True)
+            
+            # 2. Hapus sisaan namespace jika ada
+            subprocess.run(['sudo', 'ip', 'netns', 'del', host.name], check=False, capture_output=True)
+
+            # 3. Buat link baru
             cmd = ['sudo', 'ip', 'netns', 'attach', host.name, str(pid)]
             subprocess.run(cmd, check=True, capture_output=True, text=True)
             info(f"  > Link namespace untuk {host.name} (PID: {pid}) dibuat.\n")
         except Exception as e:
-            info(f"  > GAGAL membuat link namespace for {host.name}: {e}\n")
-            if hasattr(e, 'stderr'):
-                info(f"  > Stderr: {e.stderr}\n")
+            # Jika 'attach' gagal (misal pid-nya beda), coba 'add'
+            try:
+                subprocess.run(['sudo', 'ip', 'netns', 'add', host.name], check=True, capture_output=True)
+                subprocess.run(['sudo', 'ip', 'netns', 'attach', host.name, str(pid)], check=True, capture_output=True)
+                info(f"  > Link namespace untuk {host.name} (PID: {pid}) dibuat (via add/attach).\n")
+            except Exception as e_inner:
+                 info(f"  > GAGAL membuat link namespace for {host.name}: {e_inner}\n")
+                 if hasattr(e_inner, 'stderr'):
+                     info(f"  > Stderr: {e_inner.stderr}\n")
+    # --- Selesai ---
 
     info("\n*** Starting iperf servers (Simulating services, Fat-Tree)\n")
     safe_cmd(h4, "iperf -s -u -p 443 -i 1 &")
@@ -198,7 +204,7 @@ def start_traffic(net):
          info("Waiting for switch <-> controller connection...")
          net.waitConnected()
          info("Connection established. Starting pingAll...")
-         net.pingAll(timeout='3') 
+         net.pingAll(timeout='3')
          info("*** Warm-up complete.\n")
     except Exception as e:
          info(f"*** Warning: pingAll or waitConnected failed: {e}\n")
@@ -209,12 +215,12 @@ def start_traffic(net):
 
     info("\n*** Starting client traffic threads (Simulating users, Fat-Tree)\n")
     base_range_min = 0.5
-    base_range_max = 5.0 
+    base_range_max = 5.0
     
     threads = [
-        threading.Thread(target=generate_client_traffic, args=(h1, '10.0.0.4', 443, base_range_min, base_max_bw, 12345), daemon=False),
-        threading.Thread(target=generate_client_traffic, args=(h2, '10.0.0.5', 443, base_range_min, base_max_bw, 67890), daemon=False),
-        threading.Thread(target=generate_client_traffic, args=(h3, '10.0.0.7', 1935, base_range_min, base_max_bw, 98765), daemon=False)
+        threading.Thread(target=generate_client_traffic, args=(h1, '10.0.0.4', 443, base_range_min, base_range_max, 12345), daemon=False),
+        threading.Thread(target=generate_client_traffic, args=(h2, '10.0.0.5', 443, base_range_min, base_range_max, 67890), daemon=False),
+        threading.Thread(target=generate_client_traffic, args=(h3, '10.0.0.7', 1935, base_range_min, base_range_max, 98765), daemon=False)
     ]
     for t in threads:
         t.start()
@@ -224,8 +230,12 @@ def start_traffic(net):
 if __name__ == "__main__":
     setLogLevel("info")
     
-    # [UPDATE] Port diubah ke 6633 (default Ryu)
-    # Ini adalah perbaikan utamanya.
+    # [DIHAPUS] Panggilan 'sudo mn -c' di awal dihapus
+    # Ini yang menyebabkan error 'pkill not found' di sistemmu.
+    # Cleanup yang benar ada di net.stop() di 'finally'.
+    
+    # [PERBAIKAN] Port diubah ke 6633 (default Ryu)
+    # Ini adalah PERBAIKAN UTAMA yang bikin pingAll gagal.
     net = Mininet(topo=FatTreeTopo(k=4),
                   switch=OVSSwitch,
                   controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
@@ -263,6 +273,7 @@ if __name__ == "__main__":
                  host.cmd("killall -9 iperf") 
 
         info("*** Membersihkan link network namespace...\n")
+        # Cleanup namespace di akhir (bagian dari net.stop() juga)
         for i in range(1, 17):
             host_name = f'h{i}'
             cmd = ['sudo', 'ip', 'netns', 'del', host_name]
@@ -273,6 +284,7 @@ if __name__ == "__main__":
                 
         info("*** Menghentikan jaringan Mininet...\n")
         try:
+            # net.stop() adalah cara cleanup yang benar dan aman
             net.stop()
             info("*** Mininet berhenti.\n")
         except Exception as e:
