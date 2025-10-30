@@ -22,12 +22,14 @@ def safe_cmd(node, cmd):
         if stop_event.is_set():
              return None
         try:
-             return node.cmd(cmd, timeout=10)
+             # Timeout sedikit diperpanjang untuk mengakomodasi jaringan yg lebih kompleks
+             return node.cmd(cmd, timeout=15)
         except Exception as e:
              return None 
 
-# ---------------------- ROUTER & TOPOLOGY ----------------------
+# ---------------------- ROUTER (TIDAK DIGUNAKAN DI FAT-TREE) ----------------------
 class LinuxRouter(Node):
+    """Router Linux (Tidak digunakan di FatTreeTopo)."""
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
         safe_cmd(self, "sysctl -w net.ipv4.ip_forward=1")
@@ -36,40 +38,96 @@ class LinuxRouter(Node):
             safe_cmd(self, "sysctl -w net.ipv4.ip_forward=0")
         super(LinuxRouter, self).terminate()
 
-class ComplexTopo(Topo):
-    def build(self):
-        info("*** Membangun Topologi Sesuai v8.0...\n")
-        r1 = self.addNode('r1', cls=LinuxRouter, ip='10.0.0.254/24')
-        s1 = self.addSwitch('s1')
-        s2 = self.addSwitch('s2')
-        s3 = self.addSwitch('s3') 
+# ---------------------- [UPDATE] TOPOLOGI DATA CENTER (FAT-TREE) ----------------------
+class FatTreeTopo(Topo):
+    """
+    Topologi Fat-Tree (k=4) standar untuk Data Center.
+    Menghasilkan:
+    - 4 Core Switches
+    - 8 Aggregation Switches (2 per pod)
+    - 8 Edge Switches (2 per pod)
+    - 16 Hosts (2 per edge switch)
+    Semua host berada di subnet 10.0.0.0/24.
+    """
+    def build(self, k=4):
+        info(f"*** Membangun Topologi Fat-Tree (k={k})...\n")
+        if k % 2 != 0:
+            raise ValueError("k harus angka genap")
         
-        # --- Host Klien ---
-        h1 = self.addHost('h1', ip='10.0.0.1/24', mac='00:00:00:00:00:01', defaultRoute='via 10.0.0.254')
-        h2 = self.addHost('h2', ip='10.0.0.2/24', mac='00:00:00:00:00:02', defaultRoute='via 10.0.0.254')
-        h3 = self.addHost('h3', ip='10.0.0.3/24', mac='00:00:00:00:00:03', defaultRoute='via 10.0.0.254')
+        num_pods = k
+        num_cores = (k // 2) ** 2
+        num_aggs_per_pod = k // 2
+        num_edges_per_pod = k // 2
+        num_hosts_per_edge = k // 2
         
-        # --- Host Server [UPDATE] Ditambahkan MAC ---
-        h4 = self.addHost('h4', ip='10.0.1.1/24', mac='00:00:00:00:00:04', defaultRoute='via 10.0.1.254')
-        h5 = self.addHost('h5', ip='10.0.1.2/24', mac='00:00:00:00:00:05', defaultRoute='via 10.0.1.254')
-        h6 = self.addHost('h6', ip='10.0.1.3/24', mac='00:00:00:00:00:06', defaultRoute='via 10.0.1.254') # MAC h6
-        h7 = self.addHost('h7', ip='10.0.2.1/24', mac='00:00:00:00:00:07', defaultRoute='via 10.0.2.254')
+        bw_core_agg = 20
+        bw_agg_edge = 10
+        bw_edge_host = 5
 
-        # Links Klien (dengan intfName='eth0')
-        self.addLink(h1, s1, bw=5, intfName1='eth0')
-        self.addLink(h2, s1, bw=5, intfName1='eth0')
-        self.addLink(h3, s1, bw=5, intfName1='eth0')
+        # --- Membuat Switch ---
+        cores = []
+        for i in range(num_cores):
+            cores.append(self.addSwitch(f'c{i+1}'))
+
+        aggs = []
+        edges = []
+        for p in range(num_pods):
+            aggs_pod = []
+            for a in range(num_aggs_per_pod):
+                aggs_pod.append(self.addSwitch(f'a{p+1}_{a+1}'))
+            aggs.append(aggs_pod)
+            
+            edges_pod = []
+            for e in range(num_edges_per_pod):
+                edges_pod.append(self.addSwitch(f'e{p+1}_{e+1}'))
+            edges.append(edges_pod)
+
+        info(f"  > Core Switches: {len(cores)}\n")
+        info(f"  > Aggregation Switches: {len(aggs) * len(aggs[0])}\n")
+        info(f"  > Edge Switches: {len(edges) * len(edges[0])}\n")
+
+        # --- Link Core <-> Aggregation ---
+        # Pola standar: Core switch (i,j) terhubung ke Agg switch (p, j) untuk semua pod p
+        # Dalam implementasi linear kami (k=4):
+        # c1 -> a1_1, a2_1, a3_1, a4_1
+        # c2 -> a1_1, a2_1, a3_1, a4_1
+        # c3 -> a1_2, a2_2, a3_2, a4_2
+        # c4 -> a1_2, a2_2, a3_2, a4_2
+        for i in range(num_cores):
+            core_sw = cores[i]
+            agg_index_to_connect = i // (k // 2) 
+            for p in range(num_pods):
+                agg_sw = aggs[p][agg_index_to_connect]
+                self.addLink(core_sw, agg_sw, bw=bw_core_agg)
+
+        # --- Link Aggregation <-> Edge ---
+        # Di setiap pod p, setiap Agg switch (a_p_i) terhubung ke semua Edge switch (e_p_j)
+        for p in range(num_pods):
+            for a in range(num_aggs_per_pod):
+                for e in range(num_edges_per_pod):
+                    self.addLink(aggs[p][a], edges[p][e], bw=bw_agg_edge)
+
+        # --- Link Edge <-> Hosts ---
+        host_ip_counter = 1
+        host_mac_counter = 1
+        for p in range(num_pods):
+            for e in range(num_edges_per_pod):
+                edge_sw = edges[p][e]
+                for h in range(num_hosts_per_edge):
+                    host_ip = f'10.0.0.{host_ip_counter}/24'
+                    # Format MAC: 00:00:00:00:00:XX
+                    host_mac = f'00:00:00:00:00:{host_mac_counter:02x}' 
+                    host_name = f'h{host_ip_counter}'
+                    
+                    # [PENTING] defaultRoute dihapus. Controller SDN yang menangani routing.
+                    host = self.addHost(host_name, ip=host_ip, mac=host_mac, intfName1='eth0')
+                    
+                    self.addLink(edge_sw, host, bw=bw_edge_host)
+                    
+                    host_ip_counter += 1
+                    host_mac_counter += 1
         
-        # Links Server [UPDATE] Ditambahkan intfName='eth0' untuk konsistensi
-        self.addLink(h4, s2, bw=10, delay='32ms', loss=2, intfName1='eth0')
-        self.addLink(h5, s2, bw=10, delay='47ms', loss=2, intfName1='eth0')
-        self.addLink(h6, s2, bw=10, intfName1='eth0')
-        self.addLink(h7, s3, bw=2, delay='50ms', loss=2, intfName1='eth0')
-        
-        # Link router
-        self.addLink(r1, s1, intfName1='r1-eth1', params1={'ip': '10.0.0.254/24'})
-        self.addLink(r1, s2, intfName1='r1-eth2', params1={'ip': '10.0.1.254/24'})
-        self.addLink(r1, s3, intfName1='r1-eth3', params1={'ip': '10.0.2.254/24'})
+        info(f"  > Total Hosts: {host_ip_counter - 1}\n")
 
 
 # ---------------------- RANDOM TRAFFIC (SAMA) ----------------------
@@ -116,20 +174,25 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, s
             if stop_event.is_set(): break
             stop_event.wait(1) 
 
-# ---------------------- START TRAFFIC (SAMA) ----------------------
+# ---------------------- START TRAFFIC [UPDATE] ----------------------
 def start_traffic(net):
+    # Klien (h1-h3) dan Server (h4, h5, h7) tetap sama
+    # IP mereka yang berubah di topologi baru
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
     h4, h5, h7 = net.get('h4', 'h5', 'h7') 
 
-    # --- Membuat link namespace (SAMA, TETAP DIPERLUKAN) ---
+    # --- Membuat link namespace ---
     info("\n*** Membuat link network namespace (untuk collector.py)...\n")
     subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=True)
-    # [UPDATE] Link namespace untuk SEMUA host, termasuk server
-    all_hosts = [net.get(f'h{i}') for i in range(1, 8)]
+    
+    # [UPDATE] Link namespace untuk SEMUA 16 host
+    all_hosts = [net.get(f'h{i}') for i in range(1, 17)] 
+    
     for host in all_hosts:
         if not host: continue
         try:
             pid = host.pid
+            # Perintah 'ip netns attach' lebih aman daripada 'ln -s'
             cmd = ['sudo', 'ip', 'netns', 'attach', host.name, str(pid)]
             subprocess.run(cmd, check=True, capture_output=True, text=True)
             info(f"  > Link namespace untuk {host.name} (PID: {pid}) dibuat.\n")
@@ -139,7 +202,8 @@ def start_traffic(net):
                 info(f"  > Stderr: {e.stderr}\n")
     # --- Selesai ---
 
-    info("\n*** Starting iperf servers (Simulating services, v8.0)\n")
+    info("\n*** Starting iperf servers (Simulating services, Fat-Tree)\n")
+    # Server h4, h5, h7 menjalankan iperf
     safe_cmd(h4, "iperf -s -u -p 443 -i 1 &")
     safe_cmd(h5, "iperf -s -u -p 443 -i 1 &")
     safe_cmd(h7, "iperf -s -u -p 1935 -i 1 &")
@@ -150,7 +214,8 @@ def start_traffic(net):
          info("Waiting for switch <-> controller connection...")
          net.waitConnected()
          info("Connection established. Starting pingAll...")
-         net.pingAll(timeout='1') 
+         # pingAll akan menguji konektivitas L2/L3 yang disediakan controller
+         net.pingAll(timeout='3') # Timeout sedikit lebih lama untuk 16 host
          info("*** Warm-up complete.\n")
     except Exception as e:
          info(f"*** Warning: pingAll or waitConnected failed: {e}\n")
@@ -159,25 +224,33 @@ def start_traffic(net):
     info("💡 TELEMETRI LIVE (dari server iperf) akan muncul di bawah ini:\n")
     info("-----------------------------------------------------------\n")
 
-    info("\n*** Starting client traffic threads (Simulating users, v8.0)\n")
+    info("\n*** Starting client traffic threads (Simulating users, Fat-Tree)\n")
     base_range_min = 0.5
-    base_range_max = 5.0
+    base_range_max = 5.0 # Sesuai dengan bw host (5)
+    
+    # [UPDATE] IP Server diubah ke IP baru di topologi Fat-Tree
+    # h1 (10.0.0.1) -> h4 (10.0.0.4)
+    # h2 (10.0.0.2) -> h5 (10.0.0.5)
+    # h3 (10.0.0.3) -> h7 (10.0.0.7)
     threads = [
-        threading.Thread(target=generate_client_traffic, args=(h1, '10.0.1.1', 443, base_range_min, base_range_max, 12345), daemon=False),
-        threading.Thread(target=generate_client_traffic, args=(h2, '10.0.1.2', 443, base_range_min, base_range_max, 67890), daemon=False),
-        threading.Thread(target=generate_client_traffic, args=(h3, '10.0.2.1', 1935, base_range_min, base_range_max, 98765), daemon=False)
+        threading.Thread(target=generate_client_traffic, args=(h1, '10.0.0.4', 443, base_range_min, base_range_max, 12345), daemon=False),
+        threading.Thread(target=generate_client_traffic, args=(h2, '10.0.0.5', 443, base_range_min, base_range_max, 67890), daemon=False),
+        threading.Thread(target=generate_client_traffic, args=(h3, '10.0.0.7', 1935, base_range_min, base_range_max, 98765), daemon=False)
     ]
     for t in threads:
         t.start()
     return threads
 
-# ---------------------- MAIN (SAMA) ----------------------
+# ---------------------- MAIN [UPDATE] ----------------------
 if __name__ == "__main__":
     setLogLevel("info")
-    net = Mininet(topo=ComplexTopo(),
+    
+    # [UPDATE] Menggunakan FatTreeTopo(k=4)
+    net = Mininet(topo=FatTreeTopo(k=4),
                   switch=OVSSwitch,
                   controller=lambda name: RemoteController(name, ip="127.0.0.1", port=6633),
-                  link=TCLink)
+                  link=TCLink,
+                  autoSetMacs=True) # Biarkan Mininet menangani MAC jika kita tidak set manual
 
     info("*** Memulai Jaringan Mininet...\n")
     net.start()
@@ -204,20 +277,22 @@ if __name__ == "__main__":
                 t.join(timeout=5) 
             
         info("*** Membersihkan proses iperf yang mungkin tersisa...\n")
-        for i in range(1, 8):
+        # [UPDATE] Bersihkan semua 16 host
+        for i in range(1, 17):
             host = net.get(f'h{i}')
             if host:
                  host.cmd("killall -9 iperf") 
 
         info("*** Membersihkan link network namespace...\n")
-        # [UPDATE] Hapus link untuk SEMUA host
-        for i in range(1, 8):
+        # [UPDATE] Hapus link untuk semua 16 host
+        for i in range(1, 17):
             host_name = f'h{i}'
             cmd = ['sudo', 'ip', 'netns', 'del', host_name]
             try:
                 subprocess.run(cmd, check=False, capture_output=True)
             except Exception:
                 pass 
+                
         info("*** Menghentikan jaringan Mininet...\n")
         try:
             net.stop()
