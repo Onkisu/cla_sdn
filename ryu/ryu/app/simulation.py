@@ -162,7 +162,7 @@ def start_traffic(net):
     h1, h2, h3 = net.get('h1', 'h2', 'h3')
     h4, h5, h7 = net.get('h4', 'h5', 'h7') 
 
-    # --- Membuat link namespace ---
+    # --- Membuat link network namespace ---
     info("\n*** Membuat link network namespace (untuk collector.py)...\n")
     subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=True)
     
@@ -227,14 +227,16 @@ def start_traffic(net):
         t.start()
     return threads
 
-# ---------------------- MAIN [UPDATE FINAL] ----------------------
+# ---------------------- MAIN [FIX FINAL 100%] ----------------------
 if __name__ == "__main__":
     setLogLevel("info")
     
-    # [PERBAIKAN FINAL] Ini cara yang BENAR buat maksa OpenFlow 1.3
-    # Kita ngasih tau Mininet buat pake 'lambda' ini setiap kali bikin switch
-    # Lambda ini manggil OVSSwitch DAN ngasih parameter 'protocols'
-    switch_proto = lambda name: OVSSwitch(name, protocols='OpenFlow13')
+    # [PERBAIKAN FINAL 100%]
+    # Lambda ini sekarang nerima 'name' dan 'kwargs' (sisa argumen)
+    # Dia nerusin 'name' dan 'kwargs' ke OVSSwitch, DAN nambahin 'protocols'.
+    switch_proto = lambda name, **kwargs: OVSSwitch(
+        name, protocols='OpenFlow13', **kwargs
+    )
 
     net = Mininet(topo=FatTreeTopo(k=4),
                   switch=switch_proto, # <-- [INI PERBAIKANNYA]
