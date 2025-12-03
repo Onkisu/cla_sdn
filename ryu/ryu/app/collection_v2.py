@@ -10,7 +10,7 @@ import threading
 # Import konfigurasi bersama
 from shared_config import DB_CONN, COLLECT_INTERVAL, HOSTS_TO_MONITOR, HOST_INFO, APP_TO_CATEGORY
 
-# State untuk delta calculation
+# ---------------------- STATE GLOBAL ----------------------
 last_tx_bytes = defaultdict(int)
 last_rx_bytes = defaultdict(int)
 last_tx_pkts  = defaultdict(int)
@@ -29,7 +29,6 @@ def run_ns_cmd(host, cmd, timeout=4):
     except:
         return ""
 
-
 # ------------------------------------------------------------
 # Parsing statistik interface (TX/RX bytes & packets)
 # ------------------------------------------------------------
@@ -38,11 +37,9 @@ def get_iface_stats(host):
     Return: (tx_bytes, tx_pkts, rx_bytes, rx_pkts) ATAU None jika gagal
     """
     out = run_ns_cmd(host, ['ip', '-s', 'link', 'show', 'eth0'])
-
     if not out:
         return None
 
-    # Cari TX baris data
     tx_match = re.search(r'TX:.*\n\s*(\d+)\s+(\d+)', out)
     rx_match = re.search(r'RX:.*\n\s*(\d+)\s+(\d+)', out)
 
@@ -58,7 +55,6 @@ def get_iface_stats(host):
     except:
         return None
 
-
 # ------------------------------------------------------------
 # Ambil latency via ping (aman, non-blocking)
 # ------------------------------------------------------------
@@ -70,15 +66,12 @@ def get_latency(host, dst_ip):
     if not out:
         return 0.0
 
-    # Format Linux: rtt min/avg/max/mdev = x/x/x/x ms
     match = re.search(r'=\s*([\d.]+)/([\d.]+)/([\d.]+)/', out)
     if match:
         avg = float(match.group(2))
         return avg
 
     return 0.0
-
-
 
 # ------------------------------------------------------------
 # Insert ke PostgreSQL
@@ -113,7 +106,6 @@ def insert_db(rows, conn):
         if cur: cur.close()
 
     return conn
-
 
 # ------------------------------------------------------------
 # LOOP COLLECTOR UTAMA
@@ -170,8 +162,8 @@ def run_collector():
             last_tx_pkts[host]  = cur_tx_pkts
             last_rx_pkts[host]  = cur_rx_pkts
 
-            # Hanya insert jika ada trafik
-            if d_tx_b > 0 or d_rx_b > 0:
+            # ---------------- VOIP-FRIENDLY: insert meski delta 0 ----------------
+            if d_tx_b > 0 or d_rx_b > 0 or category == 'voip':
                 print(f"[{host}] {app} TX:{d_tx_b}B/{d_tx_p}pkts  RX:{d_rx_b}B/{d_rx_p}pkts  Lat:{latency:.2f}ms")
 
                 rows.append((
@@ -180,6 +172,10 @@ def run_collector():
                     d_tx_b, d_rx_b, d_tx_p, d_rx_p,
                     latency, category
                 ))
+
+                # Debug tambahan untuk VoIP
+                if category == 'voip' and d_tx_b == 0 and d_rx_b == 0:
+                    print(f"[DEBUG] {host} VoIP traffic very low, forced insert to DB.")
 
         # Commit ke DB
         if rows:
@@ -192,7 +188,6 @@ def run_collector():
     if conn:
         conn.close()
     print("\n*** Collector STOPPED ***\n")
-
 
 # ------------------------------------------------------------
 # MAIN
