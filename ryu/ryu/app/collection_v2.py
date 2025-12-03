@@ -67,15 +67,17 @@ def get_latency(host, dst_ip):
         return 0.0
 
     out = run_ns_cmd(host, ['ping', '-c', '2', '-W', '1', dst_ip])
-
     if not out:
         return 0.0
 
-    match = re.search(r'avg = ([\d.]+)', out)
+    # Format Linux: rtt min/avg/max/mdev = x/x/x/x ms
+    match = re.search(r'=\s*([\d.]+)/([\d.]+)/([\d.]+)/', out)
     if match:
-        return float(match.group(1))
-    
+        avg = float(match.group(2))
+        return avg
+
     return 0.0
+
 
 
 # ------------------------------------------------------------
