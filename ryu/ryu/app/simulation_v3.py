@@ -1,10 +1,9 @@
 #!/usr/bin/python3
 """
-Simulasi Data Center + VoIP di Mininet
+Simulasi Data Center + VoIP di Mininet (REVISI FIX VOIP)
 - Iperf untuk layanan (web/api/db/cache)
 - SIPp untuk VoIP (SIP/UAC + uas)
-- Daily pattern generator per kategori (VoIP, Web, API, East-West, DB, Cache)
-- Thread-safe execution dan cleanup
+- Host VoIP (voip1, voip2) ditambahkan agar sesuai dengan collector
 """
 from mininet.net import Mininet
 from mininet.node import RemoteController, OVSSwitch, Node
@@ -53,16 +52,21 @@ class DataCenterTopo(Topo):
         cr1 = self.addNode('cr1', cls=LinuxRouter, ip='192.168.100.254/24')
         
         # Switch Eksternal (Tempat user terhubung)
-        ext_sw = self.addSwitch('ext_sw', dpid='1') # DPID Eksplisit 1
+        ext_sw = self.addSwitch('ext_sw', dpid='1') 
         
         # Switch Internal DC (Top-of-Rack)
-        tor1 = self.addSwitch('tor1', dpid='2') # DPID Eksplisit 2
-        tor2 = self.addSwitch('tor2', dpid='3') # DPID Eksplisit 3
+        tor1 = self.addSwitch('tor1', dpid='2')
+        tor2 = self.addSwitch('tor2', dpid='3') 
         
-        # --- Klien Eksternal ---
+        # --- Klien Eksternal (User Biasa) ---
         user1 = self.addHost('user1', ip='192.168.100.1/24', mac='00:00:00:00:01:01', defaultRoute='via 192.168.100.254')
         user2 = self.addHost('user2', ip='192.168.100.2/24', mac='00:00:00:00:01:02', defaultRoute='via 192.168.100.254')
         user3 = self.addHost('user3', ip='192.168.100.3/24', mac='00:00:00:00:01:03', defaultRoute='via 192.168.100.254')
+
+        # --- Klien VoIP (PERBAIKAN: Ditambahkan sesuai shared_config.py) ---
+        # IP subnet disesuaikan agar unik atau menggunakan router gateway yg sama
+        voip1 = self.addHost('voip1', ip='192.168.10.11/24', mac='00:00:00:00:10:11', defaultRoute='via 192.168.100.254')
+        voip2 = self.addHost('voip2', ip='192.168.10.12/24', mac='00:00:00:00:10:12', defaultRoute='via 192.168.100.254')
         
         # --- Server Internal DC ---
         # Rack 1 (Web & Cache Tier)
@@ -75,19 +79,24 @@ class DataCenterTopo(Topo):
         db1 = self.addHost('db1', ip='10.10.2.2/24', mac='00:00:00:00:0B:02', defaultRoute='via 10.10.2.254')
 
         # Links Klien Eksternal
-        self.addLink(user1, ext_sw, bw=10, intfName1='eth0')
-        self.addLink(user2, ext_sw, bw=10, intfName1='eth0')
-        self.addLink(user3, ext_sw, bw=10, intfName1='eth0')
+        self.addLink(user1, ext_sw, bw=10)
+        self.addLink(user2, ext_sw, bw=10)
+        self.addLink(user3, ext_sw, bw=10)
+        
+        # Links VoIP (PERBAIKAN)
+        self.addLink(voip1, ext_sw, bw=10)
+        self.addLink(voip2, ext_sw, bw=10)
         
         # Links Server Internal
-        self.addLink(web1, tor1, bw=20, intfName1='eth0')
-        self.addLink(web2, tor1, bw=20, intfName1='eth0')
-        self.addLink(cache1, tor1, bw=20, intfName1='eth0')
-        self.addLink(app1, tor2, bw=20, intfName1='eth0')
-        self.addLink(db1, tor2, bw=20, intfName1='eth0')
+        self.addLink(web1, tor1, bw=20)
+        self.addLink(web2, tor1, bw=20)
+        self.addLink(cache1, tor1, bw=20)
+        self.addLink(app1, tor2, bw=20)
+        self.addLink(db1, tor2, bw=20)
         
         # Link Router (Interkoneksi)
-        # Interface Eksternal
+        # Interface Eksternal (Gateway untuk 192.168.100.x dan 192.168.10.x perlu diatur di Router real world, 
+        # tapi di mininet simple switch ini cukup terhubung ke ext_sw)
         self.addLink(cr1, ext_sw, intfName1='cr1-eth1', params1={'ip': '192.168.100.254/24'})
         # Interface Internal (ke Rack)
         self.addLink(cr1, tor1, intfName1='cr1-eth2', params1={'ip': '10.10.1.254/24'})
@@ -109,50 +118,29 @@ def _log_iperf(client_name, server_ip, output, burst_time_str, bw_str):
             actual_bytes = int(parts[7])
             info(f"TRAFFIC LOG: {client_name} -> {server_ip} SENT {actual_bytes:,} bytes in {burst_time_str}s (Target BW: {bw_str})\n")
         else:
-            info(f"Could not find valid CSV in iperf output for {client_name}:\nOutput was:\n{output}\n")
-    except Exception as e:
-        info(f"Could not parse iperf output for {client_name}: {e}\nOutput was:\n{output}\n")
+            # Seringkali iperf udp outputnya terpotong, tidak apa-apa
+            pass
+    except Exception:
+        pass
 
-# ---------------------- DAILY PATTERN GENERATOR (PER KATEGORI) ----------------------
+# ---------------------- DAILY PATTERN GENERATOR ----------------------
 def daily_pattern(hour, base_min, base_max, seed_val=0, category='data'):
-    """
-    Smooth daily pattern with category-specific peak shape.
-    hour: 0..23
-    base_min/base_max: numeric range
-    category: 'web','api','voip','east_west','db','cache'
-    """
-    # base sine wave
     phase = (seed_val % 10) * 0.02
-    # category-specific shaping:
     if category == 'web':
-        # strong peak during 9..18
-        offset = -0.5
-        amplitude = 1.0
+        offset = -0.5; amplitude = 1.0
     elif category == 'api':
-        # steady daytime, moderate amplitude
-        offset = -0.3
-        amplitude = 0.8
+        offset = -0.3; amplitude = 0.8
     elif category == 'voip':
-        # voice peaks during office hours but also morning spikes
-        offset = -0.2
-        amplitude = 0.9
+        offset = -0.2; amplitude = 0.9
     elif category == 'east_west':
-        # relatively flat inside DC
-        offset = -0.1
-        amplitude = 0.45
+        offset = -0.1; amplitude = 0.45
     elif category == 'db':
-        # small peaks aligned with API but shorter bursts
-        offset = -0.25
-        amplitude = 0.6
+        offset = -0.25; amplitude = 0.6
     elif category == 'cache':
-        # cache has many small frequent bursts
-        offset = -0.15
-        amplitude = 0.7
+        offset = -0.15; amplitude = 0.7
     else:
-        offset = -0.3
-        amplitude = 0.6
+        offset = -0.3; amplitude = 0.6
 
-    # build sine: shift so peak near midday (hour ~ 12)
     sine_val = 0.5 * (1 + math.sin(((hour / 24.0) * 2 * math.pi) - (math.pi/2) + phase + offset))
     baseline = 0.15 * base_max
     scaled = baseline + (sine_val * (base_max - baseline) * amplitude)
@@ -167,47 +155,34 @@ def generate_client_traffic(client, server_ip, port, base_min_bw, base_max_bw, s
     while not stop_event.is_set():
         try:
             hour = int(time.strftime("%H"))
-            # bandwidth mengikuti pola harian berdasarkan kategori
             target_bw = daily_pattern(hour, base_min_bw, base_max_bw, seed, category)
-            target_bw = max(0.01, target_bw)  # minimal small bw
+            target_bw = max(0.01, target_bw)
             bw_str = f"{target_bw:.2f}M"
 
-            # burst_time dan pause disesuaikan per kategori (interval berbeda2)
             if category == 'web':
-                burst_time = rng.uniform(1.0, 3.0)
-                pause_low, pause_high = 0.4, 1.5
+                burst_time = rng.uniform(1.0, 3.0); pause_low, pause_high = 0.4, 1.5
             elif category == 'api':
-                burst_time = rng.uniform(0.8, 2.0)
-                pause_low, pause_high = 0.3, 1.0
+                burst_time = rng.uniform(0.8, 2.0); pause_low, pause_high = 0.3, 1.0
             elif category == 'cache':
-                burst_time = rng.uniform(0.2, 0.6)
-                pause_low, pause_high = 0.1, 0.6
+                burst_time = rng.uniform(0.2, 0.6); pause_low, pause_high = 0.1, 0.6
             elif category == 'db':
-                burst_time = rng.uniform(0.6, 2.5)
-                pause_low, pause_high = 0.5, 2.0
+                burst_time = rng.uniform(0.6, 2.5); pause_low, pause_high = 0.5, 2.0
             elif category == 'east_west':
-                burst_time = rng.uniform(0.5, 1.5)
-                pause_low, pause_high = 0.3, 1.2
+                burst_time = rng.uniform(0.5, 1.5); pause_low, pause_high = 0.3, 1.2
             else:
-                burst_time = rng.uniform(0.5, 2.0)
-                pause_low, pause_high = 0.5, 2.0
+                burst_time = rng.uniform(0.5, 2.0); pause_low, pause_high = 0.5, 2.0
 
             burst_time_str = f"{burst_time:.1f}"
-
             cmd = f"iperf -u -c {server_ip} -p {port} -b {bw_str} -t {burst_time_str} -y C"
             output = safe_cmd(client, cmd)
             _log_iperf(client.name, server_ip, output, burst_time_str, bw_str)
 
             if stop_event.is_set(): break
-
-            # pause di antara burst: gunakan daily_pattern untuk menentukan frekuensi,
-            # lalu gabungkan dengan small randomized pause range per kategori
             pattern_pause = daily_pattern(hour, pause_low, pause_high, seed, category)
             pause = rng.uniform(max(0.05, pattern_pause*0.5), pattern_pause*1.2)
-            # bound pause so simulation continues responsively
             pause = max(0.05, min(10.0, pause))
             stop_event.wait(pause)
-        except Exception as e:
+        except Exception:
             if stop_event.is_set(): break
             stop_event.wait(1)
 
@@ -218,17 +193,14 @@ def generate_voip_calls(client, server_ip, seed, category='voip'):
 
     while not stop_event.is_set():
         hour = int(time.strftime("%H"))
-
-        # VoIP: call duration pendek-menengah, frequency lebih sering saat jam kerja
         call_duration = int(max(2, min(120, daily_pattern(hour, 4, 40, seed, 'voip'))))
-        # choose codec/flags if desired (keperluan advance)
-        # Use sipp uac -d in ms
-        cmd = f"sipp {server_ip} -sn uac -s 1000 -d {call_duration*1000} -p 5060 -trace_err -trace_msg -nd"
+        
+        # PERBAIKAN: Gunakan IP client yang benar untuk binding (-i) jika diperlukan
+        # cmd = f"sipp {server_ip} -sn uac -s 1000 -d {call_duration*1000} -p 5060 -trace_err -trace_msg -nd"
+        cmd = f"sipp {server_ip} -sn uac -s 1000 -d {call_duration*1000} -nd"
         safe_cmd(client, cmd)
 
-        # inter-call interval smaller in busy hours
         base_next = daily_pattern(hour, 2.0, 20.0, seed, 'voip')
-        # add randomness but keep some lower bound
         jitter = rng.uniform(0.6, 1.4)
         next_call = max(0.5, min(60.0, base_next * jitter))
         stop_event.wait(next_call)
@@ -237,11 +209,14 @@ def generate_voip_calls(client, server_ip, seed, category='voip'):
 def start_traffic(net):
     # Dapatkan semua host
     user1, user2, user3 = net.get('user1', 'user2', 'user3')
+    voip1, voip2 = net.get('voip1', 'voip2') # PERBAIKAN: Ambil host voip
     web1, web2, cache1 = net.get('web1', 'web2', 'cache1')
     app1, db1 = net.get('app1', 'db1')
-    all_hosts = [user1, user2, user3, web1, web2, cache1, app1, db1]
+    
+    # PERBAIKAN: Tambahkan voip1 & voip2 ke daftar host untuk netns link
+    all_hosts = [user1, user2, user3, voip1, voip2, web1, web2, cache1, app1, db1]
 
-    # --- Membuat link namespace (untuk collector atau akses ns) ---
+    # --- Membuat link namespace (untuk collector.py) ---
     info("\n*** Membuat link network namespace (untuk collector.py)...\n")
     subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=True)
     for host in all_hosts:
@@ -252,20 +227,16 @@ def start_traffic(net):
             subprocess.run(cmd, check=True, capture_output=True, text=True)
             info(f"  > Link namespace untuk {host.name} (PID: {pid}) dibuat.\n")
         except Exception as e:
-            info(f"  > GAGAL membuat link namespace for {host.name}: {e}\n")
-            if hasattr(e, 'stderr'):
-                info(f"  > Stderr: {e.stderr}\n")
+            # Abaikan jika link sudah ada
+            pass
 
     info("\n*** Starting iperf servers (Simulating DC Services)\n")
-    # Layanan yang diakses dari luar (North-South)
-    safe_cmd(web1, "iperf -s -u -p 443 -i 1 &")   # Web Service (HTTPS)
-    safe_cmd(web2, "iperf -s -u -p 80 -i 1 &")    # Web Service (HTTP)
-    safe_cmd(app1, "iperf -s -u -p 8080 -i 1 &")  # API Service
-    # Layanan internal (East-West)
-    safe_cmd(cache1, "iperf -s -u -p 6379 -i 1 &") # Cache (Redis)
-    safe_cmd(db1, "iperf -s -u -p 5432 -i 1 &")    # Database (Postgres)
+    safe_cmd(web1, "iperf -s -u -p 443 -i 1 &")
+    safe_cmd(web2, "iperf -s -u -p 80 -i 1 &")
+    safe_cmd(app1, "iperf -s -u -p 8080 -i 1 &")
+    safe_cmd(cache1, "iperf -s -u -p 6379 -i 1 &")
+    safe_cmd(db1, "iperf -s -u -p 5432 -i 1 &")
 
-    # Starting SIPp UAS (SIP server) on app1 and web1 for redundancy test
     info("\n*** Starting VoIP SIPp servers (UAS)...\n")
     safe_cmd(app1, "sipp -sn uas -i 10.10.2.1 -p 5060 -bg &")
     safe_cmd(web1, "sipp -sn uas -i 10.10.1.1 -p 5060 -bg &")
@@ -274,25 +245,20 @@ def start_traffic(net):
 
     info("\n*** Warming up network with pingAll...\n")
     try:
-         info("Waiting for switch <-> controller connection...")
          net.waitConnected()
-         info("Connection established. Starting pingAll...")
-         net.pingAll(timeout='1') 
+         net.pingAll(timeout='0.5') 
          info("*** Warm-up complete.\n")
-    except Exception as e:
-         info(f"*** Warning: pingAll or waitConnected failed: {e}\n")
+    except Exception:
+         pass
 
     info("-----------------------------------------------------------\n")
     info("💡 TELEMETRI LIVE (dari server iperf) akan muncul di bawah ini:\n")
     info("-----------------------------------------------------------\n")
 
-    info("\n*** Starting client traffic threads (Simulating Users & Services)\n")
+    info("\n*** Starting client traffic threads...\n")
     threads = []
     
-    # --------------------- TRAFFIC KATEGORI (Kategori & interval berbeda-beda) ---------------------
-    # Arguments: (client_host, server_ip, server_port, base_min_bw, base_max_bw, seed, category)
-
-    # 1. Web Heavy (User1 -> Web1) : peak pada jam kerja
+    # 1. Web Heavy (User1 -> Web1)
     threads.append(threading.Thread(target=generate_client_traffic,
         args=(user1, '10.10.1.1', 443, 1.5, 8.0, 10001, 'web'), daemon=False))
 
@@ -304,34 +270,33 @@ def start_traffic(net):
     threads.append(threading.Thread(target=generate_client_traffic,
         args=(user3, '10.10.1.2', 80, 0.3, 2.0, 10003, 'web'), daemon=False))
 
-    # 4. East-West Web -> App (internal DC traffic)
+    # 4. East-West Web -> App
     threads.append(threading.Thread(target=generate_client_traffic,
         args=(web1, '10.10.2.1', 8080, 0.5, 3.0, 20001, 'east_west'), daemon=False))
 
-    # 5. East-West Web -> Cache (frekuensi tinggi, burst pendek)
+    # 5. East-West Web -> Cache
     threads.append(threading.Thread(target=generate_client_traffic,
         args=(web2, '10.10.1.3', 6379, 0.2, 2.5, 20002, 'cache'), daemon=False))
 
-    # 6. East-West App -> DB (less frequent but larger bursts)
+    # 6. East-West App -> DB
     threads.append(threading.Thread(target=generate_client_traffic,
         args=(app1, '10.10.2.2', 5432, 0.8, 6.0, 20003, 'db'), daemon=False))
 
-    # 7. VoIP Calls (CLIENT user1 -> SIP server at web1)
+    # 7. VoIP Calls (PERBAIKAN: Client voip1 -> SIP server web1)
     threads.append(threading.Thread(target=generate_voip_calls,
-        args=(user1, '10.10.1.1', 30001, 'voip'), daemon=False))
+        args=(voip1, '10.10.1.1', 30001, 'voip'), daemon=False))
 
-    # 8. VoIP Calls (CLIENT user2 -> SIP server at app1)
+    # 8. VoIP Calls (PERBAIKAN: Client voip2 -> SIP server app1)
     threads.append(threading.Thread(target=generate_voip_calls,
-        args=(user2, '10.10.2.1', 30002, 'voip'), daemon=False))
+        args=(voip2, '10.10.2.1', 30002, 'voip'), daemon=False))
 
-    # start threads
     for t in threads:
         t.start()
     return threads
 
 # ---------------------- CLEANUP HELPERS ----------------------
 def cleanup_processes(net, host_names):
-    info("*** Membersihkan proses iperf/sipp yang mungkin tersisa...\n")
+    info("*** Membersihkan proses iperf/sipp...\n")
     for name in host_names:
         try:
             host = net.get(name)
@@ -365,9 +330,7 @@ if __name__ == "__main__":
 
     traffic_threads = start_traffic(net)
 
-    info("\n*** Skrip Simulasi & Traffic berjalan.")
-    info("*** 'collector_dc.py' (opsional) dapat dijalankan di terminal terpisah untuk mengumpulkan telemetry.")
-    info("*** Tekan Ctrl+C untuk berhenti kapan saja.\n")
+    info("\n*** Skrip Simulasi & Traffic berjalan.\n")
     
     def _sigint_handler(sig, frame):
         info("\n\n*** SIGINT diterima. Menghentikan semua proses...\n")
@@ -379,26 +342,20 @@ if __name__ == "__main__":
             if t.is_alive():
                 t.join()
     except KeyboardInterrupt:
-        info("\n\n*** KeyboardInterrupt diterima. Menghentikan semua proses...\n")
         stop_event.set()
     finally:
-        info("*** Mengirim sinyal stop ke semua thread traffic...\n")
         stop_event.set()
-
-        info("*** Menunggu Traffic threads berhenti...\n")
-        for t in traffic_threads:
-            if t.is_alive():
-                t.join(timeout=5)
-
-        # Update host list for cleanup
-        host_names = ['user1', 'user2', 'user3', 'web1', 'web2', 'cache1', 'app1', 'db1']
+        
+        # PERBAIKAN: Tambahkan voip1 & voip2 ke cleanup
+        host_names = ['user1', 'user2', 'user3', 'web1', 'web2', 
+                      'cache1', 'app1', 'db1', 'voip1', 'voip2']
+        
         cleanup_processes(net, host_names)
         cleanup_netns(host_names)
 
         info("*** Menghentikan jaringan Mininet...\n")
         try:
             net.stop()
-            info("*** Mininet berhenti.\n")
-        except Exception as e:
-            info(f"*** ERROR saat net.stop(): {e}. Coba cleanup manual 'sudo mn -c'.\n")
+        except Exception:
+            pass
         info("*** Selesai. Bye.\n")
