@@ -79,10 +79,10 @@ def insert_db(rows, conn):
         
         cur = conn.cursor()
         query = """
-            INSERT INTO network_traffic 
-            (timestamp, tenant_id, source_host, app_name, protocol, 
-             source_ip, dest_ip, source_mac, dest_mac,
-             tx_bytes, rx_bytes, tx_pkts, rx_pkts, latency, category)
+            INSERT INTO traffic.flow_stats 
+            (timestamp, dpid, host, app, proto, 
+             src_ip, dst_ip, src_mac, dst_mac,
+             bytes_tx, bytes_rx, pkts_tx, pkts_rx, latency_ms, category)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         cur.executemany(query, rows)
