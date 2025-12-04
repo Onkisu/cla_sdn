@@ -63,10 +63,11 @@ class DataCenterTopo(Topo):
         user2 = self.addHost('user2', ip='192.168.100.2/24', mac='00:00:00:00:01:02', defaultRoute='via 192.168.100.254')
         user3 = self.addHost('user3', ip='192.168.100.3/24', mac='00:00:00:00:01:03', defaultRoute='via 192.168.100.254')
 
-        # --- Klien VoIP (PERBAIKAN: Ditambahkan sesuai shared_config.py) ---
-        # IP subnet disesuaikan agar unik atau menggunakan router gateway yg sama
-        voip1 = self.addHost('voip1', ip='192.168.10.11/24', mac='00:00:00:00:10:11', defaultRoute='via 192.168.100.254')
-        voip2 = self.addHost('voip2', ip='192.168.10.12/24', mac='00:00:00:00:10:12', defaultRoute='via 192.168.100.254')
+        
+        # --- Klien VoIP (PERBAIKAN: Gateway disesuaikan ke subnet 10.x) ---
+        # Ganti defaultRoute dari 192.168.100.254 menjadi 192.168.10.254
+        voip1 = self.addHost('voip1', ip='192.168.10.11/24', mac='00:00:00:00:10:11', defaultRoute='via 192.168.10.254')
+        voip2 = self.addHost('voip2', ip='192.168.10.12/24', mac='00:00:00:00:10:12', defaultRoute='via 192.168.10.254')
         
         # --- Server Internal DC ---
         # Rack 1 (Web & Cache Tier)
@@ -212,6 +213,14 @@ def start_traffic(net):
     voip1, voip2 = net.get('voip1', 'voip2') # PERBAIKAN: Ambil host voip
     web1, web2, cache1 = net.get('web1', 'web2', 'cache1')
     app1, db1 = net.get('app1', 'db1')
+
+    cr1 = net.get('cr1') # <--- AMBIL OBJEK ROUTER
+
+    # === FIX ROUTING VOIP ===
+    info("\n*** Menambahkan Gateway untuk VoIP (192.168.10.254) di Router cr1...\n")
+    # cr1-eth1 adalah interface yang terhubung ke ext_sw (tempat user & voip berada)
+    safe_cmd(cr1, "ip addr add 192.168.10.254/24 dev cr1-eth1")
+    # ========================
     
     # PERBAIKAN: Tambahkan voip1 & voip2 ke daftar host untuk netns link
     all_hosts = [user1, user2, user3, voip1, voip2, web1, web2, cache1, app1, db1]
