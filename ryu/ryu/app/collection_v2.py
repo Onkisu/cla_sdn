@@ -9,178 +9,88 @@ from collections import defaultdict
 from datetime import datetime
 import threading
 
-# Import konfigurasi
 try:
     from shared_config import DB_CONN, COLLECT_INTERVAL, HOSTS_TO_MONITOR, HOST_INFO, APP_TO_CATEGORY
 except ImportError:
-    print("[CRITICAL] File shared_config.py tidak ditemukan!")
+    print("[CRITICAL] Config missing!")
     sys.exit(1)
 
-# ---------------------- STATE GLOBAL ----------------------
-last_tx_bytes = defaultdict(int)
-last_rx_bytes = defaultdict(int)
-last_tx_pkts  = defaultdict(int)
-last_rx_pkts  = defaultdict(int)
-
+last_tx = defaultdict(int); last_rx = defaultdict(int)
 stop_event = threading.Event()
 
-# ---------------------- UTILITY ----------------------
-def run_ns_cmd(host, cmd, timeout=2):
-    """Menjalankan perintah di dalam namespace host dengan sudo"""
+def run_ns_cmd(host, cmd):
+    if not os.path.exists(f"/var/run/netns/{host}"): return None
     try:
-        # Cek apakah file netns ada dulu untuk menghindari spam error sudo
-        if not os.path.exists(f"/var/run/netns/{host}"):
-            return None
-            
-        full = ['sudo', 'ip', 'netns', 'exec', host] + cmd
-        out = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
-        return out.stdout
-    except Exception:
-        return None
+        return subprocess.run(['sudo', 'ip', 'netns', 'exec', host] + cmd, capture_output=True, text=True, timeout=1).stdout
+    except: return None
 
-def get_iface_stats(host):
-    """
-    Mencoba membaca statistik interface eth0 di dalam namespace host.
-    """
-    # Di Mininet, interface di dalam host biasanya bernama 'eth0'
+def get_stats(host):
     out = run_ns_cmd(host, ['ip', '-s', 'link', 'show', 'eth0'])
+    if not out: out = run_ns_cmd(host, ['ip', '-s', 'link', 'show', f"{host}-eth0"])
+    if not out: return None
     
-    if not out:
-        # Fallback: kadang namanya hX-eth0 (jarang terjadi kalau masuk namespace, tapi antisipasi)
-        out = run_ns_cmd(host, ['ip', '-s', 'link', 'show', f"{host}-eth0"])
-    
-    if not out: 
-        return None
-
-    # Parsing Output ip -s link
-    rx_match = re.search(r'RX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
-    tx_match = re.search(r'TX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
-
-    if rx_match and tx_match:
-        rx_bytes = int(rx_match.group(1))
-        rx_pkts  = int(rx_match.group(2))
-        tx_bytes = int(tx_match.group(1))
-        tx_pkts  = int(tx_match.group(2))
-        return (tx_bytes, tx_pkts, rx_bytes, rx_pkts)
-    
+    rx = re.search(r'RX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
+    tx = re.search(r'TX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
+    if rx and tx:
+        return (int(tx.group(1)), int(tx.group(2)), int(rx.group(1)), int(rx.group(2)))
     return None
 
-def get_db_connection():
-    try:
-        conn = psycopg2.connect(DB_CONN)
-        return conn
-    except Exception as e:
-        print(f"[DB CONNECT ERROR] {e}")
-        return None
+def db_connect():
+    try: return psycopg2.connect(DB_CONN)
+    except: return None
 
-def insert_db(rows, conn):
-    """Memasukkan data ke DB dengan proteksi koneksi"""
-    if not rows: return conn
+def collector():
+    print(f"*** Monitoring {len(HOSTS_TO_MONITOR)} Hosts ***")
+    time.sleep(2) # Wait for simulation
     
-    # Reconnect logic
-    if conn is None or conn.closed:
-        conn = get_db_connection()
-        if not conn: return None # Gagal connect, skip cycle ini
+    # Baseline
+    for h in HOSTS_TO_MONITOR:
+        s = get_stats(h)
+        if s: last_tx[h], _, last_rx[h], _ = s
 
-    try:
-        cur = conn.cursor()
-        query = """
-            INSERT INTO traffic.flow_stats 
-            (timestamp, dpid, host, app, proto, 
-             src_ip, dst_ip, src_mac, dst_mac,
-             bytes_tx, bytes_rx, pkts_tx, pkts_rx, latency_ms, category)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        cur.executemany(query, rows)
-        conn.commit()
-        cur.close()
-        return conn
-    except Exception as e:
-        print(f"[DB INSERT ERROR] {e}")
-        # Jika error, coba tutup koneksi biar direconnect cycle depan
-        try: conn.close()
-        except: pass
-        return None
-
-def collector_loop():
-    print(f"\n*** Collector ON - Monitoring {len(HOSTS_TO_MONITOR)} Hosts ***")
-    conn = get_db_connection()
-    
-    # Inisialisasi awal (supaya tidak spike di detik pertama)
-    print("--- Initializing Baseline Stats ---")
-    for host in HOSTS_TO_MONITOR:
-        stats = get_iface_stats(host)
-        if stats:
-            last_tx_bytes[host], last_tx_pkts[host], last_rx_bytes[host], last_rx_pkts[host] = stats
-
+    conn = db_connect()
     while not stop_event.is_set():
-        start_time = time.time()
+        if not conn or conn.closed: conn = db_connect()
+        
         now = datetime.now()
         rows = []
         
-        for host in HOSTS_TO_MONITOR:
-            stats = get_iface_stats(host)
+        for h in HOSTS_TO_MONITOR:
+            s = get_stats(h)
+            if not s: continue
             
-            if stats is None:
-                continue 
-
-            cur_tx_bytes, cur_tx_pkts, cur_rx_bytes, cur_rx_pkts = stats
+            ctx, ctp, crx, crp = s
+            dtx = ctx - last_tx[h]; drx = crx - last_rx[h]
+            last_tx[h] = ctx; last_rx[h] = crx
             
-            # Hitung Delta (Traffic yang lewat selama Interval)
-            d_tx_b = cur_tx_bytes - last_tx_bytes[host]
-            d_rx_b = cur_rx_bytes - last_rx_bytes[host]
-            d_tx_p = cur_tx_pkts  - last_tx_pkts[host]
-            d_rx_p = cur_rx_pkts  - last_rx_pkts[host]
-
-            # Update nilai terakhir
-            last_tx_bytes[host] = cur_tx_bytes
-            last_rx_bytes[host] = cur_rx_bytes
-            last_tx_pkts[host]  = cur_tx_pkts
-            last_rx_pkts[host]  = cur_rx_pkts
-
-            # Ambil Metadata
-            meta = HOST_INFO.get(host, {})
-            app = meta.get('app', 'unknown')
-            category = APP_TO_CATEGORY.get(app, 'other')
-
-            # Filter Noise: Hanya simpan jika ada TX/RX atau ini VoIP (penting buat keepalive)
-            # Menghindari log database penuh angka 0
-            if d_tx_b > 0 or d_rx_b > 0 or category == 'voip':
-                
-                # Visualisasi simple di terminal
-                if d_tx_b > 1000:
-                    print(f"[{host}] {category.upper()} -> TX: {d_tx_b} Bytes")
+            meta = HOST_INFO.get(h, {})
+            cat = APP_TO_CATEGORY.get(meta.get('app'), 'other')
+            
+            # Logic: Save if traffic OR if VoIP (force save for monitoring)
+            if dtx > 0 or drx > 0 or cat == 'voip':
+                # Debug print khusus VoIP jika traffic masih 0
+                if cat == 'voip' and dtx == 0:
+                    print(f"[DEBUG] {h} VoIP traffic is 0. Check routing/iperf!")
 
                 rows.append((
-                    now, 1, host, app, meta.get('proto', 'tcp'),
-                    meta.get('ip', ''), meta.get('server_ip', ''), 
-                    meta.get('mac', ''), meta.get('server_mac', ''),
-                    d_tx_b, d_rx_b, d_tx_p, d_rx_p,
-                    random_latency(category), category
+                    now, 1, h, meta.get('app'), meta.get('proto'),
+                    meta.get('ip'), meta.get('server_ip'),
+                    meta.get('mac'), meta.get('server_mac'),
+                    dtx, drx, 0, 0, # Pkts not critical for dashboard usually
+                    0.5, cat
                 ))
-
-        if rows:
-            conn = insert_db(rows, conn)
         
-        # Sleep presisi
-        elapsed = time.time() - start_time
-        sleep_time = max(0, COLLECT_INTERVAL - elapsed)
-        time.sleep(sleep_time)
-
-    if conn: conn.close()
-    print("\n*** Collector STOPPED ***")
-
-def random_latency(category):
-    import random
-    if category == 'voip': return round(random.uniform(20, 40), 2)
-    if category == 'db': return round(random.uniform(0.5, 2.0), 2)
-    return round(random.uniform(10, 50), 2)
+        if rows and conn:
+            try:
+                cur = conn.cursor()
+                q = "INSERT INTO traffic.flow_stats (timestamp, dpid, host, app, proto, src_ip, dst_ip, src_mac, dst_mac, bytes_tx, bytes_rx, pkts_tx, pkts_rx, latency_ms, category) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                cur.executemany(q, rows)
+                conn.commit()
+                cur.close()
+            except: pass
+            
+        time.sleep(COLLECT_INTERVAL)
 
 if __name__ == "__main__":
-    if os.geteuid() != 0:
-        print("WAJIB jalankan dengan SUDO!")
-        sys.exit(1)
-    try:
-        collector_loop()
-    except KeyboardInterrupt:
-        stop_event.set()
+    try: collector()
+    except KeyboardInterrupt: pass

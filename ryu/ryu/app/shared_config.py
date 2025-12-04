@@ -2,10 +2,9 @@
 
 # ---------------------- KONFIGURASI DB & KOLEKSI ----------------------
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
-COLLECT_INTERVAL = 3 # Dipercepat sedikit agar capture lebih responsif
+COLLECT_INTERVAL = 3 # Detik
 
 # ---------------------- DAFTAR HOST YANG DIMONITOR ----------------------
-# PERBAIKAN: Menambahkan server internal (web1, app1, dll) agar East-West traffic terekam
 HOSTS_TO_MONITOR = [
     'user1', 'user2', 'user3', 
     'voip1', 'voip2',
@@ -24,15 +23,19 @@ HOST_INFO = {
     'voip1': { 'ip': '192.168.10.11', 'app': 'voip_call_sip', 'proto': 'udp', 'mac': '00:00:00:00:10:11', 'server_ip': '10.10.1.1', 'server_mac': '00:00:00:00:0A:01' },
     'voip2': { 'ip': '192.168.10.12', 'app': 'voip_call_sip', 'proto': 'udp', 'mac': '00:00:00:00:10:12', 'server_ip': '10.10.2.1', 'server_mac': '00:00:00:00:0B:01' },
     
-    # --- East-West Traffic (Server Internal) ---
+    # --- East-West Traffic ---
     'web1': { 'ip': '10.10.1.1', 'app': 'ew_web_to_app', 'proto': 'tcp', 'mac': '00:00:00:00:0A:01', 'server_ip': '10.10.2.1', 'server_mac': '00:00:00:00:0B:01' },
     'web2': { 'ip': '10.10.1.2', 'app': 'ew_web_to_cache', 'proto': 'tcp', 'mac': '00:00:00:00:0A:02', 'server_ip': '10.10.1.3', 'server_mac': '00:00:00:00:0A:03' },
-    'cache1': { 'ip': '10.10.1.3', 'app': 'cache_service', 'proto': 'tcp', 'mac': '00:00:00:00:0A:03', 'server_ip': '', 'server_mac': '' }, # Cache usually passive or talks back
+    
+    # PERBAIKAN: Cache biasanya merespon Web. Kita pasangkan dengan Web1.
+    'cache1': { 'ip': '10.10.1.3', 'app': 'cache_service', 'proto': 'tcp', 'mac': '00:00:00:00:0A:03', 'server_ip': '10.10.1.1', 'server_mac': '00:00:00:00:0A:01' },
+    
     'app1': { 'ip': '10.10.2.1', 'app': 'ew_app_to_db', 'proto': 'tcp', 'mac': '00:00:00:00:0B:01', 'server_ip': '10.10.2.2', 'server_mac': '00:00:00:00:0B:02' },
-    'db1':  { 'ip': '10.10.2.2', 'app': 'db_service', 'proto': 'tcp', 'mac': '00:00:00:00:0B:02', 'server_ip': '', 'server_mac': '' },
+    
+    # PERBAIKAN: DB biasanya merespon App. Kita pasangkan dengan App1.
+    'db1':  { 'ip': '10.10.2.2', 'app': 'db_service', 'proto': 'tcp', 'mac': '00:00:00:00:0B:02', 'server_ip': '10.10.2.1', 'server_mac': '00:00:00:00:0B:01' },
 }
 
-# Mapping kategori untuk log
 APP_TO_CATEGORY = {
     'web_service_https': 'web',
     'web_service_http': 'web',
