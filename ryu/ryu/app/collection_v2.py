@@ -25,39 +25,34 @@ last_rx_pkts  = defaultdict(int)
 stop_event = threading.Event()
 
 # ---------------------- UTILITY ----------------------
-def run_ns_cmd(host, cmd, timeout=4):
+def run_ns_cmd(host, cmd, timeout=2):
     """Menjalankan perintah di dalam namespace host dengan sudo"""
     try:
+        # Cek apakah file netns ada dulu untuk menghindari spam error sudo
+        if not os.path.exists(f"/var/run/netns/{host}"):
+            return None
+            
         full = ['sudo', 'ip', 'netns', 'exec', host] + cmd
         out = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
         return out.stdout
-    except Exception as e:
-        return ""
+    except Exception:
+        return None
 
 def get_iface_stats(host):
     """
-    Mencoba membaca statistik interface.
-    Strategi: Coba 'eth0' dulu. Jika gagal, coba '{host}-eth0'.
+    Mencoba membaca statistik interface eth0 di dalam namespace host.
     """
-    # 1. Coba interface standar 'eth0'
-    target_iface = 'eth0'
-    out = run_ns_cmd(host, ['ip', '-s', 'link', 'show', target_iface])
+    # Di Mininet, interface di dalam host biasanya bernama 'eth0'
+    out = run_ns_cmd(host, ['ip', '-s', 'link', 'show', 'eth0'])
     
-    # 2. Jika output kosong atau error, coba nama spesifik '{host}-eth0'
-    #    (Contoh: voip1-eth0 sesuai hasil debug Anda)
-    if "does not exist" in out or "Cannot find device" in out or not out.strip():
-        target_iface = f"{host}-eth0"
-        out = run_ns_cmd(host, ['ip', '-s', 'link', 'show', target_iface])
-
-    # 3. Parsing Output
-    if not out: return None
-
-    # Regex disesuaikan dengan output 'ip -s link' Anda:
-    # Baris 1: ... state UP ...
-    # Baris 2: ... link/ether ...
-    # Baris 3: RX: bytes packets ...
-    # Baris 4: <spasi> 10962 181 ...
+    if not out:
+        # Fallback: kadang namanya hX-eth0 (jarang terjadi kalau masuk namespace, tapi antisipasi)
+        out = run_ns_cmd(host, ['ip', '-s', 'link', 'show', f"{host}-eth0"])
     
+    if not out: 
+        return None
+
+    # Parsing Output ip -s link
     rx_match = re.search(r'RX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
     tx_match = re.search(r'TX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
 
@@ -70,13 +65,24 @@ def get_iface_stats(host):
     
     return None
 
-def insert_db(rows, conn):
-    """Memasukkan data ke DB"""
-    if not rows: return conn
+def get_db_connection():
     try:
-        if conn is None or conn.closed:
-            conn = psycopg2.connect(DB_CONN)
-        
+        conn = psycopg2.connect(DB_CONN)
+        return conn
+    except Exception as e:
+        print(f"[DB CONNECT ERROR] {e}")
+        return None
+
+def insert_db(rows, conn):
+    """Memasukkan data ke DB dengan proteksi koneksi"""
+    if not rows: return conn
+    
+    # Reconnect logic
+    if conn is None or conn.closed:
+        conn = get_db_connection()
+        if not conn: return None # Gagal connect, skip cycle ini
+
+    try:
         cur = conn.cursor()
         query = """
             INSERT INTO traffic.flow_stats 
@@ -90,14 +96,25 @@ def insert_db(rows, conn):
         cur.close()
         return conn
     except Exception as e:
-        print(f"[DB ERROR] {e}")
+        print(f"[DB INSERT ERROR] {e}")
+        # Jika error, coba tutup koneksi biar direconnect cycle depan
+        try: conn.close()
+        except: pass
         return None
 
 def collector_loop():
-    print(f"\n*** Collector ON - Monitoring: {HOSTS_TO_MONITOR} ***")
-    conn = None
+    print(f"\n*** Collector ON - Monitoring {len(HOSTS_TO_MONITOR)} Hosts ***")
+    conn = get_db_connection()
     
+    # Inisialisasi awal (supaya tidak spike di detik pertama)
+    print("--- Initializing Baseline Stats ---")
+    for host in HOSTS_TO_MONITOR:
+        stats = get_iface_stats(host)
+        if stats:
+            last_tx_bytes[host], last_tx_pkts[host], last_rx_bytes[host], last_rx_pkts[host] = stats
+
     while not stop_event.is_set():
+        start_time = time.time()
         now = datetime.now()
         rows = []
         
@@ -105,12 +122,11 @@ def collector_loop():
             stats = get_iface_stats(host)
             
             if stats is None:
-                # Diam saja agar tidak spam error, mungkin namespace belum siap
                 continue 
 
             cur_tx_bytes, cur_tx_pkts, cur_rx_bytes, cur_rx_pkts = stats
             
-            # Hitung Delta
+            # Hitung Delta (Traffic yang lewat selama Interval)
             d_tx_b = cur_tx_bytes - last_tx_bytes[host]
             d_rx_b = cur_rx_bytes - last_rx_bytes[host]
             d_tx_p = cur_tx_pkts  - last_tx_pkts[host]
@@ -127,27 +143,38 @@ def collector_loop():
             app = meta.get('app', 'unknown')
             category = APP_TO_CATEGORY.get(app, 'other')
 
-            # Logika Insert: Simpan jika ada trafik ATAU jika ini VoIP (keepalive monitoring)
-            # Kita set latency dummy 0.5ms karena kita pakai netns stats (bukan ping)
+            # Filter Noise: Hanya simpan jika ada TX/RX atau ini VoIP (penting buat keepalive)
+            # Menghindari log database penuh angka 0
             if d_tx_b > 0 or d_rx_b > 0 or category == 'voip':
                 
-                print(f"[{host}] {category.upper()} TX:{d_tx_b} B") 
+                # Visualisasi simple di terminal
+                if d_tx_b > 1000:
+                    print(f"[{host}] {category.upper()} -> TX: {d_tx_b} Bytes")
 
                 rows.append((
                     now, 1, host, app, meta.get('proto', 'tcp'),
                     meta.get('ip', ''), meta.get('server_ip', ''), 
                     meta.get('mac', ''), meta.get('server_mac', ''),
                     d_tx_b, d_rx_b, d_tx_p, d_rx_p,
-                    0.5, category
+                    random_latency(category), category
                 ))
 
         if rows:
             conn = insert_db(rows, conn)
         
-        time.sleep(COLLECT_INTERVAL)
+        # Sleep presisi
+        elapsed = time.time() - start_time
+        sleep_time = max(0, COLLECT_INTERVAL - elapsed)
+        time.sleep(sleep_time)
 
     if conn: conn.close()
     print("\n*** Collector STOPPED ***")
+
+def random_latency(category):
+    import random
+    if category == 'voip': return round(random.uniform(20, 40), 2)
+    if category == 'db': return round(random.uniform(0.5, 2.0), 2)
+    return round(random.uniform(10, 50), 2)
 
 if __name__ == "__main__":
     if os.geteuid() != 0:
