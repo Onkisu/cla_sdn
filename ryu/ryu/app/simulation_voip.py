@@ -13,7 +13,7 @@ import time
 import subprocess
 import math
 import signal
-from shared_config import HOST_INFO
+from config_voip import HOST_INFO
 
 cmd_lock = threading.Lock()
 stop_event = threading.Event()

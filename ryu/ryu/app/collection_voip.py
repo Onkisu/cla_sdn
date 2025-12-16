@@ -10,7 +10,7 @@ from datetime import datetime
 import threading
 
 try:
-    from shared_config import DB_CONN, COLLECT_INTERVAL, HOSTS_TO_MONITOR, HOST_INFO
+    from config_voip import DB_CONN, COLLECT_INTERVAL, HOSTS_TO_MONITOR, HOST_INFO
 except ImportError:
     print("[CRITICAL] Config missing!")
     sys.exit(1)
