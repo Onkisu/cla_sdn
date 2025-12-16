@@ -1,7 +1,11 @@
 #!/usr/bin/python3
 """
-[COLLECTION FIX] Sesuai Format Data Proposal (PDF)
-Mengumpulkan data TX/RX terpisah, DPID, dan Throughput Mbps.
+[COLLECTION FINAL] Sesuai Format Data Proposal (PDF)
+Fitur:
+- Memisahkan TX (Sender) dan RX (Receiver)
+- Menghitung Throughput dalam Mbps
+- Mencatat Protocol sebagai Integer (UDP=17, TCP=6)
+- Mendeteksi Label berdasarkan Threshold Throughput
 """
 
 import psycopg2
@@ -11,48 +15,55 @@ import re
 from datetime import datetime
 from collections import defaultdict
 
-# --- DB CONFIG ---
+# --- KONFIGURASI DATABASE ---
+# Sesuaikan password jika perlu
 DB_CONFIG = {
-    'dbname': 'development', 'user': 'dev_one', 'password': 'hijack332.', 'host': '103.181.142.165'
+    'dbname': 'development', 
+    'user': 'dev_one', 
+    'password': 'hijack332.', 
+    'host': '103.181.142.165'
 }
 
-# --- DEFINISI TARGET MONITORING (Sesuai Simulation) ---
+# --- KONFIGURASI TARGET MONITORING ---
+# Harus COCOK dengan simulation_main.py & background_traffic.py
 MONITOR_FLOWS = [
     {
-        # VoIP Flow
+        # Flow 1: VoIP (Stabil)
+        'label_base': 'VoIP',
         'src_host': 'h1', 'dst_host': 'h3',
         'src_ip': '10.0.0.1', 'dst_ip': '10.0.0.3',
         'src_mac': '00:00:00:00:00:01', 'dst_mac': '00:00:00:00:00:03',
         'tp_src': 3000, 'tp_dst': 5060,
-        'ip_proto': 17, # 17 = UDP (Integer sesuai PDF)
-        'dpid': '0000000000000011', # Leaf 1 (Tempat H1 terhubung)
-        'label': 'VoIP'
+        'ip_proto': 17, # UDP
+        'dpid': '0000000000000011' # Leaf 1
     },
     {
-        # Background Flow
+        # Flow 2: Background (Dinamis/Serangan)
+        'label_base': 'Background',
         'src_host': 'h2', 'dst_host': 'h4',
         'src_ip': '10.0.0.2', 'dst_ip': '10.0.0.4',
         'src_mac': '00:00:00:00:00:02', 'dst_mac': '00:00:00:00:00:04',
         'tp_src': 4000, 'tp_dst': 80,
-        'ip_proto': 6, # 6 = TCP (Integer sesuai PDF)
-        'dpid': '0000000000000011', # Leaf 1 (Tempat H2 terhubung)
-        'label': 'Background'
+        'ip_proto': 6, # TCP
+        'dpid': '0000000000000011' # Leaf 1
     }
 ]
 
-# State Tracking
+# Variabel untuk menyimpan state sebelumnya (untuk hitung delta per detik)
+# Format: key -> {'tx_b': 0, 'rx_b': 0, 'tx_p': 0, 'rx_p': 0, 'ts': 0}
 prev_stats = defaultdict(lambda: {'tx_b': 0, 'rx_b': 0, 'tx_p': 0, 'rx_p': 0, 'ts': 0})
 
 def init_db():
+    """Membuat Tabel Database Sesuai PDF"""
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     
-    # Hapus tabel jika ada agar struktur baru bisa dibuat
+    # Hapus tabel lama agar struktur baru (sesuai PDF) terbentuk
+    # Hati-hati: Data lama akan hilang. Uncomment jika ingin reset total.
     # cur.execute("DROP TABLE IF EXISTS design_data_ta") 
     
-    # MEMBUAT TABEL SESUAI PDF 'format_data(design data).pdf'
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS traffic.flow_stats_ (
+        CREATE TABLE IF NOT EXISTS traffic_flow_stats_ (
             id SERIAL PRIMARY KEY,
             timestamp TIMESTAMP,
             dpid TEXT,
@@ -74,23 +85,21 @@ def init_db():
     """)
     conn.commit()
     conn.close()
-    print("[DB] Tabel 'design_data_ta' siap sesuai PDF.")
+    print("[DB] Tabel 'design_data_ta' siap (Struktur Sesuai PDF).")
 
 def get_host_stats(host_name):
     """
-    Mengambil data TX dari Host Pengirim dan RX dari Host Penerima
-    menggunakan perintah 'ip -s link'.
-    Ini memberikan data 'pkts_tx' dan 'pkts_rx' yang akurat.
+    Mengambil statistik Interface langsung dari Host Mininet (Lebih Akurat untuk TX/RX End-to-End)
+    Return: tx_bytes, tx_packets, rx_bytes, rx_packets
     """
     cmd = ['sudo', 'ip', 'netns', 'exec', host_name, 'ip', '-s', 'link', 'show', 'eth0']
     try:
         res = subprocess.run(cmd, capture_output=True, text=True)
-        out = res.stdout
-        # Parsing Output IP Link
-        # RX: bytes  packets ...
-        # TX: bytes  packets ...
-        rx_match = re.search(r'RX:.*?\n\s+(\d+)\s+(\d+)', out, re.MULTILINE)
-        tx_match = re.search(r'TX:.*?\n\s+(\d+)\s+(\d+)', out, re.MULTILINE)
+        output = res.stdout
+        
+        # Regex untuk menangkap baris statistik IP Link
+        rx_match = re.search(r'RX:.*?\n\s+(\d+)\s+(\d+)', output, re.MULTILINE)
+        tx_match = re.search(r'TX:.*?\n\s+(\d+)\s+(\d+)', output, re.MULTILINE)
         
         rx_bytes, rx_pkts = 0, 0
         tx_bytes, tx_pkts = 0, 0
@@ -103,53 +112,65 @@ def get_host_stats(host_name):
             tx_pkts = int(tx_match.group(2))
             
         return tx_bytes, tx_pkts, rx_bytes, rx_pkts
-    except:
+    except Exception as e:
+        print(f"Error reading stats form {host_name}: {e}")
         return 0, 0, 0, 0
 
 def collection_loop():
-    print("*** Memulai Koleksi Data (Format PDF)...")
+    print("*** Memulai Monitoring Trafik Real-time ***")
+    print("Mencatat ke DB: design_data_ta")
     
     while True:
-        start_ts = time.time()
-        now = datetime.now()
-        batch = []
+        start_loop = time.time()
+        timestamp_now = datetime.now()
+        batch_data = []
         
-        print(f"\n--- {now.strftime('%H:%M:%S')} ---")
+        print(f"\n--- {timestamp_now.strftime('%H:%M:%S')} ---")
         
         for f in MONITOR_FLOWS:
+            # Identifier Unik untuk Flow ini
             flow_key = f"{f['src_ip']}->{f['dst_ip']}"
             
-            # 1. Ambil Stats dari Source Host (Untuk TX)
-            tx_b_src, tx_p_src, _, _ = get_host_stats(f['src_host'])
+            # 1. Ambil Data TX dari Pengirim (Source)
+            tx_b, tx_p, _, _ = get_host_stats(f['src_host'])
             
-            # 2. Ambil Stats dari Dest Host (Untuk RX)
-            _, _, rx_b_dst, rx_p_dst = get_host_stats(f['dst_host'])
+            # 2. Ambil Data RX dari Penerima (Destination)
+            _, _, rx_b, rx_p = get_host_stats(f['dst_host'])
             
-            # 3. Hitung Delta (Perubahan detik ini)
+            # 3. Hitung Selisih (Delta) dari detik sebelumnya
             prev = prev_stats[flow_key]
-            delta_t = start_ts - prev['ts']
+            delta_time = start_loop - prev['ts']
             
-            d_tx_b = max(0, tx_b_src - prev['tx_b'])
-            d_rx_b = max(0, rx_b_dst - prev['rx_b'])
-            d_tx_p = max(0, tx_p_src - prev['tx_p'])
-            d_rx_p = max(0, rx_p_dst - prev['rx_p'])
+            # Mencegah nilai negatif saat awal mulai
+            d_tx_b = max(0, tx_b - prev['tx_b'])
+            d_rx_b = max(0, rx_b - prev['rx_b'])
+            d_tx_p = max(0, tx_p - prev['tx_p'])
+            d_rx_p = max(0, rx_p - prev['rx_p'])
             
             throughput_mbps = 0.0
+            final_label = f['label_base']
             
-            if prev['ts'] > 0 and delta_t > 0:
-                # Rumus Throughput (Mbps) = (Bytes * 8) / (Time * 1,000,000)
-                throughput_mbps = (d_tx_b * 8) / (delta_t * 1000000)
+            # Pastikan bukan iterasi pertama & waktu valid
+            if prev['ts'] > 0 and delta_time > 0:
                 
-                # Logika Label (Sesuai Proposal: Burst Detection)
-                label = f['label']
-                if f['label'] == 'Background' and throughput_mbps > 5.0:
-                    label = "MicroBurst"
+                # Rumus Mbps: (Bytes * 8 bit) / (Waktu * 1 Juta)
+                throughput_mbps = (d_tx_b * 8) / (delta_time * 1000000)
                 
-                print(f"[{label}] {f['src_ip']}->{f['dst_ip']} | TX: {d_tx_b} B | RX: {d_rx_b} B | Tput: {throughput_mbps:.2f} Mbps")
+                # --- LOGIKA LABEL DINAMIS (PENTING UNTUK ML) ---
+                # Jika trafik Background melonjak tinggi, labeli sebagai MicroBurst
+                if f['label_base'] == 'Background':
+                    if throughput_mbps > 8.0: # Ambang batas burst (bisa disesuaikan)
+                        final_label = "MicroBurst"
+                    else:
+                        final_label = "Background_Normal"
                 
-                # Masukkan ke list Batch
-                batch.append((
-                    now,
+                # Tampilkan di Layar
+                print(f"[{final_label:^15}] {f['src_ip']}->{f['dst_ip']} | "
+                      f"Load: {throughput_mbps:.2f} Mbps | TX: {d_tx_p} pkts")
+                
+                # Siapkan data untuk DB (Sesuai Urutan Kolom PDF)
+                batch_data.append((
+                    timestamp_now,
                     f['dpid'],
                     f['src_ip'], f['dst_ip'],
                     f['src_mac'], f['dst_mac'],
@@ -157,41 +178,46 @@ def collection_loop():
                     f['tp_src'], f['tp_dst'],
                     d_tx_b, d_rx_b,    # bytes_tx, bytes_rx
                     d_tx_p, d_rx_p,    # pkts_tx, pkts_rx
-                    delta_t,           # duration_sec
+                    delta_time,        # duration_sec
                     throughput_mbps,
-                    label
+                    final_label
                 ))
-
-            # Update State
+            
+            # Simpan state sekarang untuk iterasi berikutnya
             prev_stats[flow_key] = {
-                'tx_b': tx_b_src, 'rx_b': rx_b_dst,
-                'tx_p': tx_p_src, 'rx_p': rx_p_dst,
-                'ts': start_ts
+                'tx_b': tx_b, 'rx_b': rx_b,
+                'tx_p': tx_p, 'rx_p': rx_p,
+                'ts': start_loop
             }
 
-        # 4. Insert Batch ke DB
-        if batch:
+        # 4. Simpan ke Database
+        if batch_data:
             try:
                 conn = psycopg2.connect(**DB_CONFIG)
                 cur = conn.cursor()
-                sql = """INSERT INTO traffic.flow_stats_
+                sql = """INSERT INTO traffic_flow_stats_ 
                          (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
                           ip_proto, tp_src, tp_dst, 
                           bytes_tx, bytes_rx, pkts_tx, pkts_rx, 
-                          duration_sec, throughput_mbps, traffic_label)
+                          duration_sec, throughput_mbps, traffic_label) 
                          VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
-                cur.executemany(sql, batch)
+                cur.executemany(sql, batch_data)
                 conn.commit()
                 conn.close()
             except Exception as e:
-                print(f"DB Error: {e}")
+                print(f"Database Error: {e}")
         
-        # Jaga interval 1 detik
-        time.sleep(1.0)
+        # Sleep sisa waktu agar loop berjalan tiap 1 detik
+        elapsed = time.time() - start_loop
+        sleep_time = max(0, 1.0 - elapsed)
+        time.sleep(sleep_time)
 
 if __name__ == '__main__':
-    init_db()
+    # Tunggu sebentar agar Mininet siap sepenuhnya
+    time.sleep(1)
+    
     try:
+        init_db()
         collection_loop()
     except KeyboardInterrupt:
-        print("\nStop.")
+        print("\n[STOP] Monitoring dihentikan user.")
