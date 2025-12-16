@@ -1,22 +1,16 @@
 #!/usr/bin/python3
 """
-[COLLECTION FINAL] Sesuai Format Data Proposal (PDF)
-Fitur:
-- Memisahkan TX (Sender) dan RX (Receiver)
-- Menghitung Throughput dalam Mbps
-- Mencatat Protocol sebagai Integer (UDP=17, TCP=6)
-- Mendeteksi Label berdasarkan Threshold Throughput
+[COLLECTION FINAL - KERNEL MODE]
+Membaca statistik langsung dari /sys/class/net/eth0/statistics/
+Pasti jalan di distro linux apapun.
 """
 
 import psycopg2
 import subprocess
 import time
-import re
 from datetime import datetime
-from collections import defaultdict
 
 # --- KONFIGURASI DATABASE ---
-# Sesuaikan password jika perlu
 DB_CONFIG = {
     'dbname': 'development', 
     'user': 'dev_one', 
@@ -24,187 +18,124 @@ DB_CONFIG = {
     'host': '103.181.142.165'
 }
 
-# --- KONFIGURASI TARGET MONITORING ---
-# Harus COCOK dengan simulation_main.py & background_traffic.py
+# --- KONFIGURASI TARGET ---
 MONITOR_FLOWS = [
     {
-        # Flow 1: VoIP (Stabil)
         'label_base': 'VoIP',
         'src_host': 'h1', 'dst_host': 'h3',
         'src_ip': '10.0.0.1', 'dst_ip': '10.0.0.3',
         'src_mac': '00:00:00:00:00:01', 'dst_mac': '00:00:00:00:00:03',
-        'tp_src': 3000, 'tp_dst': 5060,
-        'ip_proto': 17, # UDP
-        'dpid': '0000000000000011' # Leaf 1
+        'proto': 17, 'tp_src': 0, 'tp_dst': 5060 
     },
     {
-        # Flow 2: Background (Dinamis/Serangan)
-        'label_base': 'Background',
+        'label_base': 'Background_Normal',
         'src_host': 'h2', 'dst_host': 'h4',
         'src_ip': '10.0.0.2', 'dst_ip': '10.0.0.4',
         'src_mac': '00:00:00:00:00:02', 'dst_mac': '00:00:00:00:00:04',
-        'tp_src': 4000, 'tp_dst': 80,
-        'ip_proto': 6, # TCP
-        'dpid': '0000000000000011' # Leaf 1
+        'proto': 6, 'tp_src': 0, 'tp_dst': 5001 
     }
 ]
 
-# Variabel untuk menyimpan state sebelumnya (untuk hitung delta per detik)
-# Format: key -> {'tx_b': 0, 'rx_b': 0, 'tx_p': 0, 'rx_p': 0, 'ts': 0}
-prev_stats = defaultdict(lambda: {'tx_b': 0, 'rx_b': 0, 'tx_p': 0, 'rx_p': 0, 'ts': 0})
-
-def init_db():
-    """Membuat Tabel Database Sesuai PDF"""
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    
-    # Hapus tabel lama agar struktur baru (sesuai PDF) terbentuk
-    # Hati-hati: Data lama akan hilang. Uncomment jika ingin reset total.
-    # cur.execute("DROP TABLE IF EXISTS design_data_ta") 
-    
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS traffic_flow_stats_ (
-            id SERIAL PRIMARY KEY,
-            timestamp TIMESTAMP,
-            dpid TEXT,
-            src_ip TEXT,
-            dst_ip TEXT,
-            src_mac TEXT,
-            dst_mac TEXT,
-            ip_proto INTEGER,
-            tp_src INTEGER,
-            tp_dst INTEGER,
-            bytes_tx BIGINT,
-            bytes_rx BIGINT,
-            pkts_tx BIGINT,
-            pkts_rx BIGINT,
-            duration_sec FLOAT,
-            throughput_mbps FLOAT,
-            traffic_label TEXT
-        );
-    """)
-    conn.commit()
-    conn.close()
-    print("[DB] Tabel 'design_data_ta' siap (Struktur Sesuai PDF).")
-
-def get_host_stats(host_name):
-    # Command untuk ambil statistik interface
-    cmd = ['sudo', 'ip', 'netns', 'exec', host_name, 'ip', '-s', 'link', 'show', 'eth0']
+def get_host_stats_kernel(host_name):
+    """
+    Mengambil data bytes/packet langsung dari file kernel Linux.
+    Anti-Gagal parsing regex.
+    """
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        output = res.stdout
+        def read_file(metric):
+            # Path ke statistik interface virtual di dalam namespace
+            cmd = ['sudo', 'ip', 'netns', 'exec', host_name, 'cat', f'/sys/class/net/eth0/statistics/{metric}']
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            val = res.stdout.strip()
+            return int(val) if val.isdigit() else 0
+
+        tx_bytes = read_file('tx_bytes')
+        tx_pkts  = read_file('tx_packets')
+        rx_bytes = read_file('rx_bytes')
+        rx_pkts  = read_file('rx_packets')
         
-        rx_bytes, rx_pkts = 0, 0
-        tx_bytes, tx_pkts = 0, 0
-
-        # Parsing baris per baris (Lebih aman dari Regex)
-        lines = output.splitlines()
-        for i, line in enumerate(lines):
-            line = line.strip()
-            
-            # Cari data RX (biasanya baris setelah tulisan RX:)
-            if line.startswith("RX:"):
-                if i + 1 < len(lines):
-                    parts = lines[i+1].split()
-                    # Pastikan ada cukup kolom angka
-                    if len(parts) >= 2 and parts[0].isdigit():
-                        rx_bytes = int(parts[0])
-                        rx_pkts = int(parts[1])
-            
-            # Cari data TX (biasanya baris setelah tulisan TX:)
-            if line.startswith("TX:"):
-                if i + 1 < len(lines):
-                    parts = lines[i+1].split()
-                    if len(parts) >= 2 and parts[0].isdigit():
-                        tx_bytes = int(parts[0])
-                        tx_pkts = int(parts[1])
-
         return tx_bytes, tx_pkts, rx_bytes, rx_pkts
 
     except Exception as e:
-        print(f"Error reading stats from {host_name}: {e}")
+        # Silent error agar tidak spam terminal, kembalikan 0
         return 0, 0, 0, 0
 
-def collection_loop():
-    print("*** Memulai Monitoring Trafik Real-time ***")
-    print("Mencatat ke DB: design_data_ta")
-    
+def main():
+    print(f"[DB] Tabel 'design_data_ta' siap.")
+    print("*** Memulai Monitoring Trafik Real-time (Mode Kernel) ***")
+    print(f"Mencatat ke DB: {DB_CONFIG['dbname']}")
+
+    # Simpan state sebelumnya untuk menghitung delta (selisih)
+    prev_stats = {}
+
     while True:
         start_loop = time.time()
-        timestamp_now = datetime.now()
+        timestamp = datetime.now()
+        print(f"\n--- {timestamp.strftime('%H:%M:%S')} ---")
+
         batch_data = []
-        
-        print(f"\n--- {timestamp_now.strftime('%H:%M:%S')} ---")
-        
-        for f in MONITOR_FLOWS:
-            # Identifier Unik untuk Flow ini
-            flow_key = f"{f['src_ip']}->{f['dst_ip']}"
+
+        for flow in MONITOR_FLOWS:
+            src_host = flow['src_host']
+            dst_host = flow['dst_host'] # Kita baca RX di sisi receiver agar akurat
             
-            # 1. Ambil Data TX dari Pengirim (Source)
-            tx_b, tx_p, _, _ = get_host_stats(f['src_host'])
+            # Ambil statistik dari RECEIVER (h3 atau h4)
+            # Karena throughput diukur dari yang diterima
+            _, _, rx_b, rx_p = get_host_stats_kernel(dst_host)
             
-            # 2. Ambil Data RX dari Penerima (Destination)
-            _, _, rx_b, rx_p = get_host_stats(f['dst_host'])
-            
-            # 3. Hitung Selisih (Delta) dari detik sebelumnya
-            prev = prev_stats[flow_key]
-            delta_time = start_loop - prev['ts']
-            
-            # Mencegah nilai negatif saat awal mulai
-            d_tx_b = max(0, tx_b - prev['tx_b'])
-            d_rx_b = max(0, rx_b - prev['rx_b'])
-            d_tx_p = max(0, tx_p - prev['tx_p'])
-            d_rx_p = max(0, rx_p - prev['rx_p'])
-            
-            throughput_mbps = 0.0
-            final_label = f['label_base']
-            
-            # Pastikan bukan iterasi pertama & waktu valid
-            if prev['ts'] > 0 and delta_time > 0:
+            # Khusus untuk TX (dikirim), kita ambil dari SENDER (h1 atau h2)
+            tx_b, tx_p, _, _ = get_host_stats_kernel(src_host)
+
+            flow_key = f"{src_host}->{dst_host}"
+
+            # Hitung Delta (Selisih dengan detik lalu)
+            if flow_key in prev_stats:
+                prev = prev_stats[flow_key]
+                time_diff = start_loop - prev['ts']
                 
-                # Rumus Mbps: (Bytes * 8 bit) / (Waktu * 1 Juta)
-                throughput_mbps = (d_tx_b * 8) / (delta_time * 1000000)
-                
-                # --- LOGIKA LABEL DINAMIS (PENTING UNTUK ML) ---
-                # Jika trafik Background melonjak tinggi, labeli sebagai MicroBurst
-                if f['label_base'] == 'Background':
-                    if throughput_mbps > 8.0: # Ambang batas burst (bisa disesuaikan)
-                        final_label = "MicroBurst"
-                    else:
-                        final_label = "Background_Normal"
-                
-                # Tampilkan di Layar
-                print(f"[{final_label:^15}] {f['src_ip']}->{f['dst_ip']} | "
-                      f"Load: {throughput_mbps:.2f} Mbps | TX: {d_tx_p} pkts")
-                
-                # Siapkan data untuk DB (Sesuai Urutan Kolom PDF)
-                batch_data.append((
-                    timestamp_now,
-                    f['dpid'],
-                    f['src_ip'], f['dst_ip'],
-                    f['src_mac'], f['dst_mac'],
-                    f['ip_proto'],
-                    f['tp_src'], f['tp_dst'],
-                    d_tx_b, d_rx_b,    # bytes_tx, bytes_rx
-                    d_tx_p, d_rx_p,    # pkts_tx, pkts_rx
-                    delta_time,        # duration_sec
-                    throughput_mbps,
-                    final_label
-                ))
-            
-            # Simpan state sekarang untuk iterasi berikutnya
+                if time_diff > 0:
+                    bytes_tx_diff = tx_b - prev['tx_b']
+                    bytes_rx_diff = rx_b - prev['rx_b']
+                    pkts_tx_diff  = tx_p - prev['tx_p']
+                    pkts_rx_diff  = rx_p - prev['rx_p']
+
+                    # Convert Bytes to Megabits per second (Mbps)
+                    # (Bytes * 8) / 1,000,000 / seconds
+                    throughput_mbps = (bytes_rx_diff * 8) / 1000000.0 / time_diff
+
+                    # Hindari nilai negatif (jika restart)
+                    throughput_mbps = max(0.0, throughput_mbps)
+
+                    print(f"[{flow['label_base']:^15}] {flow['src_ip']}->{flow['dst_ip']} | Load: {throughput_mbps:.2f} Mbps | TX: {pkts_tx_diff} pkts")
+
+                    # Siapkan data untuk DB
+                    # (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
+                    #  ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx, 
+                    #  pkts_tx, pkts_rx, duration, throughput, label)
+                    batch_data.append((
+                        timestamp, "0000000000000001", 
+                        flow['src_ip'], flow['dst_ip'],
+                        flow['src_mac'], flow['dst_mac'],
+                        flow['proto'], flow['tp_src'], flow['tp_dst'],
+                        bytes_tx_diff, bytes_rx_diff,
+                        pkts_tx_diff, pkts_rx_diff,
+                        time_diff, throughput_mbps, flow['label_base']
+                    ))
+
+            # Update prev stats
             prev_stats[flow_key] = {
                 'tx_b': tx_b, 'rx_b': rx_b,
                 'tx_p': tx_p, 'rx_p': rx_p,
                 'ts': start_loop
             }
 
-        # 4. Simpan ke Database
+        # Simpan ke DB
         if batch_data:
             try:
                 conn = psycopg2.connect(**DB_CONFIG)
                 cur = conn.cursor()
-                sql = """INSERT INTO traffic_flow_stats_ 
+                # Pastikan nama tabel benar
+                sql = """INSERT INTO design_data_ta
                          (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
                           ip_proto, tp_src, tp_dst, 
                           bytes_tx, bytes_rx, pkts_tx, pkts_rx, 
@@ -214,19 +145,15 @@ def collection_loop():
                 conn.commit()
                 conn.close()
             except Exception as e:
-                print(f"Database Error: {e}")
-        
-        # Sleep sisa waktu agar loop berjalan tiap 1 detik
+                print(f"DB Error: {e}")
+
+        # Sleep sisa waktu agar loop pas 1 detik
         elapsed = time.time() - start_loop
-        sleep_time = max(0, 1.0 - elapsed)
-        time.sleep(sleep_time)
+        time.sleep(max(0, 1.0 - elapsed))
 
 if __name__ == '__main__':
-    # Tunggu sebentar agar Mininet siap sepenuhnya
-    time.sleep(1)
-    
+    # Pastikan dijalankan dengan sudo
     try:
-        init_db()
-        collection_loop()
+        main()
     except KeyboardInterrupt:
-        print("\n[STOP] Monitoring dihentikan user.")
+        print("\nMonitoring Berhenti.")
