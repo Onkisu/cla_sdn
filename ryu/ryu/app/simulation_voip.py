@@ -1,8 +1,8 @@
 #!/usr/bin/python3
 """
-[SIMULATION LIVE LOG]
-- Tidak masuk ke CLI Mininet.
-- Langsung menampilkan Log VoIP secara real-time.
+[SIMULATION LIVE - SHOW TRAFFIC LOGS]
+- Auto Pingall
+- Force Traffic Log to Screen (tail -f)
 """
 
 from mininet.net import Mininet
@@ -12,15 +12,16 @@ from mininet.topo import Topo
 from mininet.log import setLogLevel, info
 import time
 import os
-import sys
 import subprocess
+import signal
+import sys
 
 # Konfigurasi Host
 HOSTS = {
-    'h1': {'ip': '10.0.0.1', 'mac': '00:00:00:00:00:01'},
-    'h2': {'ip': '10.0.0.2', 'mac': '00:00:00:00:00:02'},
-    'h3': {'ip': '10.0.0.3', 'mac': '00:00:00:00:00:03'},
-    'h4': {'ip': '10.0.0.4', 'mac': '00:00:00:00:00:04'}
+    'h1': {'ip': '10.0.0.1', 'mac': '00:00:00:00:00:01'}, # VoIP Sender
+    'h2': {'ip': '10.0.0.2', 'mac': '00:00:00:00:00:02'}, # BG Sender
+    'h3': {'ip': '10.0.0.3', 'mac': '00:00:00:00:00:03'}, # VoIP Recv
+    'h4': {'ip': '10.0.0.4', 'mac': '00:00:00:00:00:04'}  # BG Recv
 }
 
 class LeafSpineTopo(Topo):
@@ -30,73 +31,66 @@ class LeafSpineTopo(Topo):
         h2 = self.addHost('h2', **HOSTS['h2'])
         h3 = self.addHost('h3', **HOSTS['h3'])
         h4 = self.addHost('h4', **HOSTS['h4'])
-        link_opts = dict(bw=100, delay='2ms')
-        self.addLink(h1, s1, **link_opts)
-        self.addLink(h2, s1, **link_opts)
-        self.addLink(h3, s1, **link_opts)
-        self.addLink(h4, s1, **link_opts)
-
-def follow_log(filename):
-    """Fungsi untuk membaca log file secara live (seperti tail -f)"""
-    try:
-        f = subprocess.Popen(['tail','-F',filename], stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-        while True:
-            line = f.stdout.readline()
-            if line:
-                print(f"[VoIP LOG] {line.decode().strip()}")
-    except KeyboardInterrupt:
-        return
+        
+        # Link 100Mbps, 2ms
+        self.addLink(h1, s1, bw=100, delay='2ms')
+        self.addLink(h2, s1, bw=100, delay='2ms')
+        self.addLink(h3, s1, bw=100, delay='2ms')
+        self.addLink(h4, s1, bw=100, delay='2ms')
 
 def run():
     topo = LeafSpineTopo()
     c0 = RemoteController('c0', ip='127.0.0.1', port=6633)
-    net = Mininet(topo=topo, controller=c0, switch=OVSSwitch, link=TCLink)
+    # PENTING: autoSetMacs=True dan OpenFlow13
+    net = Mininet(topo=topo, controller=c0, switch=OVSSwitch, link=TCLink, autoSetMacs=True)
     
     try:
         net.start()
         
-        # 1. Bersihkan Log Lama
+        # Paksa Switch pakai OpenFlow 1.3
+        for s in net.switches:
+            s.cmd("ovs-vsctl set Bridge %s protocols=OpenFlow13" % s.name)
+
+        # Bersihkan log lama
         os.system("rm -f h1_send.log")
-        
-        # 2. Disable IPv6
-        for h in net.hosts:
-            h.cmd("sysctl -w net.ipv6.conf.all.disable_ipv6=1")
 
-        info("\n*** PINGALL: Membangun Flow Rules... (Tunggu sebentar)\n")
+        info("\n*** PINGALL: Learning MAC Address (Wajib)...\n")
         net.pingAll()
-        time.sleep(2)
+        time.sleep(1)
 
-        # 3. Start Receivers
+        info("\n*** Start Traffic Generator (Duration: 300,000s)...\n")
+        
+        # Receiver
         h3, h4 = net.get('h3', 'h4')
-        info("*** Menyiapkan Receiver...\n")
         h3.cmd('ITGRecv -l h3_recv.log > /dev/null 2>&1 &')
         h4.cmd('iperf -s > /dev/null 2>&1 &')
         
-        # 4. Start Traffic Senders
+        # Sender
         h1, h2 = net.get('h1', 'h2')
-        info("*** Memulai VoIP Traffic & Background Traffic...\n")
         
-        # VoIP (Log disimpan ke h1_send.log)
+        # VoIP (H1->H3) Log ke file
+        info(">>> [H1] Mengirim VoIP Packets...\n")
         h1.cmd("ITGSend -T UDP -a 10.0.0.3 -rp 5060 -C 50 -c 160 -t 300000 > h1_send.log 2>&1 &")
         
-        # Background
-        h2.cmd("iperf -c 10.0.0.4 -t 300 -b 10M > /dev/null 2>&1 &")
+        # Background (H2->H4)
+        info(">>> [H2] Mengirim Background Traffic...\n")
+        h2.cmd("iperf -c 10.0.0.4 -t 300000 -b 10M > /dev/null 2>&1 &")
 
-        info("\n" + "="*50)
-        info("\n*** SIMULASI BERJALAN DALAM MODE LIVE VIEW ***")
-        info("\n*** Menampilkan Log VoIP dari H1 (Tekan Ctrl+C untuk stop) ***\n")
-        info("="*50 + "\n")
+        info("\n" + "="*60)
+        info("\n*** LIVE TRAFFIC LOG (H1 VoIP Sender) ***")
+        info("\n*** Layar ini menampilkan log asli dari D-ITG. ***")
+        info("\n*** Jika angka bertambah, berarti trafik sedang dikirim. ***")
+        info("\n*** Tekan Ctrl+C untuk STOP Simulasi. ***\n")
+        info("="*60 + "\n")
         
-        # 5. LIVE LOG VIEW (Pengganti CLI)
-        follow_log("h1_send.log")
+        # TRIK LIVE VIEW: Tail -f log file ke layar utama
+        # Ini akan menahan terminal disini sampai di-cancel
+        subprocess.call(["tail", "-f", "h1_send.log"])
 
-    except Exception as e:
-        info(f"*** Error: {e}\n")
     except KeyboardInterrupt:
         info("\n*** Stopping...\n")
-        
     finally:
-        info("\n*** Cleanup...\n")
+        info("*** Cleaning up...\n")
         os.system('sudo ovs-ofctl del-flows s1 -O OpenFlow13')
         net.stop()
 
