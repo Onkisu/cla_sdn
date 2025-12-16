@@ -61,7 +61,7 @@ def start_traffic_scenario(net):
     info("*** [H1] Memulai VoIP Call (Stabil, UDP, G.711)...\n")
     # Kita buat VoIP tetap konstan agar kita bisa lihat efek gangguan terhadapnya
     # Port 3000 -> 5060
-    h1.cmd("ITGSend -T UDP -a 10.0.0.3 -sp 3000 -rp 5060 -C 50 -c 160 -t 300000 &")
+    h1.cmd("ITGSend -T UDP -a 10.0.0.3 -rp 5060 -C 50 -c 160 -t 300000 &")
 
     # ---------------------------------------------------------
     # 2. BACKGROUND TRAFFIC (Dinamis) - H2 ke H4

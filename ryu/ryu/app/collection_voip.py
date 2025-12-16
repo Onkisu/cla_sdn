@@ -88,32 +88,41 @@ def init_db():
     print("[DB] Tabel 'design_data_ta' siap (Struktur Sesuai PDF).")
 
 def get_host_stats(host_name):
-    """
-    Mengambil statistik Interface langsung dari Host Mininet (Lebih Akurat untuk TX/RX End-to-End)
-    Return: tx_bytes, tx_packets, rx_bytes, rx_packets
-    """
+    # Command untuk ambil statistik interface
     cmd = ['sudo', 'ip', 'netns', 'exec', host_name, 'ip', '-s', 'link', 'show', 'eth0']
     try:
         res = subprocess.run(cmd, capture_output=True, text=True)
         output = res.stdout
         
-        # Regex untuk menangkap baris statistik IP Link
-        rx_match = re.search(r'RX:.*?\n\s+(\d+)\s+(\d+)', output, re.MULTILINE)
-        tx_match = re.search(r'TX:.*?\n\s+(\d+)\s+(\d+)', output, re.MULTILINE)
-        
         rx_bytes, rx_pkts = 0, 0
         tx_bytes, tx_pkts = 0, 0
-        
-        if rx_match:
-            rx_bytes = int(rx_match.group(1))
-            rx_pkts = int(rx_match.group(2))
-        if tx_match:
-            tx_bytes = int(tx_match.group(1))
-            tx_pkts = int(tx_match.group(2))
+
+        # Parsing baris per baris (Lebih aman dari Regex)
+        lines = output.splitlines()
+        for i, line in enumerate(lines):
+            line = line.strip()
             
+            # Cari data RX (biasanya baris setelah tulisan RX:)
+            if line.startswith("RX:"):
+                if i + 1 < len(lines):
+                    parts = lines[i+1].split()
+                    # Pastikan ada cukup kolom angka
+                    if len(parts) >= 2 and parts[0].isdigit():
+                        rx_bytes = int(parts[0])
+                        rx_pkts = int(parts[1])
+            
+            # Cari data TX (biasanya baris setelah tulisan TX:)
+            if line.startswith("TX:"):
+                if i + 1 < len(lines):
+                    parts = lines[i+1].split()
+                    if len(parts) >= 2 and parts[0].isdigit():
+                        tx_bytes = int(parts[0])
+                        tx_pkts = int(parts[1])
+
         return tx_bytes, tx_pkts, rx_bytes, rx_pkts
+
     except Exception as e:
-        print(f"Error reading stats form {host_name}: {e}")
+        print(f"Error reading stats from {host_name}: {e}")
         return 0, 0, 0, 0
 
 def collection_loop():
