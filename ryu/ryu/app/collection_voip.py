@@ -160,7 +160,7 @@ def main():
                 cur = conn.cursor()
                 
                 # Query INSERT standar
-                sql = """INSERT INTO design_data_ta
+                sql = """INSERT INTO traffic.flow_stats_
                          (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
                           ip_proto, tp_src, tp_dst, 
                           bytes_tx, bytes_rx, pkts_tx, pkts_rx, 
