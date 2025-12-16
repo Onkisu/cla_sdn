@@ -1,8 +1,8 @@
 #!/usr/bin/python3
 """
-[SIMULATION MAIN - FIXED]
-- Auto PINGALL (Wajib agar collector bisa baca MAC)
-- Auto Cleanup saat exit
+[SIMULATION MODULAR]
+- Topologi Leaf-Spine
+- Traffic Generator (ITGSend & Iperf) berdasarkan config_voip.py
 """
 
 from mininet.net import Mininet
@@ -13,43 +13,26 @@ from mininet.log import setLogLevel, info
 from mininet.cli import CLI
 import time
 import os
+import sys
 
-# Konfigurasi Host
-HOSTS = {
-    'h1': {'ip': '10.0.0.1', 'mac': '00:00:00:00:00:01'},
-    'h2': {'ip': '10.0.0.2', 'mac': '00:00:00:00:00:02'},
-    'h3': {'ip': '10.0.0.3', 'mac': '00:00:00:00:00:03'},
-    'h4': {'ip': '10.0.0.4', 'mac': '00:00:00:00:00:04'}
-}
+# Import Config
+try:
+    import config_voip as cfg
+except ImportError:
+    print("Error: config_voip.py tidak ditemukan!")
+    sys.exit(1)
 
 class LeafSpineTopo(Topo):
     def build(self):
         s1 = self.addSwitch('s1', dpid='0000000000000001')
-        h1 = self.addHost('h1', **HOSTS['h1'])
-        h2 = self.addHost('h2', **HOSTS['h2'])
-        h3 = self.addHost('h3', **HOSTS['h3'])
-        h4 = self.addHost('h4', **HOSTS['h4'])
-        link_opts = dict(bw=100, delay='2ms')
-        self.addLink(h1, s1, **link_opts)
-        self.addLink(h2, s1, **link_opts)
-        self.addLink(h3, s1, **link_opts)
-        self.addLink(h4, s1, **link_opts)
-
-def start_traffic_scenario(net):
-    h1, h2, h3, h4 = net.get('h1', 'h2', 'h3', 'h4')
-    
-    info("\n*** Menyiapkan Server...\n")
-    h3.cmd('ITGRecv -l h3_recv.log > h3_console.log 2>&1 &')
-    h4.cmd('iperf -s > h4_iperf.log 2>&1 &')
-    time.sleep(2)
-
-    info("*** [H1] Start VoIP Call...\n")
-    # Kirim VoIP (UDP)
-    h1.cmd("ITGSend -T UDP -a 10.0.0.3 -rp 5060 -C 50 -c 160 -t 300000 > h1_send.log 2>&1 &")
-
-    info("*** [H2] Start Background Traffic...\n")
-    # Kirim Background (TCP)
-    h2.cmd("iperf -c 10.0.0.4 -t 300 -b 10M > h2_traffic.log 2>&1 &")
+        
+        # Add Hosts secara dinamis dari Config
+        hosts_obj = {}
+        for name, meta in cfg.HOST_MAP.items():
+            hosts_obj[name] = self.addHost(name, ip=meta['ip'], mac=meta['mac'])
+            
+            # Link Config (100Mbps, 2ms)
+            self.addLink(hosts_obj[name], s1, bw=100, delay='2ms')
 
 def run():
     topo = LeafSpineTopo()
@@ -58,22 +41,47 @@ def run():
     
     try:
         net.start()
+        
+        # 1. Disable IPv6
         for h in net.hosts:
             h.cmd("sysctl -w net.ipv6.conf.all.disable_ipv6=1")
 
-        info("\n*** Melakukan Ping All (Wajib agar Flow terbentuk)...\n")
-        net.pingAll() 
+        # 2. Ping All (WAJIB)
+        info("\n*** Melakukan Ping All (Learning MAC Address)...\n")
+        net.pingAll()
+        time.sleep(1)
 
-        start_traffic_scenario(net)
+        # 3. Start Receivers (Servers)
+        info("\n*** Menjalankan Receiver...\n")
+        h3 = net.get('h3')
+        h4 = net.get('h4')
         
-        info("\n*** Simulasi Berjalan! Tekan Ctrl+C untuk berhenti.\n")
+        h3.cmd('ITGRecv -l h3.log > /dev/null 2>&1 &') # VoIP Server
+        h4.cmd('iperf -s > /dev/null 2>&1 &')          # Bg Server
+
+        time.sleep(2)
+
+        # 4. Start Senders (Traffic Generation)
+        info("*** Menjalankan Traffic Generator...\n")
+        h1 = net.get('h1') # VoIP Sender
+        h2 = net.get('h2') # Background Sender
+
+        # VoIP (UDP G.711)
+        info(f" -> {cfg.HOST_MAP['h1']['type']} (H1 -> H3)\n")
+        h1.cmd(f"ITGSend -T UDP -a {cfg.HOST_MAP['h1']['target_ip']} -rp 5060 -C 50 -c 160 -t 300000 > /dev/null 2>&1 &")
+
+        # Background (TCP)
+        info(f" -> {cfg.HOST_MAP['h2']['type']} (H2 -> H4)\n")
+        h2.cmd(f"iperf -c {cfg.HOST_MAP['h2']['target_ip']} -t 300 -b 10M > /dev/null 2>&1 &")
+
+        info("\n*** Simulasi Berjalan! Jalankan 'collector_modular.py' sekarang.\n")
         CLI(net)
-        
+
     except Exception as e:
         info(f"*** Error: {e}\n")
-        
+
     finally:
-        info("\n*** Cleanup...\n")
+        info("\n*** Membersihkan OVS Flows & Stop...\n")
         os.system('sudo ovs-ofctl del-flows s1 -O OpenFlow13')
         net.stop()
 

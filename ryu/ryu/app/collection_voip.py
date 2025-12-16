@@ -1,9 +1,9 @@
 #!/usr/bin/python3
 """
-[COLLECTION FINAL - DIRECT KERNEL MODE]
-- Membaca langsung dari /sys/class/net/{host}-eth0/ (Fixed Interface Name)
-- Menggunakan tabel 'traffic.flow_stats_'
-- Memastikan semua kolom IP/MAC terisi
+[COLLECTION MODULAR]
+- Membaca target dari config_voip.py
+- Menggunakan metode Kernel Reading (/sys/class/net) agar akurat
+- Struktur Data Lengkap (timestamp s/d traffic_label)
 """
 
 import psycopg2
@@ -12,72 +12,48 @@ import time
 import sys
 from datetime import datetime
 
-# --- KONFIGURASI DATABASE ---
-DB_CONFIG = {
-    'dbname': 'development', 
-    'user': 'dev_one', 
-    'password': 'hijack332.', 
-    'host': '103.181.142.165'
-}
+# Import Config
+try:
+    import config_voip as cfg
+except ImportError:
+    print("Error: config_voip.py tidak ditemukan!")
+    sys.exit(1)
 
-# --- DEFINISI FLOW (Hardcoded Metadata) ---
-# Script akan mengambil IP/MAC dari sini agar tidak NULL di Database
-MONITOR_FLOWS = [
-    {
-        'label_base': 'VoIP',
-        'src_host': 'h1', 'dst_host': 'h3',
-        'src_ip': '10.0.0.1', 'dst_ip': '10.0.0.3',
-        'src_mac': '00:00:00:00:00:01', 'dst_mac': '00:00:00:00:00:03',
-        'proto': 17, 'tp_src': 0, 'tp_dst': 5060 
-    },
-    {
-        'label_base': 'Background',
-        'src_host': 'h2', 'dst_host': 'h4',
-        'src_ip': '10.0.0.2', 'dst_ip': '10.0.0.4',
-        'src_mac': '00:00:00:00:00:02', 'dst_mac': '00:00:00:00:00:04',
-        'proto': 6, 'tp_src': 0, 'tp_dst': 5001 
-    }
-]
-
-def get_host_stats_fixed(host_name):
-    """
-    Membaca statistik langsung dari interface standar Mininet.
-    Pola: h1 -> h1-eth0
-    """
-    # FIX: Interface di Mininet PASTI bernama <host>-eth0
-    iface = f"{host_name}-eth0"
-    
+def get_kernel_stats(host_name, interface):
+    """Membaca statistik langsung dari file system kernel namespace"""
     try:
-        def read_file(metric):
-            # Command: ip netns exec h1 cat /sys/class/net/h1-eth0/statistics/tx_bytes
-            cmd = ['sudo', 'ip', 'netns', 'exec', host_name, 'cat', f'/sys/class/net/{iface}/statistics/{metric}']
+        def read_val(metric):
+            cmd = ['sudo', 'ip', 'netns', 'exec', host_name, 'cat', f'/sys/class/net/{interface}/statistics/{metric}']
             res = subprocess.run(cmd, capture_output=True, text=True)
             val = res.stdout.strip()
             return int(val) if val.isdigit() else 0
 
-        tx_bytes = read_file('tx_bytes')
-        tx_pkts  = read_file('tx_packets')
-        rx_bytes = read_file('rx_bytes')
-        rx_pkts  = read_file('rx_packets')
-        
-        return tx_bytes, tx_pkts, rx_bytes, rx_pkts
-
-    except Exception:
-        # Return 0 jika Mininet belum jalan
+        return (
+            read_val('tx_bytes'), read_val('tx_packets'),
+            read_val('rx_bytes'), read_val('rx_packets')
+        )
+    except:
         return 0, 0, 0, 0
 
 def main():
-    print("--- MEMULAI MONITORING (TARGET: traffic.flow_stats_) ---")
+    print(f"--- START MONITORING [DB: {cfg.DB_CONFIG['table_name']}] ---")
     
-    # Cek Koneksi DB
+    # 1. Init Database Connection
     try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        conn.close()
-        print("[OK] Koneksi Database Berhasil.")
+        conn = psycopg2.connect(
+            dbname=cfg.DB_CONFIG['dbname'],
+            user=cfg.DB_CONFIG['user'],
+            password=cfg.DB_CONFIG['password'],
+            host=cfg.DB_CONFIG['host']
+        )
+        print("[OK] Koneksi DB Berhasil.")
     except Exception as e:
-        print(f"[FATAL] Gagal konek database: {e}")
+        print(f"[FATAL] Gagal Konek DB: {e}")
         sys.exit(1)
 
+    # 2. Filter hanya Host 'Sender' yang perlu dimonitor TX-nya
+    targets = [k for k, v in cfg.HOST_MAP.items() if v['role'] == 'sender']
+    
     prev_stats = {}
 
     try:
@@ -85,65 +61,77 @@ def main():
             start_loop = time.time()
             timestamp = datetime.now()
             batch_data = []
-
-            # Visual Log di Terminal
+            
+            # Print Header Log
             print(f"\n--- {timestamp.strftime('%H:%M:%S')} ---")
 
-            for flow in MONITOR_FLOWS:
-                # Ambil statistik TX dari Sender dan RX dari Receiver
-                tx_b_curr, tx_p_curr, _, _ = get_host_stats_fixed(flow['src_host'])
-                _, _, rx_b_curr, rx_p_curr = get_host_stats_fixed(flow['dst_host'])
+            for host in targets:
+                meta = cfg.HOST_MAP[host]
+                
+                # Ambil data SENDER (TX)
+                tx_b, tx_p, _, _ = get_kernel_stats(host, meta['interface'])
+                
+                # Ambil data RECEIVER (RX) - untuk throughput yang akurat
+                # Kita cari siapa receiver dari sender ini berdasarkan IP target
+                target_host_name = [k for k,v in cfg.HOST_MAP.items() if v['ip'] == meta['target_ip']][0]
+                target_meta = cfg.HOST_MAP[target_host_name]
+                _, _, rx_b, rx_p = get_kernel_stats(target_host_name, target_meta['interface'])
 
-                # Skip jika data 0 (artinya Simulasi belum jalan)
-                if tx_b_curr == 0 and rx_b_curr == 0:
+                # Skip jika belum ada trafik
+                if tx_b == 0 and rx_b == 0:
                     continue
 
-                flow_key = flow['label_base']
-
-                # Hitung Delta (Selisih)
-                if flow_key in prev_stats:
-                    prev = prev_stats[flow_key]
+                # Hitung Delta
+                if host in prev_stats:
+                    prev = prev_stats[host]
                     time_diff = start_loop - prev['ts']
                     
                     if time_diff > 0:
-                        bytes_tx_diff = tx_b_curr - prev['tx_b']
-                        bytes_rx_diff = rx_b_curr - prev['rx_b']
-                        pkts_tx_diff  = tx_p_curr - prev['tx_p']
-                        pkts_rx_diff  = rx_p_curr - prev['rx_p']
+                        bytes_tx_diff = tx_b - prev['tx_b']
+                        bytes_rx_diff = rx_b - prev['rx_b']
+                        pkts_tx_diff  = tx_p - prev['tx_p']
+                        pkts_rx_diff  = rx_p - prev['rx_p']
                         
-                        # Throughput (Mbps)
-                        throughput_mbps = (bytes_rx_diff * 8) / 1000000.0 / time_diff
-                        throughput_mbps = max(0.0, throughput_mbps)
+                        # Calculate Throughput (Mbps) based on RX
+                        throughput = (bytes_rx_diff * 8) / 1_000_000.0 / time_diff
+                        throughput = max(0.0, throughput)
 
-                        print(f"[{flow['label_base']:^10}] {flow['src_ip']}->{flow['dst_ip']} | Load: {throughput_mbps:.4f} Mbps")
+                        print(f"[{meta['type']:^10}] {meta['ip']}->{meta['target_ip']} | Load: {throughput:.4f} Mbps")
 
-                        # Susun Data Tuple (URUTAN HARUS SESUAI SQL DI BAWAH)
+                        # Susun Data Tuple (16 Kolom)
                         row = (
-                            timestamp, "0000000000000001", 
-                            flow['src_ip'], flow['dst_ip'],
-                            flow['src_mac'], flow['dst_mac'],
-                            flow['proto'], flow['tp_src'], flow['tp_dst'],
-                            bytes_tx_diff, bytes_rx_diff,
-                            pkts_tx_diff, pkts_rx_diff,
-                            time_diff, throughput_mbps, flow['label_base']
+                            timestamp,              # timestamp
+                            "0000000000000001",     # dpid
+                            meta['ip'],             # src_ip
+                            meta['target_ip'],      # dst_ip
+                            meta['mac'],            # src_mac
+                            meta['target_mac'],     # dst_mac
+                            meta['proto'],          # ip_proto
+                            meta['tp_src'],         # tp_src
+                            meta['tp_dst'],         # tp_dst
+                            bytes_tx_diff,          # bytes_tx
+                            bytes_rx_diff,          # bytes_rx
+                            pkts_tx_diff,           # pkts_tx
+                            pkts_rx_diff,           # pkts_rx
+                            time_diff,              # duration_sec
+                            throughput,             # throughput_mbps
+                            meta['type']            # traffic_label
                         )
                         batch_data.append(row)
 
                 # Update State
-                prev_stats[flow_key] = {
-                    'tx_b': tx_b_curr, 'rx_b': rx_b_curr,
-                    'tx_p': tx_p_curr, 'rx_p': rx_p_curr,
+                prev_stats[host] = {
+                    'tx_b': tx_b, 'tx_p': tx_p,
+                    'rx_b': rx_b, 'rx_p': rx_p,
                     'ts': start_loop
                 }
 
-            # Insert ke Database (Schema traffic.flow_stats_)
+            # Insert ke Database
             if batch_data:
                 try:
-                    conn = psycopg2.connect(**DB_CONFIG)
                     cur = conn.cursor()
-                    
-                    # FIX SQL: Menggunakan traffic.flow_stats_
-                    sql = """INSERT INTO traffic.flow_stats_
+                    # Query dinamis berdasarkan nama tabel di config
+                    sql = f"""INSERT INTO {cfg.DB_CONFIG['table_name']}
                              (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
                               ip_proto, tp_src, tp_dst, 
                               bytes_tx, bytes_rx, pkts_tx, pkts_rx, 
@@ -152,16 +140,21 @@ def main():
                     
                     cur.executemany(sql, batch_data)
                     conn.commit()
-                    conn.close()
                 except Exception as e:
                     print(f"[DB ERROR] {e}")
+                    # Reconnect logic simple
+                    try:
+                        conn.rollback()
+                    except:
+                        pass
 
-            # Sleep 1 detik
+            # Jaga Loop 1 Detik
             elapsed = time.time() - start_loop
             time.sleep(max(0, 1.0 - elapsed))
 
     except KeyboardInterrupt:
-        print("\nMonitoring Berhenti.")
+        print("\nStop.")
+        conn.close()
 
 if __name__ == '__main__':
     main()
