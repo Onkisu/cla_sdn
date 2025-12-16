@@ -1,8 +1,6 @@
 #!/usr/bin/python3
 """
-Simulasi Data Center dengan Traffic VoIP Only menggunakan D-ITG
-- Menggunakan ITGSend & ITGRecv
-- Pola trafik randomized berdasarkan jam harian
+Simulasi VoIP: Normal Traffic (Randomized) + Periodic Congestion (Burst)
 """
 from mininet.net import Mininet
 from mininet.node import RemoteController, OVSSwitch, Node
@@ -15,21 +13,18 @@ import time
 import subprocess
 import math
 import signal
-from config_voip import HOST_INFO
+from shared_config import HOST_INFO
 
-# ---------------------- GLOBAL LOCK & STOP EVENT ----------------------
 cmd_lock = threading.Lock()
 stop_event = threading.Event()
 
 def safe_cmd(node, cmd):
     if stop_event.is_set(): return None
     with cmd_lock:
-        try:
-            return node.cmd(cmd)
-        except:
-            return None
+        try: return node.cmd(cmd)
+        except: return None
 
-# ---------------------- ROUTER & TOPOLOGI (SAMA SEPERTI SEBELUMNYA) ----------------------
+# ---------------------- TOPOLOGI (SAMA) ----------------------
 class LinuxRouter(Node):
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
@@ -40,7 +35,7 @@ class LinuxRouter(Node):
 
 class DataCenterTopo(Topo):
     def build(self):
-        info("*** Membangun Topologi Data Center...\n")
+        info("*** Topologi Data Center...\n")
         cr1 = self.addNode('cr1', cls=LinuxRouter, ip='192.168.100.254/24')
         ext_sw = self.addSwitch('ext_sw', dpid='1')
         tor1 = self.addSwitch('tor1', dpid='2')
@@ -57,108 +52,144 @@ class DataCenterTopo(Topo):
         app1 = self.addHost('app1', ip='10.10.2.1/24', mac='00:00:00:00:0B:01', defaultRoute='via 10.10.2.254')
         db1 = self.addHost('db1', ip='10.10.2.2/24', mac='00:00:00:00:0B:02', defaultRoute='via 10.10.2.254')
 
-        self.addLink(user1, ext_sw, bw=10); self.addLink(user2, ext_sw, bw=10); self.addLink(user3, ext_sw, bw=10)
-        self.addLink(web1, tor1, bw=20); self.addLink(web2, tor1, bw=20); self.addLink(cache1, tor1, bw=20)
-        self.addLink(app1, tor2, bw=20); self.addLink(db1, tor2, bw=20)
+        self.addLink(user1, ext_sw, bw=20); self.addLink(user2, ext_sw, bw=20); self.addLink(user3, ext_sw, bw=20)
+        self.addLink(web1, tor1, bw=50); self.addLink(web2, tor1, bw=50); self.addLink(cache1, tor1, bw=50)
+        self.addLink(app1, tor2, bw=50); self.addLink(db1, tor2, bw=50)
         
         self.addLink(cr1, ext_sw, intfName1='cr1-eth1', params1={'ip': '192.168.100.254/24'})
         self.addLink(cr1, tor1, intfName1='cr1-eth2', params1={'ip': '10.10.1.254/24'})
         self.addLink(cr1, tor2, intfName1='cr1-eth3', params1={'ip': '10.10.2.254/24'})
 
-# ---------------------- DAILY PATTERN GENERATOR ----------------------
+# ---------------------- PATTERN GENERATOR ----------------------
 def daily_pattern(hour, base_min, base_max, seed_val=0):
     jitter_phase = (seed_val % 10) * 0.02
     sine_val = 0.5 * (1 + math.sin(((hour / 24.0) * 2 * math.pi) - (math.pi/2) + jitter_phase))
     baseline = 0.2 * base_max
     scaled = baseline + (sine_val * (base_max - baseline))
-    jitter = random.uniform(0.8, 1.2) # Jitter lebih besar untuk VoIP call duration
-    value = max(base_min, min(base_max, scaled * jitter))
-    return value
+    jitter = random.uniform(0.7, 1.3) 
+    return max(base_min, min(base_max, scaled * jitter))
 
-# ---------------------- D-ITG VOIP GENERATOR ----------------------
-def generate_ditg_voip(client, target_ip, target_port, seed):
+# ---------------------- TRAFFIC TYPES ----------------------
+
+def run_normal_voip(client, target_ip, target_port, seed):
     """
-    Mengirim trafik D-ITG mensimulasikan VoIP (G.711 / G.729).
-    Karakteristik: UDP, Packet Size kecil (~160 bytes), Rate konstan (~50 pps).
+    Trafik VoIP Normal: 
+    - Paket Kecil (160 bytes), Rate Rendah (50pps ~ 64kbps).
+    - Random start/stop (simulasi orang menelpon).
     """
     rng = random.Random(seed)
-    info(f"Start D-ITG VoIP: {client.name} -> {target_ip}:{target_port}\n")
+    info(f"[{client.name}] Normal VoIP loop started -> {target_ip}\n")
     
     while not stop_event.is_set():
         try:
             hour = int(time.strftime("%H"))
+            # Call duration: 5s to 30s
+            duration_ms = int(daily_pattern(hour, 5000, 30000, seed))
             
-            # Durasi panggilan (call duration) mengikuti pola harian
-            # Jam sibuk = panggilan lebih lama
-            duration_ms = int(daily_pattern(hour, 5000, 60000, seed)) # 5 detik s.d 60 detik
-            
-            # Parameter VoIP (Simulasi G.711)
-            # -T UDP : Protokol UDP
-            # -a : Destination IP
-            # -rp : Destination Port
-            # -C 50 : 50 packets per second
-            # -c 160 : 160 bytes payload size
-            # -t : duration in ms
-            
-            # Randomize start delay sedikit
-            time.sleep(rng.uniform(0.5, 2.0))
-            
+            # G.711 Codec Simulation (Normal)
+            # -C 50 pps, -c 160 bytes
             cmd = f"ITGSend -T UDP -a {target_ip} -rp {target_port} -C 50 -c 160 -t {duration_ms} &"
             safe_cmd(client, cmd)
             
-            # Tunggu durasi panggilan + jeda antar panggilan
-            wait_time = (duration_ms / 1000.0) + daily_pattern(hour, 2, 10, seed+1)
+            # Sleep (Duration + small gap)
+            wait_time = (duration_ms / 1000.0) + rng.uniform(1.0, 5.0)
             stop_event.wait(wait_time)
-            
-        except Exception as e:
-            info(f"Error in thread {client.name}: {e}\n")
+        except Exception:
             stop_event.wait(1)
 
-# ---------------------- MAIN TRAFFIC CONTROL ----------------------
+def congestion_controller(net, victims):
+    """
+    CONGESTION CONTROLLER:
+    - 25 Detik: Tenang (Hanya trafik normal berjalan)
+    - 5 Detik: BURST / CONGESTION
+    """
+    info("\n*** Starting Periodic Congestion Controller (30s Cycle) ***\n")
+    
+    while not stop_event.is_set():
+        # PHASE 1: CALM (25 Detik)
+        # info("--- Status: Normal Traffic Only ---\n")
+        stop_event.wait(25)
+        
+        if stop_event.is_set(): break
+
+        # PHASE 2: CONGESTION (5 Detik)
+        info("\n!!! WARNING: INITIATING CONGESTION BURST (5s) !!!\n")
+        
+        # Pilih beberapa host untuk melakukan burst
+        burst_threads = []
+        for v_name in victims:
+            node = net.get(v_name)
+            meta = HOST_INFO.get(v_name)
+            if not meta: continue
+            
+            target_ip = meta['dst_ip']
+            target_port = meta['tp_dst']
+            
+            # High Traffic Burst:
+            # -C 5000 (5000 packets/sec)
+            # -c 1024 (1KB packet size) -> ~40 Mbps per flow
+            cmd = f"ITGSend -T UDP -a {target_ip} -rp {target_port} -C 5000 -c 1024 -t 5000"
+            
+            t = threading.Thread(target=safe_cmd, args=(node, cmd))
+            burst_threads.append(t)
+            t.start()
+            
+        # Tunggu burst selesai (5 detik)
+        time.sleep(5)
+        info("--- Congestion Ended. Cooling down. ---\n")
+
+# ---------------------- MAIN ----------------------
 def start_traffic(net):
-    # Setup Host Namespace Links untuk Collector
-    info("\n*** Setup Network Namespace Link for Collector...\n")
+    # Setup Link Namespace
+    info("\n*** Setup Namespaces...\n")
     subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=False)
     for h in net.hosts:
         if h.name in HOST_INFO:
             subprocess.run(['sudo', 'ip', 'netns', 'attach', h.name, str(h.pid)], check=False)
 
-    info("\n*** Starting ITGRecv (Receiver) on all targets...\n")
-    # Setiap host yang menjadi 'dst_ip' di config harus menjalankan ITGRecv
+    # 1. Start Receivers (ITGRecv)
+    info("*** Starting ITGRecv...\n")
     receivers = set()
     for h_name, meta in HOST_INFO.items():
-        # Cari host object berdasarkan IP tujuan
-        target_ip = meta['dst_ip']
-        for h_obj in net.hosts:
-            if h_obj.IP() == target_ip:
-                receivers.add(h_obj)
-    
+        dst_ip = meta['dst_ip']
+        for h in net.hosts:
+            if h.IP() == dst_ip: receivers.add(h)
+            
     for h in receivers:
-        # Jalankan ITGRecv di background
         safe_cmd(h, "ITGRecv &")
-    
     time.sleep(2)
-    info("*** Receivers ready.\n")
 
     threads = []
-    # Mulai thread pengirim (Sender) berdasarkan HOST_INFO
+    
+    # 2. Start Normal VoIP Traffic (Background)
+    # Jalankan untuk SEMUA host di HOST_INFO
     i = 0
+    victim_list = [] # List host yg akan dipakai buat burst
     for h_name, meta in HOST_INFO.items():
         src_node = net.get(h_name)
         dst_ip = meta['dst_ip']
-        dst_port = meta['tp_dst'] # Menggunakan port dari metadata
+        dst_port = meta['tp_dst']
         
-        t = threading.Thread(target=generate_ditg_voip, 
-                             args=(src_node, dst_ip, dst_port, 1000 + i),
+        # Tambahkan ke thread normal
+        t = threading.Thread(target=run_normal_voip, 
+                             args=(src_node, dst_ip, dst_port, 1000+i),
                              daemon=False)
         threads.append(t)
+        
+        # Masukkan User1 dan User2 sebagai trigger congestion (External attack simulation)
+        if h_name in ['user1', 'user2', 'web1']: 
+            victim_list.append(h_name)
         i += 1
+
+    # 3. Start Congestion Controller
+    ct = threading.Thread(target=congestion_controller, args=(net, victim_list), daemon=False)
+    threads.append(ct)
 
     for t in threads: t.start()
     return threads
 
 def cleanup(net):
-    info("*** Cleaning up D-ITG processes...\n")
+    info("*** Cleanup...\n")
     subprocess.run("sudo killall -9 ITGSend ITGRecv", shell=True)
     subprocess.run("sudo rm -rf /var/run/netns/*", shell=True)
 
@@ -175,7 +206,6 @@ if __name__ == "__main__":
         info("\n*** Simulation Running. Press Ctrl+C to stop.\n")
         while not stop_event.is_set():
             time.sleep(1)
-            
     except KeyboardInterrupt:
         stop_event.set()
     finally:
