@@ -17,7 +17,7 @@ import signal
 import sys
 # Pastikan shared_config ada di folder yang sama
 try:
-    from shared_config import HOST_INFO
+    from config_voip import HOST_INFO
 except ImportError:
     print("Error: shared_config.py not found or invalid.")
     sys.exit(1)
