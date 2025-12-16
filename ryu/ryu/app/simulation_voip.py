@@ -1,127 +1,180 @@
-#!/usr/bin/python3
-"""
-[SIMULATION FINAL - REAL ACTIVITY MONITOR]
-- Menjalankan Traffic Generator
-- Menampilkan Live TX Statistics dari Interface H1
-- Memberikan bukti visual bahwa trafik berjalan
-"""
-
-from mininet.net import Mininet
-from mininet.node import RemoteController, OVSSwitch
-from mininet.link import TCLink
-from mininet.topo import Topo
-from mininet.log import setLogLevel, info
-import time
+import sys
 import os
+import time
+from mininet.topo import Topo
+from mininet.net import Mininet
+from mininet.node import RemoteController, OVSKernelSwitch
+from mininet.link import TCLink
+from mininet.cli import CLI
+from mininet.log import setLogLevel
+
+# ==========================================
+# 1. EMBEDDED SCRIPTS (SENDER & RECEIVER)
+# ==========================================
+
+# Script Sender (Disimpan sebagai string)
+SENDER_SCRIPT = """
+import socket
+import time
+import random
+import struct
 import sys
 
-# Konfigurasi Host
-HOSTS = {
-    'h1': {'ip': '10.0.0.1', 'mac': '00:00:00:00:00:01'},
-    'h2': {'ip': '10.0.0.2', 'mac': '00:00:00:00:00:02'},
-    'h3': {'ip': '10.0.0.3', 'mac': '00:00:00:00:00:03'},
-    'h4': {'ip': '10.0.0.4', 'mac': '00:00:00:00:00:04'}
-}
+TARGET_IP = sys.argv[1] if len(sys.argv) > 1 else '10.0.0.2'
+TARGET_PORT = 5050
 
-class LeafSpineTopo(Topo):
-    def build(self):
-        s1 = self.addSwitch('s1', dpid='0000000000000001')
-        h1 = self.addHost('h1', **HOSTS['h1'])
-        h2 = self.addHost('h2', **HOSTS['h2'])
-        h3 = self.addHost('h3', **HOSTS['h3'])
-        h4 = self.addHost('h4', **HOSTS['h4'])
-        
-        self.addLink(h1, s1, bw=100, delay='2ms')
-        self.addLink(h2, s1, bw=100, delay='2ms')
-        self.addLink(h3, s1, bw=100, delay='2ms')
-        self.addLink(h4, s1, bw=100, delay='2ms')
+# Config Payload
+NORMAL_PAYLOAD_SIZE = 160   # VoIP Normal (G.711)
+BURST_PAYLOAD_SIZE = 1400   # Congestion / Micro-burst
 
-def read_tx_bytes(host_node, intf_name):
-    """Membaca TX Bytes langsung dari kernel"""
-    cmd = f"cat /sys/class/net/{intf_name}/statistics/tx_bytes"
-    try:
-        # Jalankan cat di dalam namespace host
-        result = host_node.cmd(cmd).strip()
-        return int(result)
-    except:
-        return 0
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-def monitor_live(net):
-    """Looping untuk menampilkan statistik trafik H1"""
-    h1 = net.get('h1')
-    prev_bytes = read_tx_bytes(h1, 'h1-eth0')
+print(f"[*] Sending VoIP traffic to {TARGET_IP}:{TARGET_PORT}")
+print("[*] Pattern: 30s Cycle (5s Burst, 25s Normal)")
+
+try:
     start_time = time.time()
+    seq_num = 0
     
-    print("\n" + "="*60)
-    print("*** MONITORING AKTIVITAS H1 (VoIP Sender) ***")
-    print(f"{'TIME':<10} | {'TOTAL TX (Bytes)':<20} | {'STATUS'}")
-    print("="*60)
+    while True:
+        current_time = time.time()
+        elapsed = current_time - start_time
+        cycle_position = elapsed % 30
+        
+        # Logika Burst: Detik 0-5
+        if cycle_position < 5:
+            mode = "BURST"
+            payload = b'B' * BURST_PAYLOAD_SIZE
+            sleep_time = 0.0005 # High Rate
+        else:
+            mode = "NORMAL"
+            payload = b'N' * NORMAL_PAYLOAD_SIZE
+            sleep_time = random.uniform(0.015, 0.025) # 15-25ms jitter
 
-    try:
-        while True:
-            time.sleep(1)
-            curr_bytes = read_tx_bytes(h1, 'h1-eth0')
-            delta = curr_bytes - prev_bytes
-            now = datetime.now().strftime("%H:%M:%S")
+        # Header: Seq + Timestamp
+        header = struct.pack('!I d', seq_num, current_time)
+        data = header + payload
+        
+        sock.sendto(data, (TARGET_IP, TARGET_PORT))
+        seq_num += 1
+        
+        if seq_num % 1000 == 0:
+            print(f"Seq: {seq_num} | Mode: {mode}")
             
-            status = "SILENT"
-            if delta > 1000:
-                status = ">>> SENDING TRAFFIC"
-            
-            print(f"{now:<10} | {curr_bytes:<20} | {status}")
-            
-            prev_bytes = curr_bytes
-            
-    except KeyboardInterrupt:
-        return
+        time.sleep(sleep_time)
 
-from datetime import datetime
+except KeyboardInterrupt:
+    sock.close()
+"""
+
+# Script Receiver (Disimpan sebagai string)
+RECEIVER_SCRIPT = """
+import socket
+
+BIND_IP = '0.0.0.0'
+BIND_PORT = 5050
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind((BIND_IP, BIND_PORT))
+
+print(f"[*] Receiver Listening on {BIND_IP}:{BIND_PORT}")
+
+try:
+    while True:
+        data, addr = sock.recvfrom(4096)
+        # Sink (terima & buang)
+except KeyboardInterrupt:
+    sock.close()
+"""
+
+# ==========================================
+# 2. TOPOLOGY DEFINITION (SPINE-LEAF)
+# ==========================================
+
+class SpineLeafTopo(Topo):
+    def build(self):
+        # Spines
+        spine1 = self.addSwitch('s1', dpid='0000000000000001')
+        spine2 = self.addSwitch('s2', dpid='0000000000000002')
+        # Leafs
+        leaf1 = self.addSwitch('s3', dpid='0000000000000003')
+        leaf2 = self.addSwitch('s4', dpid='0000000000000004')
+        # Hosts
+        h1 = self.addHost('h1', ip='10.0.0.1', mac='00:00:00:00:00:01')
+        h2 = self.addHost('h2', ip='10.0.0.2', mac='00:00:00:00:00:02')
+
+        # Link Host -> Leaf (High BW)
+        self.addLink(h1, leaf1, bw=100)
+        self.addLink(h2, leaf2, bw=100)
+        
+        # Mesh Spine-Leaf (Redundant Links)
+        self.addLink(leaf1, spine1, bw=20)
+        self.addLink(leaf1, spine2, bw=20)
+        self.addLink(leaf2, spine1, bw=20)
+        self.addLink(leaf2, spine2, bw=20)
+
+# ==========================================
+# 3. MAIN RUNNER
+# ==========================================
+
+def create_scripts():
+    """Membuat file python sementara dari string di atas"""
+    with open("temp_sender.py", "w") as f:
+        f.write(SENDER_SCRIPT)
+    with open("temp_receiver.py", "w") as f:
+        f.write(RECEIVER_SCRIPT)
+    os.chmod("temp_sender.py", 0o755)
+    os.chmod("temp_receiver.py", 0o755)
+
+def clean_scripts():
+    """Menghapus file sementara"""
+    if os.path.exists("temp_sender.py"): os.remove("temp_sender.py")
+    if os.path.exists("temp_receiver.py"): os.remove("temp_receiver.py")
 
 def run():
-    topo = LeafSpineTopo()
-    c0 = RemoteController('c0', ip='127.0.0.1', port=6633)
-    net = Mininet(topo=topo, controller=c0, switch=OVSSwitch, link=TCLink, autoSetMacs=True)
+    # 1. Buat file script dulu
+    create_scripts()
     
-    try:
-        net.start()
-        for s in net.switches:
-            s.cmd("ovs-vsctl set Bridge %s protocols=OpenFlow13" % s.name)
+    # 2. Setup Mininet
+    topo = SpineLeafTopo()
+    net = Mininet(topo=topo, controller=RemoteController, switch=OVSKernelSwitch, link=TCLink)
+    
+    print("[*] Starting Mininet Spine-Leaf Topology...")
+    net.start()
 
-        # Matikan IPv6 agar tidak noise
-        for h in net.hosts:
-            h.cmd("sysctl -w net.ipv6.conf.all.disable_ipv6=1")
+    # 3. Config OVS (PENTING untuk Ryu)
+    for s in ['s1', 's2', 's3', 's4']:
+        os.system(f'ovs-vsctl set bridge {s} protocols=OpenFlow13')
 
-        info("\n*** PINGALL: Learning MAC Address...\n")
-        net.pingAll()
-        time.sleep(1)
+    h1 = net.get('h1')
+    h2 = net.get('h2')
 
-        info("\n*** Starting Traffic (Duration: 300,000s)...\n")
-        
-        # Receiver
-        h3, h4 = net.get('h3', 'h4')
-        h3.cmd('ITGRecv -l h3_recv.log > /dev/null 2>&1 &')
-        h4.cmd('iperf -s > /dev/null 2>&1 &')
-        
-        # Sender
-        h1, h2 = net.get('h1', 'h2')
-        
-        # VoIP (H1->H3) - UDP
-        # stdbuf -o0 memaksa agar buffer langsung dikirim (opsional)
-        h1.cmd("ITGSend -T UDP -a 10.0.0.3 -rp 5060 -C 50 -c 160 -t 300000 > /dev/null 2>&1 &")
-        
-        # Background (H2->H4) - TCP
-        h2.cmd("iperf -c 10.0.0.4 -t 300000 -b 10M > /dev/null 2>&1 &")
+    print("[*] Waiting 5s for STP convergence (Ryu)...")
+    time.sleep(5)
 
-        # MASUK KE LIVE MONITOR
-        monitor_live(net)
+    # 4. Jalankan Traffic Generator
+    print("[*] Starting Receiver on h2...")
+    h2.cmd('python3 temp_receiver.py &')
+    
+    print("[*] Starting VoIP Sender on h1 (Background)...")
+    h1.cmd('python3 temp_sender.py 10.0.0.2 > traffic.log 2>&1 &')
 
-    except KeyboardInterrupt:
-        info("\n*** Stopping...\n")
-    finally:
-        info("*** Cleanup...\n")
-        os.system('sudo ovs-ofctl del-flows s1 -O OpenFlow13')
-        net.stop()
+    print("\n[INFO] Simulation Running.")
+    print("[INFO] Data flow: H1 -> [Network] -> H2")
+    print("[INFO] Ryu Collector should be capturing this now.")
+    
+    # 5. Masuk ke CLI
+    CLI(net)
+    
+    # 6. Cleanup
+    print("[*] Stopping Network...")
+    net.stop()
+    clean_scripts()
 
 if __name__ == '__main__':
     setLogLevel('info')
-    run()
+    try:
+        run()
+    except Exception as e:
+        print(f"[!] Error: {e}")
+        clean_scripts()
