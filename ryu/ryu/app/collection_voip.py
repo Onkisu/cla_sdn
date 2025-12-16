@@ -1,171 +1,140 @@
-import time
-import os
+#!/usr/bin/python3
 import psycopg2
+import re
+import time
+import subprocess
+import sys
+import os
+from collections import defaultdict
 from datetime import datetime
-from ryu.app import simple_switch_stp_13
-from ryu.controller import ofp_event
-from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER
-from ryu.controller.handler import set_ev_cls
-from ryu.lib import hub
+import threading
 
-class VoIPCollectorDB(simple_switch_stp_13.SimpleSwitch13):
-    def __init__(self, *args, **kwargs):
-        super(VoIPCollectorDB, self).__init__(*args, **kwargs)
-        self.datapaths = {}
-        self.monitor_thread = hub.spawn(self._monitor)
-        
-        # Cache untuk perhitungan delta throughput
-        # Key: (dpid, src_ip, dst_ip, ip_proto, tp_src, tp_dst)
-        self.flow_stats_cache = {}
-        
-        # Konfigurasi Database
-        self.db_config = {
-            "host": "103.181.142.165",
-            "database": "development",
-            "user": "dev_one",
-            "password": "hijack332."
+try:
+    from config_voip import DB_CONN, COLLECT_INTERVAL, HOSTS_TO_MONITOR, HOST_INFO
+except ImportError:
+    print("[CRITICAL] Config missing!")
+    sys.exit(1)
+
+# Simpan state terakhir untuk perhitungan delta (throughput)
+last_stats = defaultdict(lambda: {'tx_bytes': 0, 'rx_bytes': 0, 'tx_pkts': 0, 'rx_pkts': 0, 'time': 0})
+stop_event = threading.Event()
+
+def run_ns_cmd(host, cmd):
+    if not os.path.exists(f"/var/run/netns/{host}"): return None
+    try:
+        return subprocess.run(['sudo', 'ip', 'netns', 'exec', host] + cmd, capture_output=True, text=True, timeout=1).stdout
+    except: return None
+
+def get_stats(host):
+    # Ambil statistik eth0 dari namespace host
+    out = run_ns_cmd(host, ['ip', '-s', 'link', 'show', 'eth0'])
+    if not out: out = run_ns_cmd(host, ['ip', '-s', 'link', 'show', f"{host}-eth0"])
+    if not out: return None
+    
+    # Parsing output ip -s link
+    rx_match = re.search(r'RX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
+    tx_match = re.search(r'TX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
+    
+    if rx_match and tx_match:
+        return {
+            'rx_bytes': int(rx_match.group(1)),
+            'rx_pkts': int(rx_match.group(2)),
+            'tx_bytes': int(tx_match.group(1)),
+            'tx_pkts': int(tx_match.group(2)),
+            'time': time.time()
         }
+    return None
+
+def db_connect():
+    try: return psycopg2.connect(DB_CONN)
+    except Exception as e: 
+        print(f"[DB ERROR] {e}")
+        return None
+
+def collector():
+    print(f"*** Monitoring {len(HOSTS_TO_MONITOR)} Hosts (VoIP Traffic) ***")
+    
+    # Inisialisasi baseline
+    for h in HOSTS_TO_MONITOR:
+        s = get_stats(h)
+        if s: last_stats[h] = s
+
+    time.sleep(COLLECT_INTERVAL) # Tunggu siklus pertama
+
+    conn = db_connect()
+    
+    while not stop_event.is_set():
+        if not conn or conn.closed: conn = db_connect()
         
-        # Inisialisasi Koneksi
-        self.conn = None
-        self.cur = None
-        self.connect_db()
-
-    def connect_db(self):
-        try:
-            self.conn = psycopg2.connect(**self.db_config)
-            self.cur = self.conn.cursor()
-            print("[*] Berhasil terhubung ke Database PostgreSQL.")
-        except Exception as e:
-            print(f"[!] Gagal terhubung ke Database: {e}")
-            self.conn = None
-
-    def insert_to_db(self, data):
-        """
-        Melakukan INSERT ke tabel traffic.traffic_flow_
-        Data tuple urutan: (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
-                            ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx, 
-                            pkts_tx, pkts_rx, duration_sec, throughput_mbps, traffic_label)
-        """
-        # Cek koneksi, reconnect jika putus
-        if not self.conn or self.conn.closed:
-            print("[!] Koneksi DB terputus, mencoba reconnect...")
-            self.connect_db()
+        rows = []
+        current_time_db = datetime.now() # Timestamp untuk DB
         
-        if not self.conn:
-            return # Skip jika masih gagal connect
-
-        sql = """
-            INSERT INTO traffic.traffic_flow_ 
-            (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
-             ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx, 
-             pkts_tx, pkts_rx, duration_sec, throughput_mbps, traffic_label)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        
-        try:
-            self.cur.execute(sql, data)
-            self.conn.commit()
-            # print(f"[+] Data inserted: {data[2]} -> {data[3]} ({data[15]})") 
-        except Exception as e:
-            print(f"[!] Error Insert DB: {e}")
-            self.conn.rollback()
-
-    @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
-    def _state_change_handler(self, ev):
-        datapath = ev.datapath
-        if ev.state == MAIN_DISPATCHER:
-            if datapath.id not in self.datapaths:
-                self.datapaths[datapath.id] = datapath
-        elif ev.state == DEAD_DISPATCHER:
-            if datapath.id in self.datapaths:
-                del self.datapaths[datapath.id]
-
-    def _monitor(self):
-        while True:
-            for dp in self.datapaths.values():
-                self._request_stats(dp)
-            hub.sleep(1)  # Polling interval 1 detik
-
-    def _request_stats(self, datapath):
-        parser = datapath.ofproto_parser
-        req = parser.OFPFlowStatsRequest(datapath)
-        datapath.send_msg(req)
-
-    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
-    def _flow_stats_reply_handler(self, ev):
-        body = ev.msg.body
-        dpid_raw = ev.msg.datapath.id
-        dpid_str = f"s{dpid_raw}" # Format "s1", "s2", dst
-        
-        timestamp_curr = datetime.now() # Format Timestamp PostgreSQL
-        current_time = time.time()
-
-        # Filter flow yang relevan (IPv4)
-        # Urutkan agar pemrosesan konsisten
-        sorted_flows = sorted([flow for flow in body if flow.priority > 0],
-                              key=lambda flow: (flow.match.get('in_port', 0), flow.match.get('ipv4_dst', '0')))
-        
-        for stat in sorted_flows:
-            match = stat.match
+        for h in HOSTS_TO_MONITOR:
+            curr = get_stats(h)
+            if not curr: continue
             
-            src_ip = match.get('ipv4_src')
-            dst_ip = match.get('ipv4_dst')
+            prev = last_stats[h]
+            meta = HOST_INFO.get(h, {})
             
-            if not src_ip or not dst_ip:
-                continue
-                
-            src_mac = match.get('eth_src', '')
-            dst_mac = match.get('eth_dst', '')
-            ip_proto = match.get('ip_proto', 0)
-            tp_src = match.get('udp_src', match.get('tcp_src', 0))
-            tp_dst = match.get('udp_dst', match.get('tcp_dst', 0))
+            # Hitung Delta
+            d_tx_bytes = curr['tx_bytes'] - prev['tx_bytes']
+            d_rx_bytes = curr['rx_bytes'] - prev['rx_bytes']
+            d_tx_pkts = curr['tx_pkts'] - prev['tx_pkts']
+            d_rx_pkts = curr['rx_pkts'] - prev['rx_pkts']
+            time_diff = curr['time'] - prev['time']
+            
+            # Update state
+            last_stats[h] = curr
+            
+            # Hitung Throughput (Mbps) = (Bytes * 8) / (Time * 1M)
+            # Kita gunakan arah TX sebagai indikator throughput utama node ini
+            throughput = 0.0
+            if time_diff > 0:
+                throughput = (d_tx_bytes * 8) / (time_diff * 1_000_000.0)
 
-            # Key unik untuk flow stats cache
-            flow_key = (dpid_raw, src_ip, dst_ip, ip_proto, tp_src, tp_dst)
-            
-            bytes_now = stat.byte_count
-            throughput_mbps = 0.0
-            
-            # Hitung Throughput
-            if flow_key in self.flow_stats_cache:
-                prev_bytes, prev_time = self.flow_stats_cache[flow_key]
-                delta_bytes = bytes_now - prev_bytes
-                delta_time = current_time - prev_time
-                
-                if delta_time > 0 and delta_bytes >= 0:
-                    throughput_mbps = (delta_bytes * 8) / (delta_time * 1000000)
-            
-            self.flow_stats_cache[flow_key] = (bytes_now, current_time)
+            # Filter: Hanya simpan jika ada trafik atau jika ini adalah node aktif
+            if d_tx_bytes > 0 or d_rx_bytes > 0:
+                rows.append((
+                    current_time_db,            # timestamp
+                    meta.get('dpid', 0),        # dpid
+                    meta.get('ip'),             # src_ip (Host IP)
+                    meta.get('dst_ip'),         # dst_ip (Target IP)
+                    meta.get('mac'),            # src_mac
+                    meta.get('dst_mac'),        # dst_mac
+                    meta.get('proto', 17),      # ip_proto (UDP=17)
+                    meta.get('tp_src', 0),      # tp_src
+                    meta.get('tp_dst', 0),      # tp_dst
+                    d_tx_bytes,                 # bytes_tx (Delta)
+                    d_rx_bytes,                 # bytes_rx (Delta)
+                    d_tx_pkts,                  # pkts_tx (Delta)
+                    d_rx_pkts,                  # pkts_rx (Delta)
+                    COLLECT_INTERVAL,           # duration_sec
+                    round(throughput, 4),       # throughput_mbps
+                    meta.get('label', 'unknown')# traffic_label
+                ))
 
-            # Labeling Logic (Burst vs Normal)
-            if throughput_mbps > 0.5:
-                traffic_label = "VoIP-Burst"
-            elif throughput_mbps > 0.001:
-                traffic_label = "VoIP-Normal"
-            else:
-                traffic_label = "Idle"
+        if rows and conn:
+            try:
+                cur = conn.cursor()
+                # Query INSERT sesuai schema baru
+                q = """
+                INSERT INTO traffic.flow_stats_ (
+                    timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
+                    ip_proto, tp_src, tp_dst, 
+                    bytes_tx, bytes_rx, pkts_tx, pkts_rx, 
+                    duration_sec, throughput_mbps, traffic_label
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                cur.executemany(q, rows)
+                conn.commit()
+                cur.close()
+                print(f"[SAVE] {len(rows)} records inserted.")
+            except Exception as e:
+                print(f"[DB WRITE ERROR] {e}")
+                conn.rollback()
+            
+        time.sleep(COLLECT_INTERVAL)
 
-            # Hanya insert jika ada throughput atau traffic aktif (opsional)
-            if throughput_mbps >= 0:
-                # Siapkan data tuple (tanpa ID, biarkan DB auto-increment)
-                row_data = (
-                    timestamp_curr,
-                    dpid_str,
-                    src_ip,
-                    dst_ip,
-                    src_mac,
-                    dst_mac,
-                    ip_proto,
-                    tp_src,
-                    tp_dst,
-                    stat.byte_count, # bytes_tx
-                    stat.byte_count, # bytes_rx (asumsi sama di switch entry)
-                    stat.packet_count, # pkts_tx
-                    stat.packet_count, # pkts_rx
-                    float(stat.duration_sec),
-                    float(f"{throughput_mbps:.4f}"),
-                    traffic_label
-                )
-                
-                self.insert_to_db(row_data)
+if __name__ == "__main__":
+    try: collector()
+    except KeyboardInterrupt: pass
