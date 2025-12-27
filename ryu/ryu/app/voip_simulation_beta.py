@@ -267,18 +267,26 @@ def cleanup():
 if __name__ == "__main__":
     setLogLevel('info')
     topo = LeafSpineTopo()
-    # Controller Remote (Pastikan RYU Anda jalan di terminal lain)
     net = Mininet(topo=topo, controller=RemoteController, switch=OVSKernelSwitch, link=TCLink)
     
     try:
         net.start()
         setup_namespaces(net)
+        
+        # [PENTING!] Tambahkan baris ini agar tidak perlu ARP Broadcast
+        # Ini akan mengisi tabel ARP semua host secara otomatis
+        info("*** Populating Static ARP tables...\n")
+        net.staticArp() 
+        
+        # Setting ulang IP/Netmask secara eksplisit ke /8 agar satu subnet
+        # Walaupun di Topo() sudah diset, kadang perlu dipaksa agar dianggap satu segmen
+        for h in net.hosts:
+            h.cmd(f"ip addr flush dev {h.name}-eth0")
+            h.cmd(f"ip addr add {HOST_INFO[h.name]['ip']}/8 brd 10.255.255.255 dev {h.name}-eth0")
+            h.cmd(f"ip link set dev {h.name}-eth0 up")
+
         info("*** Network Ready. Waiting 5s...\n")
         time.sleep(5)
-        
-        # Ping check mungkin gagal jika controller belum handle Loop/STP
-        # Tapi tetap jalankan traffic generator
-        # net.pingAll() 
         
         t_col = threading.Thread(target=collector_thread)
         t_col.start()
