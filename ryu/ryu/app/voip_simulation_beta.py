@@ -235,27 +235,43 @@ def signal_handler(sig, frame):
     info("\n*** Stopping... (Press Ctrl+C again to Force Kill)\n")
     stop_event.set()
 
+    
 if __name__ == "__main__":
+    # 1. BERSIHKAN SISA PROSES LAMA (PENTING)
     cleanup()
+    
     setLogLevel('info')
     
     topo = LeafSpineTopo()
-    # Gunakan RemoteController atau Controller default
+    
+    # Kita gunakan OVSKernelSwitch
     net = Mininet(topo=topo, controller=Controller, switch=OVSKernelSwitch, link=TCLink)
     
     signal.signal(signal.SIGINT, signal_handler)
     
     try:
         net.start()
-        info("*** Menunggu 5 detik (STP Convergence)...\n")
-        time.sleep(5)
+        
+        # ==========================================
+        # PERBAIKAN: AKTIFKAN STP (PENTING!)
+        # Agar RAM tidak meledak karena looping
+        # ==========================================
+        info("*** Enabling STP to prevent Loops/Broadcast Storms...\n")
+        for sw in net.switches:
+            # Command manual ke OVS untuk nyalakan Spanning Tree
+            sw.cmd(f'ovs-vsctl set Bridge {sw.name} stp_enable=true')
+        
+        info("*** Menunggu 15 detik untuk STP Convergence (Wajib Lama)...\n")
+        # STP butuh waktu 15-30 detik untuk memblokir path yang loop
+        time.sleep(15) 
         
         info("*** Ping All untuk mengisi ARP Table...\n")
+        # Jika STP belum kelar, ini bisa gagal sebagian, tapi tidak akan bikin crash
         net.pingAll()
         
         # Start Threads
         t_db = threading.Thread(target=db_writer_thread)
-        t_db.daemon = True # Agar otomatis mati saat main exit
+        t_db.daemon = True 
         t_db.start()
         
         t_sniff = threading.Thread(target=sniffer_thread, args=(net,))
