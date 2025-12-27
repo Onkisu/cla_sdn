@@ -1,10 +1,10 @@
 #!/usr/bin/python3
 """
-LEAF-SPINE VOIP SIMULATION (DATASET GENERATOR EDITION)
+LEAF-SPINE VOIP SIMULATION (STREAMING EDITION)
 Fitur:
-1. Strict Traffic: 13.000 - 19.800 Bytes/sec.
-2. Single Label: 'normal' only.
-3. No Idle: Data kosong/gap dibuang, tidak masuk database.
+1. OVERLAP TRAFFIC: Durasi kirim 1.2s, interval loop 1.0s -> NO GAP.
+2. STRICT TARGET: 13.000 - 19.800 Bytes/sec (Wire Speed).
+3. NO FILTER: Semua detik tercatat di database.
 """
 
 import threading
@@ -33,7 +33,6 @@ COLLECT_INTERVAL = 1
 TARGET_BYTES_MIN = 13000 
 TARGET_BYTES_MAX = 19800
 
-# Host Definition
 HOST_INFO = {
     'user1': {'ip': '10.0.1.1', 'mac': '00:00:00:00:01:01', 'dst_ip': '10.0.2.1'},
     'user2': {'ip': '10.0.1.2', 'mac': '00:00:00:00:01:02', 'dst_ip': '10.0.3.1'},
@@ -57,7 +56,7 @@ class LeafSpineTopo(Topo):
         spines = [self.addSwitch(f'spine{i}', dpid=f'10{i}') for i in range(1, 4)]
         leaves = [self.addSwitch(f'leaf{i}', dpid=f'20{i}') for i in range(1, 4)]
 
-        # Backbone Links
+        # Backbone
         for leaf in leaves:
             for spine in spines:
                 self.addLink(leaf, spine, bw=1000) 
@@ -70,7 +69,7 @@ class LeafSpineTopo(Topo):
         self.addLink(self.addHost('app1', ip='10.0.3.1/8', mac='00:00:00:00:03:01'), leaves[2], bw=100)
         self.addLink(self.addHost('db1', ip='10.0.3.2/8', mac='00:00:00:00:03:02'), leaves[2], bw=100)
 
-# ================= 3. COLLECTOR (FILTERED) =================
+# ================= 3. COLLECTOR (NO FILTER) =================
 def run_ns_cmd(host_name, cmd):
     if not os.path.exists(f"/var/run/netns/{host_name}"): return None
     try:
@@ -92,7 +91,7 @@ def get_stats(host_name):
     return None
 
 def collector_thread():
-    info("*** [Collector] Monitoring Started (Only Saving 'Normal' Traffic)...\n")
+    info("*** [Collector] Monitoring Started (LOGGING EVERYTHING)...\n")
     conn = None
     try: conn = psycopg2.connect(DB_CONN)
     except: pass
@@ -118,17 +117,15 @@ def collector_thread():
             
             last_stats[h_name] = curr
             
-            # --- LOGIC FILTERING DATASET ---
-            # 1. Hapus Idle: Jika bytes < 5000 (gap), jangan simpan ke DB.
-            # 2. Label: Semuanya 'normal'.
+            # --- NO FILTER ---
+            # Kita simpan semuanya. Kalau 0 bytes, tetap simpan agar ketahuan kalau error.
             
-            if dtx_bytes > 5000:
-                traffic_label = "normal"
-                
-                dst_mac = IP_TO_MAC.get(meta['dst_ip'], '00:00:00:00:00:00')
-                rows.append((now, 0, meta['ip'], meta['dst_ip'], meta['mac'], dst_mac,
-                             17, 5060, 5060, dtx_bytes, drx_bytes, dtx_pkts, drx_pkts, 
-                             COLLECT_INTERVAL, traffic_label))
+            label = "normal"
+            
+            dst_mac = IP_TO_MAC.get(meta['dst_ip'], '00:00:00:00:00:00')
+            rows.append((now, 0, meta['ip'], meta['dst_ip'], meta['mac'], dst_mac,
+                            17, 5060, 5060, dtx_bytes, drx_bytes, dtx_pkts, drx_pkts, 
+                            COLLECT_INTERVAL, label))
 
         if rows and conn:
             try:
@@ -141,9 +138,9 @@ def collector_thread():
                 conn.commit()
             except: conn.rollback()
 
-# ================= 4. TRAFFIC GENERATOR (CONSISTENT) =================
+# ================= 4. TRAFFIC GENERATOR (OVERLAPPING) =================
 def run_voip_traffic(net):
-    info(f"*** [Traffic] Generating Consistent 13k-19k Traffic...\n")
+    info(f"*** [Traffic] Generating CONTINUOUS 13k-19k Traffic...\n")
     
     # Start Receivers
     for h in net.hosts:
@@ -156,26 +153,33 @@ def run_voip_traffic(net):
         for h_name, meta in HOST_INFO.items():
             src_node = net.get(h_name)
             
+            # Payload 160 bytes (G.711)
+            # Wire Size = Payload + 14(Eth) + 20(IP) + 8(UDP) = ~202 Bytes
             payload_size = 160 
-            wire_packet_size = payload_size + 42
+            wire_packet_size = 202 
             
             # Random target murni 13.000 - 19.800
             target_bytes = random.randint(TARGET_BYTES_MIN, TARGET_BYTES_MAX)
+            
+            # Hitung Rate
             pps = int(target_bytes / wire_packet_size)
             
-            # Boosting yang pas agar tidak terlalu overshoot atau drop
-            boosted_pps = int(pps * 1.25)
-
+            # --- TRIK PENTING: OVERLAP ---
+            # Kita kirim selama 1200ms (1.2 detik)
+            # Tapi kita loop tiap 1000ms (1.0 detik)
+            # Artinya ada 0.2 detik overlap dimana traffic lama & baru jalan bareng.
+            # Ini MENJAMIN tidak ada gap 0 bytes.
+            
             cmd = (f"{ITG_SEND_BIN} -T UDP -a {meta['dst_ip']} "
                    f"-c {payload_size} "
-                   f"-C {boosted_pps} "
-                   f"-t 1000 > /dev/null 2>&1 &")
+                   f"-C {pps} "
+                   f"-t 1200 > /dev/null 2>&1 &")
             
             try: src_node.cmd(cmd)
             except: pass
         
-        # Loop 1.0 pas agar overlap sedikit dengan processing time
-        # Ini meminimalisir gap (idle)
+        # Loop 1.0 detik.
+        # Karena durasi kirim 1.2 detik, pipa tidak akan pernah kosong.
         time.sleep(1.0)
 
 # ================= 5. MAIN SETUP =================
@@ -197,7 +201,7 @@ def setup_network_config(net):
                 src.cmd(f"arp -s {dst_meta['ip']} {dst_meta['mac']}")
 
 def wait_for_convergence(net):
-    info("*** WARMUP: Pinging...\n")
+    info("*** WARMUP: Checking Packet Loss...\n")
     for i in range(1, 6):
         loss = net.pingAll()
         if loss == 0.0:
@@ -220,8 +224,10 @@ if __name__ == "__main__":
                  subprocess.run(['sudo', 'ln', '-s', f'/proc/{h.pid}/ns/net', f'/var/run/netns/{h.name}'], check=False)
 
         setup_network_config(net)
+        info("*** Waiting 5s for LLDP...\n")
         time.sleep(5)
         
+        # Wajib 0% Loss sebelum start traffic
         if wait_for_convergence(net):
             t_col = threading.Thread(target=collector_thread)
             t_col.start()
