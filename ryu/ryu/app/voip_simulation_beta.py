@@ -170,7 +170,7 @@ def collector_thread():
                 # Perhatikan kolom values yang di-insert sekarang 'bps_val'
                 rows.append((now, 0, meta['ip'], meta['dst_ip'], meta['mac'], 'FF:FF:FF:FF:FF:FF',
                              17, 5060, 5060, dtx_bytes, drx_bytes, dtx_pkts, drx_pkts, 
-                             COLLECT_INTERVAL, bps_val, label))
+                             COLLECT_INTERVAL, label))
 
         if rows and conn and not conn.closed:
             try:
