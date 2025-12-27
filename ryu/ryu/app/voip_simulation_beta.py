@@ -1,15 +1,9 @@
 #!/usr/bin/python3
 """
-============================================================
-FINAL SCRIPT: LEAF-SPINE 3x3 VOIP SIMULATION
-============================================================
-Fitur Utama:
-1. Topologi Leaf-Spine (3 Spine, 3 Leaf) - Full Mesh.
-2. Cross-Leaf Traffic: User1 (Leaf1) -> User2 (Leaf3).
-   -> Memaksa traffic melewati Spine (Valid untuk K-Shortest Path).
-3. Sniffer Mode: Menangkap setiap paket & Length-nya.
-4. Database: Menyimpan data per paket ke PostgreSQL.
-============================================================
+LEAF-SPINE 3x3 VOIP SIMULATION (PCAP STYLE OUTPUT)
+Topology: 3 Spines, 3 Leaves (Full Mesh).
+Traffic: VoIP (UDP) User1 -> User2.
+Output: Mimics Wireshark/PCAP CSV Export.
 """
 
 import threading
@@ -20,164 +14,176 @@ import sys
 import signal
 import psycopg2
 from datetime import datetime
+import itertools
 
-# --- IMPORT LIBRARY JARINGAN ---
+# --- IMPORT MININET & SCAPY ---
 from scapy.all import sniff, IP, UDP
 from mininet.net import Mininet
 from mininet.node import Controller, OVSKernelSwitch, RemoteController
 from mininet.link import TCLink
 from mininet.topo import Topo
 from mininet.log import setLogLevel, info
-from mininet.cli import CLI
 
-# ================= 1. KONFIGURASI DATABASE & TARGET =================
+# ================= 1. KONFIGURASI =================
 DB_CONFIG = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 
-# Target Throughput VoIP (Bits Per Second)
+# Target Traffic (Bits Per Second)
 TARGET_BPS_MIN = 100000 
 TARGET_BPS_MAX = 150000
 
-# Konfigurasi Host & IP (Flat Network 10.0.0.x agar Routing L2 otomatis)
+# Host Configuration (Flat Subnet 10.0.0.x for L2 Fabric)
 HOST_INFO = {
-    # --- SKENARIO UTAMA (VOIP) ---
-    # User 1 mengirim suara ke User 2
-    # Lokasi fisik mereka dipisah (Leaf 1 vs Leaf 3)
-    'user1': {'ip': '10.0.0.1', 'dst_ip': '10.0.0.2', 'mac': '00:00:00:00:00:01'}, 
+    'user1': {'ip': '10.0.0.1', 'dst_ip': '10.0.0.2', 'mac': '00:00:00:00:00:01'},
     'user2': {'ip': '10.0.0.2', 'dst_ip': '10.0.0.1', 'mac': '00:00:00:00:00:02'},
+    # Background Host (Optional)
+    'web1':  {'ip': '10.0.0.3', 'dst_ip': '10.0.0.1', 'mac': '00:00:00:00:00:03'}
 }
 
-# Global Control Variables
+# Global Variables
 stop_event = threading.Event()
 pkt_queue = []
 queue_lock = threading.Lock()
 cmd_lock = threading.Lock()
 
-# ================= 2. CLASS TOPOLOGI LEAF-SPINE =================
+# Global Counter untuk kolom "No."
+packet_counter = itertools.count(1)
+start_time_ref = time.time() # Untuk menghitung relatif "time"
+
+# ================= 2. TOPOLOGI LEAF-SPINE 3x3 =================
 class LeafSpineTopo(Topo):
     def build(self):
-        info("*** Membangun Topologi Leaf-Spine 3x3 (Cross-Leaf Setup)...\n")
+        info("*** Membangun Topologi Leaf-Spine 3x3...\n")
         
-        # 1. Buat 3 Spine Switches
-        spine1 = self.addSwitch('spine1', dpid='1001')
-        spine2 = self.addSwitch('spine2', dpid='1002')
-        spine3 = self.addSwitch('spine3', dpid='1003')
-        spines = [spine1, spine2, spine3]
-            
-        # 2. Buat 3 Leaf Switches
-        leaf1 = self.addSwitch('leaf1', dpid='2001')
-        leaf2 = self.addSwitch('leaf2', dpid='2002')
-        leaf3 = self.addSwitch('leaf3', dpid='2003')
-        leaves = [leaf1, leaf2, leaf3]
-            
-        # 3. Link Full Mesh (Setiap Leaf connect ke SEMUA Spine)
-        # Bandwidth antar switch dibuat besar (1Gbps)
+        # 1. Create Spines (Backbone)
+        spines = [self.addSwitch(f'spine{i}') for i in range(1, 4)]
+        
+        # 2. Create Leaves (Access)
+        leaves = [self.addSwitch(f'leaf{i}') for i in range(1, 4)]
+        
+        # 3. Full Mesh Links (Every Leaf connects to Every Spine)
         for leaf in leaves:
             for spine in spines:
-                self.addLink(leaf, spine, bw=1000) 
+                self.addLink(leaf, spine, bw=1000) # 1Gbps Backbone
         
-        # 4. PENEMPATAN HOST (CRITICAL FOR THESIS)
-        
-        # --- LEAF 1 (Zona A) ---
-        # User 1 (Penelpon) ditaruh disini
+        # 4. Host Placement (Cross-Fabric Traffic)
+        # User 1 di Leaf 1
         user1 = self.addHost('user1', ip='10.0.0.1/24', mac='00:00:00:00:00:01')
-        self.addLink(user1, leaf1, bw=100) # 100Mbps link to switch
+        self.addLink(user1, leaves[0], bw=100)
         
-        # --- LEAF 2 (Zona B - Background/Dummy) ---
-        # Kita taruh Web Server dummy agar topologi terlihat hidup
-        web1 = self.addHost('web1', ip='10.0.0.10/24', mac='00:00:00:00:00:10')
-        self.addLink(web1, leaf2, bw=100)
+        # Web 1 di Leaf 2 (Dummy)
+        web1 = self.addHost('web1', ip='10.0.0.3/24', mac='00:00:00:00:00:03')
+        self.addLink(web1, leaves[1], bw=100)
         
-        # --- LEAF 3 (Zona C - Seberang) ---
-        # User 2 (Penerima) ditaruh disini.
-        # Akibatnya: Paket dari User1 HARUS nyebrang lewat Spine untuk sampai kesini.
+        # User 2 di Leaf 3 (Seberang)
         user2 = self.addHost('user2', ip='10.0.0.2/24', mac='00:00:00:00:00:02')
-        self.addLink(user2, leaf3, bw=100)
+        self.addLink(user2, leaves[2], bw=100)
 
-# ================= 3. SNIFFER (DATASET MAKER) =================
-def packet_callback(pkt):
-    """Fungsi ini dipanggil setiap ada paket lewat di interface yang dipantau"""
+# ================= 3. CAPTURE ENGINE (PCAP STYLE) =================
+def process_packet(pkt):
+    """
+    Fungsi ini dipanggil Scapy setiap ada paket.
+    Mengekstrak data persis seperti format Wireshark.
+    """
     if IP in pkt and UDP in pkt:
         src_ip = pkt[IP].src
         dst_ip = pkt[IP].dst
-        length = len(pkt) # INI YANG PENTING (Packet Size)
         
-        # Filter: Hanya catat paket milik User1 atau User2
+        # Filter: Hanya traffic User1 <-> User2
         target_ips = {'10.0.0.1', '10.0.0.2'}
+        if src_ip not in target_ips or dst_ip not in target_ips:
+            return
+
+        # 1. Arrival Time (Absolute)
+        arrival_time = datetime.now()
         
-        if src_ip in target_ips or dst_ip in target_ips:
-            with queue_lock:
-                pkt_queue.append((
-                    datetime.now(), 
-                    src_ip, 
-                    dst_ip, 
-                    length, # bytes_tx diisi LENGTH paket
-                    1,      # pkts_tx diisi 1
-                    "normal" # Label
-                ))
+        # 2. Time (Relative float)
+        rel_time = time.time() - start_time_ref
+        
+        # 3. Length (Bytes)
+        length = len(pkt)
+        
+        # 4. Info String (Source Port > Dest Port Len=X)
+        sport = pkt[UDP].sport
+        dport = pkt[UDP].dport
+        info_str = f"{sport} > {dport} Len={length}"
+        
+        # 5. No (Counter)
+        no = next(packet_counter)
+        
+        # Masukkan ke Queue
+        with queue_lock:
+            pkt_queue.append({
+                "time": rel_time,           # float8
+                "source": src_ip,           # text
+                "protocol": "UDP",          # text
+                "length": length,           # int8
+                "Arrival Time": arrival_time, # timestamp
+                "info": info_str,           # text
+                "No.": no,                  # int4
+                "destination": dst_ip       # varchar(50)
+            })
 
 def sniffer_thread(net):
-    info("*** [Sniffer] Starting Packet Capture on LEAF Switches...\n")
-    
-    # Kita sniff di interface switch LEAF yang mengarah ke Host
-    # Tujuannya: Menangkap paket tepat saat masuk/keluar jaringan
-    target_interfaces = []
-    
+    info("*** [Sniffer] Starting Capture (Leaf Interfaces)...\n")
+    # Monitor interface yang mengarah ke host di Leaf
+    ifaces = []
     for sw in net.switches:
-        # Cari switch yang namanya mengandung 'leaf'
         if 'leaf' in sw.name:
             for intf in sw.intfList():
-                # Jangan sniff loopback
                 if intf.name != 'lo':
-                    target_interfaces.append(intf.name)
+                    ifaces.append(intf.name)
     
-    info(f"*** Monitoring Interfaces: {target_interfaces}\n")
-    
-    # Menjalankan Scapy Sniff (Store=0 agar RAM tidak jebol)
-    sniff(iface=target_interfaces, prn=packet_callback, filter="udp", store=0, 
+    # Scapy Sniff
+    sniff(iface=ifaces, prn=process_packet, filter="udp", store=0, 
           stop_filter=lambda x: stop_event.is_set())
 
 def db_writer_thread():
-    info("*** [DB Writer] Connected to Database.\n")
+    info("*** [DB Writer] Connected.\n")
     conn = None
     try:
         conn = psycopg2.connect(DB_CONFIG)
     except Exception as e:
-        info(f"!!! DB Connection Failed: {e}\n")
+        info(f"!!! DB Error: {e}\n")
         return
 
     while not stop_event.is_set():
-        # Insert data setiap 1 detik (Batch Processing)
-        time.sleep(1.0)
+        time.sleep(1.0) # Batch insert setiap 1 detik
         
-        rows_to_insert = []
+        batch = []
         with queue_lock:
             if pkt_queue:
-                rows_to_insert = list(pkt_queue)
+                batch = list(pkt_queue)
                 pkt_queue.clear()
         
-        if rows_to_insert:
+        if batch and conn:
             try:
                 cur = conn.cursor()
-                # Query Insert
-                q = """INSERT INTO traffic.flow_stats_ 
-                       (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
-                       ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx, pkts_tx, pkts_rx, 
-                       duration_sec, traffic_label) 
-                       VALUES (%s, 0, %s, %s, '00:00', '00:00', 17, 0, 0, %s, 0, %s, 0, 0, %s)"""
+                # Query Insert sesuai kolom permintaan
+                q = """INSERT INTO pcap_logs 
+                       ("time", "source", "protocol", "length", "Arrival Time", "info", "No.", "destination") 
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"""
                 
-                # Mapping data queue ke query
-                final_data = [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows_to_insert]
+                data_tuple = [(
+                    r["time"], 
+                    r["source"], 
+                    r["protocol"], 
+                    r["length"], 
+                    r["Arrival Time"], 
+                    r["info"], 
+                    r["No."], 
+                    r["destination"]
+                ) for r in batch]
                 
-                cur.executemany(q, final_data)
+                cur.executemany(q, data_tuple)
                 conn.commit()
-                # print(f"-> DB: Saved {len(rows_to_insert)} packets.")
+                # print(f"-> Saved {len(batch)} packets.")
             except Exception as e:
-                print(f"!!! SQL Error: {e}")
+                print(f"SQL Error: {e}")
                 conn.rollback()
-
+    
     if conn: conn.close()
 
-# ================= 4. TRAFFIC GENERATOR (VoIP) =================
+# ================= 4. TRAFFIC GENERATOR (VoIP BPS) =================
 def safe_cmd(node, cmd):
     if stop_event.is_set(): return
     with cmd_lock:
@@ -185,102 +191,83 @@ def safe_cmd(node, cmd):
         except: pass
 
 def run_voip_traffic(net):
-    info("*** [Traffic] Starting VoIP Stream (User1 -> User2)...\n")
-    
-    # 1. Pastikan Receiver (User 2) Siap
-    u2 = net.get('user2')
-    safe_cmd(u2, "killall ITGRecv") # Bersihkan sisa lama
-    safe_cmd(u2, "ITGRecv -l /tmp/user2_recv.log &") # Start Receiver log ke file
-    
-    time.sleep(2)
+    info("*** [Traffic] Starting VoIP Stream (100k - 150k bps)...\n")
     
     u1 = net.get('user1')
-    dst_ip = HOST_INFO['user1']['dst_ip'] # 10.0.0.2
+    u2 = net.get('user2')
     
-    # Loop terus menerus sampai script di-stop
+    # Start Receiver di User 2
+    safe_cmd(u2, "killall ITGRecv")
+    safe_cmd(u2, "ITGRecv &")
+    time.sleep(2)
+    
+    dst_ip = HOST_INFO['user1']['dst_ip']
+    
     while not stop_event.is_set():
-        # --- PARAMETER DINAMIS (Agar mirip real traffic) ---
-        
-        # Target BPS acak antara 100k - 150k
+        # Randomize Parameters untuk VoIP
+        # BPS Target: 100kbps - 150kbps
         target_bps = random.randint(TARGET_BPS_MIN, TARGET_BPS_MAX)
         
-        # Ukuran Paket acak (100 - 160 bytes) -> Length di DB akan bervariasi
+        # Packet Size: 100 - 160 Bytes (Typical VoIP G.711)
         pkt_size = random.randint(100, 160)
         
-        # Hitung Rate (Packet Per Second)
-        # Rumus: Rate = Target_Bits / (Size_Bytes * 8)
+        # Hitung Packet Rate (PPS)
+        # Rate = Target_Bits / (Size_Bytes * 8)
         rate_pps = int(target_bps / (pkt_size * 8))
         if rate_pps < 1: rate_pps = 1
         
-        # Durasi burst pendek (2 detik) lalu loop lagi
-        # Ini membuat traffic lebih responsif
-        duration = 2000 # ms
+        # Kirim traffic selama 2 detik
+        duration = 2000 
+        cmd = f"ITGSend -T UDP -a {dst_ip} -c {pkt_size} -C {rate_pps} -t {duration} > /dev/null 2>&1"
         
-        # Log file untuk debug sender
-        log_file = "/tmp/user1_sender.log"
-        
-        # Command D-ITG
-        cmd = f"ITGSend -T UDP -a {dst_ip} -c {pkt_size} -C {rate_pps} -t {duration} > {log_file} 2>&1"
-        
-        # print(f"   + Sending: Size={pkt_size}B | Rate={rate_pps}pps | Target={target_bps/1000}kbps")
         safe_cmd(u1, cmd)
-        
-        # Tunggu sedikit sebelum inject lagi (sedikit jitter is okay)
-        time.sleep(0.5)
+        time.sleep(0.5) # Jeda kecil
 
-# ================= 5. MAIN PROGRAM =================
+# ================= 5. MAIN & CLEANUP =================
 def cleanup():
-    info("*** Cleaning up processes...\n")
-    os.system("killall -9 ITGSend ITGRecv > /dev/null 2>&1")
-    os.system("mn -c > /dev/null 2>&1")
+    os.system("sudo killall -9 ITGSend ITGRecv python3 > /dev/null 2>&1")
+    os.system("sudo mn -c > /dev/null 2>&1")
 
 def signal_handler(sig, frame):
-    info("\n*** Interrupted by User. Stopping...\n")
+    if stop_event.is_set():
+        info("\n!!! FORCE EXIT !!!\n")
+        os._exit(1)
+    info("\n*** Stopping... (Press Ctrl+C again to Force Kill)\n")
     stop_event.set()
 
 if __name__ == "__main__":
-    # Bersihkan sisa mininet sebelumnya
     cleanup()
-    
     setLogLevel('info')
     
-    # Init Topologi
     topo = LeafSpineTopo()
-    
-    # Gunakan Controller default (Learning Switch) agar koneksi L2 otomatis jalan
-    # Switch menggunakan OVS agar bisa di-sniff
+    # Gunakan RemoteController atau Controller default
     net = Mininet(topo=topo, controller=Controller, switch=OVSKernelSwitch, link=TCLink)
     
-    # Tangkap CTRL+C
     signal.signal(signal.SIGINT, signal_handler)
     
     try:
         net.start()
-        
-        info("*** Menunggu 5 detik untuk Network Convergence (STP)...\n")
+        info("*** Menunggu 5 detik (STP Convergence)...\n")
         time.sleep(5)
         
-        # Test Ping Dulu (Optional)
-        # info("*** Testing Ping All...\n")
-        # net.pingAll()
+        info("*** Ping All untuk mengisi ARP Table...\n")
+        net.pingAll()
         
-        # 1. Start Database Writer
+        # Start Threads
         t_db = threading.Thread(target=db_writer_thread)
+        t_db.daemon = True # Agar otomatis mati saat main exit
         t_db.start()
         
-        # 2. Start Sniffer
         t_sniff = threading.Thread(target=sniffer_thread, args=(net,))
+        t_sniff.daemon = True
         t_sniff.start()
-
-        # 3. Start Traffic
+        
         run_voip_traffic(net)
-
+        
     except Exception as e:
-        info(f"!!! Error Fatal: {e}\n")
+        info(f"!!! Error: {e}\n")
     finally:
         stop_event.set()
-        time.sleep(2) # Beri waktu thread berhenti
+        time.sleep(1)
         net.stop()
         cleanup()
-        info("*** Simulation Finished.\n")
-        sys.exit(0)
