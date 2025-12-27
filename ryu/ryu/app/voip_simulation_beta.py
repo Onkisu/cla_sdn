@@ -1,10 +1,10 @@
 #!/usr/bin/python3
 """
-FIXED VOIP SIMULATION (Topology + Collector + Strict Generator)
-Requirement:
-1. Packet Length: 100 - 230 Bytes
-2. Throughput Sum: 100.000 - 150.000 BITS/sec (12.5 - 18.75 KB/s)
-3. Label otomatis 'normal' jika masuk range tsb.
+FIXED VOIP SIMULATION (BPS EDITION)
+Target: 
+1. Throughput disimpan dalam BPS (Bits Per Second).
+2. Range Total: 100.000 - 150.000 bps.
+3. Label: 'normal' jika masuk range tersebut.
 """
 
 import threading
@@ -15,9 +15,7 @@ import sys
 import subprocess
 import re
 import math
-import signal
 import psycopg2
-from collections import defaultdict
 from datetime import datetime
 
 from mininet.net import Mininet
@@ -31,7 +29,7 @@ from mininet.cli import CLI
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 COLLECT_INTERVAL = 1
 
-# Target Traffic (Bits Per Second)
+# Range Target (BITS per Second)
 TARGET_BPS_MIN = 100000 
 TARGET_BPS_MAX = 150000
 
@@ -52,7 +50,7 @@ HOST_INFO = {
 stop_event = threading.Event()
 cmd_lock = threading.Lock()
 
-# ================= 2. TOPOLOGI (ROUTER + SWITCH) =================
+# ================= 2. TOPOLOGI =================
 class LinuxRouter(Node):
     def config(self, **params):
         super(LinuxRouter, self).config(**params)
@@ -82,7 +80,7 @@ class DataCenterTopo(Topo):
         app1 = self.addHost('app1', ip='10.10.2.1/24', mac='00:00:00:00:0B:01', defaultRoute='via 10.10.2.254')
         db1 = self.addHost('db1', ip='10.10.2.2/24', mac='00:00:00:00:0B:02', defaultRoute='via 10.10.2.254')
 
-        # Links
+        # Links (BW dilebihkan biar gak bottleneck di link)
         self.addLink(user1, ext_sw, bw=100); self.addLink(user2, ext_sw, bw=100); self.addLink(user3, ext_sw, bw=100)
         self.addLink(web1, tor1, bw=100); self.addLink(web2, tor1, bw=100); self.addLink(cache1, tor1, bw=100)
         self.addLink(app1, tor2, bw=100); self.addLink(db1, tor2, bw=100)
@@ -91,24 +89,21 @@ class DataCenterTopo(Topo):
         self.addLink(cr1, tor1, intfName1='cr1-eth2', params1={'ip': '10.10.1.254/24'})
         self.addLink(cr1, tor2, intfName1='cr1-eth3', params1={'ip': '10.10.2.254/24'})
 
-# ================= 3. COLLECTOR (DATABASE & LABELING) =================
+# ================= 3. COLLECTOR (DATABASE BPS) =================
 def run_ns_cmd(host_name, cmd):
     if not os.path.exists(f"/var/run/netns/{host_name}"): return None
     try:
-        # Timeout slightly increased to prevent empty return
         return subprocess.run(['sudo', 'ip', 'netns', 'exec', host_name] + cmd, 
                             capture_output=True, text=True, timeout=1.0).stdout
     except: return None
 
 def get_stats(host_name):
-    # Asumsi interface default Mininet: [hostname]-eth0
     intf = f"{host_name}-eth0"
     out = run_ns_cmd(host_name, ['ip', '-s', 'link', 'show', intf])
     if not out: return None
     rx = re.search(r'RX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
     tx = re.search(r'TX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
     if rx and tx:
-        # RX Bytes, RX Packets | TX Bytes, TX Packets
         return {
             'rx_bytes': int(rx.group(1)), 'rx_pkts': int(rx.group(2)),
             'tx_bytes': int(tx.group(1)), 'tx_pkts': int(tx.group(2)),
@@ -117,7 +112,7 @@ def get_stats(host_name):
     return None
 
 def collector_thread():
-    info("*** [Collector] Monitoring Started. Label Logic: 100k-150k bps = NORMAL.\n")
+    info("*** [Collector] Monitoring Started. Storing as BPS.\n")
     conn = None
     try:
         conn = psycopg2.connect(DB_CONN)
@@ -141,7 +136,6 @@ def collector_thread():
 
             prev = last_stats[h_name]
             
-            # Hitung Delta
             dtx_bytes = curr['tx_bytes'] - prev['tx_bytes']
             drx_bytes = curr['rx_bytes'] - prev['rx_bytes']
             dtx_pkts = curr['tx_pkts'] - prev['tx_pkts']
@@ -150,50 +144,51 @@ def collector_thread():
             t_diff = curr['time'] - prev['time']
             if t_diff <= 0: t_diff = 1.0
 
-            # Hitung Throughput (Mbps) -> (Bytes * 8) / (Time * 1 Juta)
-            bps = (dtx_bytes * 8) / t_diff
-            throughput_mbps = bps / 1_000_000.0
+            # --- PERHITUNGAN BPS ---
+            # Bytes dikali 8 jadi Bits. Dibagi waktu (seconds).
+            bps_val = (dtx_bytes * 8) / t_diff
 
             last_stats[h_name] = curr
             
-            # --- STRICT LABELING LOGIC ---
-            # Range Normal: 100.000 bps - 150.000 bps
-            # Dalam Mbps: 0.1 - 0.15 Mbps
+            # --- LABELING LOGIC (BPS) ---
+            # Range Normal: 100.000 - 150.000
+            # Kita kasih toleransi dikit untuk buffer jitter (misal 90k - 160k masih dianggap normal)
             
             label = "idle"
             
-            # Buffer dikit biar gak strict banget (toleransi +/- 10%)
-            if throughput_mbps > 0.8:
-                label = "congestion"
-            elif 0.08 <= throughput_mbps <= 0.20: 
-                label = "normal"  # INI YG ANDA CARI
-            elif throughput_mbps > 0.001:
+            if bps_val > 180000:
+                label = "congestion" # Terlalu tinggi
+            elif 90000 <= bps_val <= 160000:
+                label = "normal"     # Sesuai Target (dengan toleransi jitter)
+            elif bps_val > 1000:     # Ada traffic tapi kecil
                 label = "background"
             else:
                 label = "idle"
 
-            # Hanya insert jika ada activity tx atau rx
+            # Insert hanya jika ada traffic
             if dtx_bytes > 0 or drx_bytes > 0:
+                # Perhatikan kolom values yang di-insert sekarang 'bps_val'
                 rows.append((now, 0, meta['ip'], meta['dst_ip'], meta['mac'], 'FF:FF:FF:FF:FF:FF',
                              17, 5060, 5060, dtx_bytes, drx_bytes, dtx_pkts, drx_pkts, 
-                             COLLECT_INTERVAL, throughput_mbps, label))
+                             COLLECT_INTERVAL, bps_val, label))
 
         if rows and conn and not conn.closed:
             try:
                 cur = conn.cursor()
+                # --- UPDATE QUERY: throughput_bps ---
                 q = """INSERT INTO traffic.flow_stats_ (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
                        ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx, pkts_tx, pkts_rx, 
-                       duration_sec, throughput_mbps, traffic_label) 
+                       duration_sec, throughput_bps, traffic_label) 
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
                 cur.executemany(q, rows)
                 conn.commit()
             except Exception as e: 
-                # info(f"DB Insert Fail: {e}\n")
                 conn.rollback()
+                # info(f"DB Error: {e}\n")
     
     if conn: conn.close()
 
-# ================= 4. TRAFFIC GENERATOR (THE FIX) =================
+# ================= 4. TRAFFIC GENERATOR (STRICT 100k-150k BPS) =================
 def safe_cmd(node, cmd):
     if stop_event.is_set(): return
     with cmd_lock:
@@ -201,7 +196,7 @@ def safe_cmd(node, cmd):
         except: pass
 
 def run_voip_traffic(net):
-    info("*** [Traffic] Generating 100k-150k bps Traffic...\n")
+    info("*** [Traffic] Generating Strict 100,000 - 150,000 bps...\n")
     
     # Start Receivers
     receivers = set()
@@ -212,43 +207,39 @@ def run_voip_traffic(net):
             safe_cmd(h, "killall ITGRecv")
             safe_cmd(h, "ITGRecv &")
     
-    time.sleep(3) # Tunggu receiver siap
+    time.sleep(3)
 
     while not stop_event.is_set():
-        # Loop pendek agar parameter random terus berganti
-        # Kita pakai durasi pendek (2000ms) di D-ITG
         
         for h_name, meta in HOST_INFO.items():
             node = net.get(h_name)
             
-            # --- RUMUS MATEMATIKA SUPAYA PAS REQUIREMENT ---
+            # --- FORMULA BPS ---
             
-            # 1. Tentukan target bits (100k - 150k bps)
+            # 1. Target spesifik di range 100k - 150k
             target_bps = random.randint(TARGET_BPS_MIN, TARGET_BPS_MAX)
             
-            # 2. Konversi ke Bytes per detik
-            target_Bps = target_bps / 8
+            # 2. Random Size (100 - 230 Bytes)
+            pkt_size_bytes = random.randint(100, 230)
             
-            # 3. Tentukan ukuran paket (100 - 230 Bytes)
-            pkt_size = random.randint(100, 230)
+            # 3. Hitung Rate (Packets Per Second)
+            # Rumus: Rate * Size * 8 = Target_BPS
+            # Maka: Rate = Target_BPS / (Size * 8)
             
-            # 4. Hitung Rate (packet per second) supaya totalnya pas
-            # Rate = Target Bytes / Size per Packet
-            rate_pps = int(target_Bps / pkt_size)
+            pkt_size_bits = pkt_size_bytes * 8
+            rate_pps = int(target_bps / pkt_size_bits)
             
-            # Command D-ITG
-            # -c: Constant packet size (kita acak per command)
-            # -C: Constant rate (kita hitung biar throughputnya pas)
-            # -t: Duration (2000ms = 2 detik, lalu loop lagi biar dinamis)
+            # Koreksi minimal rate
+            if rate_pps < 1: rate_pps = 1
             
-            cmd = f"ITGSend -T UDP -a {meta['dst_ip']} -c {pkt_size} -C {rate_pps} -t 2000 > /dev/null 2>&1 &"
+            # Kirim Command (Durasi 2000ms biar dinamis tiap 2 detik)
+            cmd = f"ITGSend -T UDP -a {meta['dst_ip']} -c {pkt_size_bytes} -C {rate_pps} -t 2000 > /dev/null 2>&1 &"
             safe_cmd(node, cmd)
         
-        # Sleep sebentar sebelum generate batch command berikutnya
-        # Diberi jeda 2 detik (sesuai durasi -t)
+        # Jeda antar batch command (sesuai durasi traffic generation)
         time.sleep(2.0)
 
-# ================= 5. SETUP & CLEANUP =================
+# ================= 5. MAIN =================
 def setup_namespaces(net):
     subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=False)
     for h in net.hosts:
@@ -259,7 +250,7 @@ def setup_namespaces(net):
         subprocess.run(['sudo', 'ip', 'netns', 'attach', h.name, str(h.pid)], check=False)
 
 def cleanup():
-    info("*** Cleaning up processes...\n")
+    info("*** Cleaning up...\n")
     subprocess.run("sudo killall -9 ITGSend ITGRecv", shell=True, stderr=subprocess.DEVNULL)
     subprocess.run("sudo umount /var/run/netns/*", shell=True, stderr=subprocess.DEVNULL)
     subprocess.run("sudo rm -rf /var/run/netns/*", shell=True, stderr=subprocess.DEVNULL)
@@ -272,14 +263,12 @@ if __name__ == "__main__":
     try:
         net.start()
         setup_namespaces(net)
-        info("*** Waiting for Network Convergence (5s)...\n")
+        info("*** Network Ready. Waiting 5s...\n")
         time.sleep(5)
         
-        # Test Ping Dulu Biar Yakin Connect
-        info("*** Testing Connectivity...\n")
-        loss = net.pingAll()
-        if loss > 0:
-             info("!!! WARNING: Ping failed. Check Controller/Router Config !!!\n")
+        # Ping check
+        if net.pingAll() > 0:
+             info("!!! PING FAILED. Check Controller !!!\n")
         
         t_col = threading.Thread(target=collector_thread)
         t_col.start()
@@ -287,7 +276,7 @@ if __name__ == "__main__":
         run_voip_traffic(net)
 
     except KeyboardInterrupt:
-        info("\n*** Interrupted.\n")
+        info("\n*** Stopped.\n")
     finally:
         stop_event.set()
         cleanup()
