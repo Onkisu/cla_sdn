@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 new
 import psycopg2
 import pandas as pd
 import numpy as np
