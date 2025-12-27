@@ -1,6 +1,11 @@
 #!/usr/bin/python3
 """
-LEAF-SPINE 3x3 VOIP SIMULATION (FIXED STP & ARP)
+LEAF-SPINE VOIP SIMULATION (BYTES EDITION)
+Topology: 3 Spines, 3 Leaves (Full Mesh L2/L3)
+Target: 
+ 1. Throughput target dalam BYTES per Second.
+ 2. Range: 13,000 - 19,800 Bytes/sec.
+ 3. Label: 'normal' jika masuk range tersebut.
 """
 
 import threading
@@ -8,194 +13,281 @@ import time
 import random
 import os
 import sys
-import signal
+import subprocess
+import re
+import math
 import psycopg2
 from datetime import datetime
-import itertools
 
-# --- IMPORT MININET & SCAPY ---
-from scapy.all import sniff, IP, UDP
 from mininet.net import Mininet
-from mininet.node import Controller, OVSKernelSwitch
+from mininet.node import RemoteController, OVSKernelSwitch, Host
 from mininet.link import TCLink
 from mininet.topo import Topo
 from mininet.log import setLogLevel, info
+from mininet.cli import CLI
 
 # ================= 1. KONFIGURASI =================
-DB_CONFIG = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
-TARGET_BPS_MIN = 100000 
-TARGET_BPS_MAX = 150000
+DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
+COLLECT_INTERVAL = 1
 
+# Range Target (BYTES per Second)
+# Sesuai request: 13000 - 19800 Bytes
+TARGET_BYTES_MIN = 13000 
+TARGET_BYTES_MAX = 19800
+
+# Mapping Host agar tersebar di Leaf yang berbeda
+# L1: user1, user2
+# L2: web1, web2
+# L3: app1, db1
 HOST_INFO = {
-    'user1': {'ip': '10.0.0.1', 'dst_ip': '10.0.0.2'},
-    'user2': {'ip': '10.0.0.2', 'dst_ip': '10.0.0.1'}
+    # Leaf 1 Clients
+    'user1': {'ip': '10.0.1.1', 'mac': '00:00:00:00:01:01', 'dst_ip': '10.0.2.1', 'label': 'normal'},
+    'user2': {'ip': '10.0.1.2', 'mac': '00:00:00:00:01:02', 'dst_ip': '10.0.3.1', 'label': 'normal'},
+    
+    # Leaf 2 Servers
+    'web1':  {'ip': '10.0.2.1', 'mac': '00:00:00:00:02:01', 'dst_ip': '10.0.1.1', 'label': 'normal'},
+    'web2':  {'ip': '10.0.2.2', 'mac': '00:00:00:00:02:02', 'dst_ip': '10.0.3.2', 'label': 'normal'},
+    
+    # Leaf 3 DB/App
+    'app1':  {'ip': '10.0.3.1', 'mac': '00:00:00:00:03:01', 'dst_ip': '10.0.2.2', 'label': 'normal'},
+    'db1':   {'ip': '10.0.3.2', 'mac': '00:00:00:00:03:02', 'dst_ip': '10.0.1.2', 'label': 'normal'},
 }
 
-# Global Variables
 stop_event = threading.Event()
-pkt_queue = []
-queue_lock = threading.Lock()
-packet_counter = itertools.count(1)
-start_time_ref = time.time()
+cmd_lock = threading.Lock()
 
-# ================= 2. TOPOLOGI LEAF-SPINE 3x3 =================
+# ================= 2. TOPOLOGI LEAF-SPINE =================
 class LeafSpineTopo(Topo):
     def build(self):
-        #         info("*** Membangun Topologi Leaf-Spine 3x3...\n")
+        info("*** Membangun Topologi 3-Leaf 3-Spine...\n")
         
-        spines = [self.addSwitch(f'spine{i}') for i in range(1, 4)]
-        leaves = [self.addSwitch(f'leaf{i}') for i in range(1, 4)]
-        
-        # Link Backbone
+        # --- Create Spines ---
+        spines = []
+        for i in range(1, 4):
+            spines.append(self.addSwitch(f'spine{i}', dpid=f'10{i}'))
+
+        # --- Create Leaves ---
+        leaves = []
+        for i in range(1, 4):
+            leaves.append(self.addSwitch(f'leaf{i}', dpid=f'20{i}'))
+
+        # --- Interconnect Spines and Leaves (Full Mesh) ---
+        # Setiap Leaf connect ke SEMUA Spine
         for leaf in leaves:
             for spine in spines:
-                self.addLink(leaf, spine, bw=1000)
-        
-        # Hosts
-        user1 = self.addHost('user1', ip='10.0.0.1/24', mac='00:00:00:00:00:01')
-        self.addLink(user1, leaves[0], bw=100)
-        
-        web1 = self.addHost('web1', ip='10.0.0.3/24', mac='00:00:00:00:00:03')
-        self.addLink(web1, leaves[1], bw=100)
-        
-        user2 = self.addHost('user2', ip='10.0.0.2/24', mac='00:00:00:00:00:02')
-        self.addLink(user2, leaves[2], bw=100)
+                # BW besar di backbone biar tidak bottleneck
+                self.addLink(leaf, spine, bw=1000) 
 
-# ================= 3. CAPTURE & DB =================
-def process_packet(pkt):
-    if IP in pkt and UDP in pkt:
-        src_ip = pkt[IP].src
-        dst_ip = pkt[IP].dst
-        target_ips = {'10.0.0.1', '10.0.0.2'}
-        
-        if src_ip not in target_ips or dst_ip not in target_ips:
-            return
+        # --- Connect Hosts to Leaves ---
+        # Leaf 1: Users
+        h_user1 = self.addHost('user1', ip='10.0.1.1/24', mac='00:00:00:00:01:01')
+        h_user2 = self.addHost('user2', ip='10.0.1.2/24', mac='00:00:00:00:01:02')
+        self.addLink(h_user1, leaves[0], bw=100)
+        self.addLink(h_user2, leaves[0], bw=100)
 
-        arrival_time = datetime.now()
-        rel_time = time.time() - start_time_ref
-        length = len(pkt)
-        sport = pkt[UDP].sport
-        dport = pkt[UDP].dport
-        info_str = f"{sport} > {dport} Len={length}"
-        no = next(packet_counter)
-        
-        with queue_lock:
-            pkt_queue.append({
-                "time": rel_time, "source": src_ip, "protocol": "UDP",
-                "length": length, "Arrival Time": arrival_time,
-                "info": info_str, "No.": no, "destination": dst_ip
-            })
+        # Leaf 2: Web
+        h_web1 = self.addHost('web1', ip='10.0.2.1/24', mac='00:00:00:00:02:01')
+        h_web2 = self.addHost('web2', ip='10.0.2.2/24', mac='00:00:00:00:02:02')
+        self.addLink(h_web1, leaves[1], bw=100)
+        self.addLink(h_web2, leaves[1], bw=100)
 
-def sniffer_thread(net):
-    info("*** [Sniffer] Starting Capture...\n")
-    ifaces = []
-    for sw in net.switches:
-        if 'leaf' in sw.name:
-            for intf in sw.intfList():
-                if intf.name != 'lo': ifaces.append(intf.name)
-    sniff(iface=ifaces, prn=process_packet, filter="udp", store=0, stop_filter=lambda x: stop_event.is_set())
+        # Leaf 3: App/DB
+        h_app1 = self.addHost('app1', ip='10.0.3.1/24', mac='00:00:00:00:03:01')
+        h_db1 = self.addHost('db1', ip='10.0.3.2/24', mac='00:00:00:00:03:02')
+        self.addLink(h_app1, leaves[2], bw=100)
+        self.addLink(h_db1, leaves[2], bw=100)
 
-def db_writer_thread():
-    info("*** [DB Writer] Connecting...\n")
+# ================= 3. COLLECTOR (DATABASE BYTES) =================
+def run_ns_cmd(host_name, cmd):
+    if not os.path.exists(f"/var/run/netns/{host_name}"): return None
+    try:
+        return subprocess.run(['sudo', 'ip', 'netns', 'exec', host_name] + cmd, 
+                            capture_output=True, text=True, timeout=1.0).stdout
+    except: return None
+
+def get_stats(host_name):
+    intf = f"{host_name}-eth0"
+    out = run_ns_cmd(host_name, ['ip', '-s', 'link', 'show', intf])
+    if not out: return None
+    rx = re.search(r'RX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
+    tx = re.search(r'TX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
+    if rx and tx:
+        return {
+            'rx_bytes': int(rx.group(1)), 'rx_pkts': int(rx.group(2)),
+            'tx_bytes': int(tx.group(1)), 'tx_pkts': int(tx.group(2)),
+            'time': time.time()
+        }
+    return None
+
+def collector_thread():
+    info("*** [Collector] Monitoring Started. Storing as BYTES/SEC.\n")
     conn = None
     try:
-        conn = psycopg2.connect(DB_CONFIG)
+        conn = psycopg2.connect(DB_CONN)
     except Exception as e:
-        info(f"!!! DB Error: {e}\n")
-        return
+        info(f"!!! [Collector] DB Error: {e}\n")
 
+    last_stats = {}
+    
     while not stop_event.is_set():
-        time.sleep(1.0)
-        batch = []
-        with queue_lock:
-            if pkt_queue:
-                batch = list(pkt_queue)
-                pkt_queue.clear()
-        
-        if batch and conn:
+        time.sleep(COLLECT_INTERVAL)
+        rows = []
+        now = datetime.now()
+
+        for h_name, meta in HOST_INFO.items():
+            curr = get_stats(h_name)
+            if not curr: continue
+
+            if h_name not in last_stats:
+                last_stats[h_name] = curr
+                continue
+
+            prev = last_stats[h_name]
+            
+            dtx_bytes = curr['tx_bytes'] - prev['tx_bytes']
+            drx_bytes = curr['rx_bytes'] - prev['rx_bytes']
+            dtx_pkts = curr['tx_pkts'] - prev['tx_pkts']
+            drx_pkts = curr['rx_pkts'] - prev['rx_pkts']
+            
+            t_diff = curr['time'] - prev['time']
+            if t_diff <= 0: t_diff = 1.0
+
+            # --- PERHITUNGAN BYTES PER SECOND ---
+            # Kita menggunakan total bytes (TX + RX) atau salah satu tergantung perspektif.
+            # Di sini kita hitung Bytes rate murni dari TX (yang dikirim host ini).
+            bytes_sec_tx = dtx_bytes / t_diff
+            
+            last_stats[h_name] = curr
+            
+            # --- LABELING LOGIC (BYTES) ---
+            # Range Normal: 13,000 - 19,800 Bytes/sec
+            # Toleransi jitter +/- 1000 bytes
+            
+            label = "idle"
+            
+            if bytes_sec_tx > 25000:
+                label = "burst" # Terlalu tinggi
+            elif (TARGET_BYTES_MIN - 2000) <= bytes_sec_tx <= (TARGET_BYTES_MAX + 2000):
+                label = "normal"     # Sesuai Target Dataset
+            elif bytes_sec_tx > 500:
+                label = "background"
+            else:
+                label = "idle"
+
+            # Insert ke DB jika ada aktivitas
+            if dtx_bytes > 0 or drx_bytes > 0:
+                # Kolom 'bytes_tx' adalah representasi Length dalam dataset (Total Length)
+                rows.append((now, 0, meta['ip'], meta['dst_ip'], meta['mac'], 'FF:FF:FF:FF:FF:FF',
+                             17, 5060, 5060, dtx_bytes, drx_bytes, dtx_pkts, drx_pkts, 
+                             COLLECT_INTERVAL, label))
+
+        if rows and conn and not conn.closed:
             try:
                 cur = conn.cursor()
-                q = """INSERT INTO pcap_logs ("time", "source", "protocol", "length", "Arrival Time", "info", "No.", "destination") VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"""
-                data_tuple = [(r["time"], r["source"], r["protocol"], r["length"], r["Arrival Time"], r["info"], r["No."], r["destination"]) for r in batch]
-                cur.executemany(q, data_tuple)
+                q = """INSERT INTO traffic.flow_stats_ (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
+                       ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx, pkts_tx, pkts_rx, 
+                       duration_sec , traffic_label) 
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
+                cur.executemany(q, rows)
                 conn.commit()
-            except Exception as e:
-                print(f"SQL Error: {e}")
+            except Exception as e: 
                 conn.rollback()
+                # info(f"DB Error: {e}\n")
+    
     if conn: conn.close()
 
-# ================= 4. TRAFFIC =================
+# ================= 4. TRAFFIC GENERATOR (BYTES TARGET) =================
 def safe_cmd(node, cmd):
     if stop_event.is_set(): return
-    try: node.cmd(cmd)
-    except: pass
+    with cmd_lock:
+        try: node.cmd(cmd)
+        except: pass
 
 def run_voip_traffic(net):
-    info("*** [Traffic] Starting VoIP Stream...\n")
-    u1, u2 = net.get('user1'), net.get('user2')
-    safe_cmd(u2, "killall ITGRecv"); safe_cmd(u2, "ITGRecv &")
-    time.sleep(2)
+    info(f"*** [Traffic] Generating Strict {TARGET_BYTES_MIN} - {TARGET_BYTES_MAX} BYTES/sec...\n")
     
+    # Start Receivers
+    receivers = set()
+    for meta in HOST_INFO.values(): receivers.add(meta['dst_ip'])
+    
+    for h in net.hosts:
+        if h.IP() in receivers:
+            safe_cmd(h, "killall ITGRecv")
+            safe_cmd(h, "ITGRecv &")
+    
+    time.sleep(3)
+
     while not stop_event.is_set():
-        target_bps = random.randint(TARGET_BPS_MIN, TARGET_BPS_MAX)
-        pkt_size = random.randint(100, 160)
-        rate_pps = max(1, int(target_bps / (pkt_size * 8)))
-        cmd = f"ITGSend -T UDP -a 10.0.0.2 -c {pkt_size} -C {rate_pps} -t 2000 > /dev/null 2>&1"
-        safe_cmd(u1, cmd)
-        time.sleep(0.5)
+        
+        for h_name, meta in HOST_INFO.items():
+            node = net.get(h_name)
+            
+            # --- FORMULA BYTES ---
+            # 1. Tentukan Target Bytes acak di range 13000 - 19800
+            target_bytes_sec = random.randint(TARGET_BYTES_MIN, TARGET_BYTES_MAX)
+            
+            # 2. Random Packet Size (Payload Bytes)
+            # Agar terlihat natural, packet size antara 100 - 300 bytes
+            pkt_size_bytes = random.randint(100, 300)
+            
+            # 3. Hitung Rate (Packets Per Second) agar mencapai Target Bytes
+            # Total Bytes = Rate (pkt/s) * Size (bytes)
+            # Rate = Total Bytes / Size
+            rate_pps = int(target_bytes_sec / pkt_size_bytes)
+            
+            # Safety check
+            if rate_pps < 1: rate_pps = 1
+            
+            # 4. Kirim Command
+            # -c : packet payload size (bytes)
+            # -C : constant rate (packets per second)
+            # -t : duration (ms) -> 1000ms = 1 detik refresh
+            cmd = f"ITGSend -T UDP -a {meta['dst_ip']} -c {pkt_size_bytes} -C {rate_pps} -t 1000 > /dev/null 2>&1 &"
+            safe_cmd(node, cmd)
+        
+        # Loop setiap 1 detik agar data bytes per detik akurat
+        time.sleep(1.0)
 
 # ================= 5. MAIN =================
-def cleanup():
-    os.system("sudo mn -c > /dev/null 2>&1")
-    os.system("sudo killall -9 ITGSend ITGRecv > /dev/null 2>&1")
+def setup_namespaces(net):
+    subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=False)
+    for h in net.hosts:
+        ns_path = f"/var/run/netns/{h.name}"
+        if os.path.exists(ns_path):
+            subprocess.run(['sudo', 'umount', ns_path], check=False, stderr=subprocess.DEVNULL)
+            subprocess.run(['sudo', 'rm', '-f', ns_path], check=False)
+        subprocess.run(['sudo', 'ip', 'netns', 'attach', h.name, str(h.pid)], check=False)
 
-def signal_handler(sig, frame):
-    info("\n*** Stopping...\n")
-    stop_event.set()
+def cleanup():
+    info("*** Cleaning up...\n")
+    subprocess.run("sudo killall -9 ITGSend ITGRecv", shell=True, stderr=subprocess.DEVNULL)
+    subprocess.run("sudo umount /var/run/netns/*", shell=True, stderr=subprocess.DEVNULL)
+    subprocess.run("sudo rm -rf /var/run/netns/*", shell=True, stderr=subprocess.DEVNULL)
 
 if __name__ == "__main__":
-    cleanup()
     setLogLevel('info')
-    
     topo = LeafSpineTopo()
-    
-    # PERUBAHAN PENTING 1: controller=None (Standalone Mode)
-    # Ini mencegah controller Mininet mengganggu STP OVS
-    net = Mininet(topo=topo, controller=None, switch=OVSKernelSwitch, link=TCLink)
-    
-    signal.signal(signal.SIGINT, signal_handler)
+    # Controller Remote (Pastikan RYU Anda jalan di terminal lain)
+    net = Mininet(topo=topo, controller=RemoteController, switch=OVSKernelSwitch, link=TCLink)
     
     try:
         net.start()
+        setup_namespaces(net)
+        info("*** Network Ready. Waiting 5s...\n")
+        time.sleep(5)
         
-        info("*** Setting OVS to Standalone & Enabling STP...\n")
-        for sw in net.switches:
-            # Set mode standalone agar switch belajar MAC address sendiri (L2 learning)
-            sw.cmd(f'ovs-vsctl set-controller {sw.name} ptcp:') 
-            sw.cmd(f'ovs-vsctl set-fail-mode {sw.name} standalone')
-            sw.cmd(f'ovs-vsctl set Bridge {sw.name} stp_enable=true')
+        # Ping check mungkin gagal jika controller belum handle Loop/STP
+        # Tapi tetap jalankan traffic generator
+        # net.pingAll() 
+        
+        t_col = threading.Thread(target=collector_thread)
+        t_col.start()
 
-        # PERUBAHAN PENTING 2: Waktu tunggu lebih lama (40 detik)
-        info("*** Menunggu 40 detik untuk STP Convergence (Wajib!)...\n")
-        time.sleep(40) 
-        
-        info("*** Ping All untuk Cek Koneksi...\n")
-        drop = net.pingAll()
-        
-        if drop > 0:
-            info("!!! PERINGATAN: Masih ada packet loss saat Ping. Traffic mungkin tidak stabil.\n")
-        else:
-            info("*** Koneksi Sempurna. Memulai Simulasi...\n")
-
-        t_db = threading.Thread(target=db_writer_thread); t_db.daemon = True; t_db.start()
-        t_sniff = threading.Thread(target=sniffer_thread, args=(net,)); t_sniff.daemon = True; t_sniff.start()
-        
         run_voip_traffic(net)
-        
-    except Exception as e:
-        info(f"!!! Error: {e}\n")
+
+    except KeyboardInterrupt:
+        info("\n*** Stopped.\n")
     finally:
         stop_event.set()
-        time.sleep(1)
-        net.stop()
         cleanup()
+        net.stop()
