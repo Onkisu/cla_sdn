@@ -1,10 +1,11 @@
 #!/usr/bin/python3
 """
-LEAF-SPINE VOIP SIMULATION (D-ITG FIXED)
+LEAF-SPINE VOIP SIMULATION (SAPU JAGAT EDITION)
 Fitur:
-1. Warmup Ping 0% Loss (Wajib).
-2. D-ITG Traffic Generator dengan Absolute Path.
-3. Kalkulasi Rate Presisi untuk target 13.000 - 19.800 Bytes/sec.
+1. Auto-Clean Namespace (Anti Error 'File Exists').
+2. D-ITG Auto-Path Detection.
+3. Full Logging ke /tmp/ jika error.
+4. Target Bytes: 13.000 - 19.800 Bytes/sec.
 """
 
 import threading
@@ -16,6 +17,8 @@ import re
 import shutil
 import psycopg2
 from datetime import datetime
+import signal
+import sys
 
 from mininet.net import Mininet
 from mininet.node import RemoteController, OVSKernelSwitch
@@ -27,11 +30,11 @@ from mininet.log import setLogLevel, info
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 COLLECT_INTERVAL = 1
 
-# Target: 13.000 - 19.800 BYTES per second
+# Target Throughput (Bytes/sec)
 TARGET_BYTES_MIN = 13000 
 TARGET_BYTES_MAX = 19800
 
-# Mapping Host
+# Host Definition
 HOST_INFO = {
     'user1': {'ip': '10.0.1.1', 'mac': '00:00:00:00:01:01', 'dst_ip': '10.0.2.1'},
     'user2': {'ip': '10.0.1.2', 'mac': '00:00:00:00:01:02', 'dst_ip': '10.0.3.1'},
@@ -41,45 +44,50 @@ HOST_INFO = {
     'db1':   {'ip': '10.0.3.2', 'mac': '00:00:00:00:03:02', 'dst_ip': '10.0.1.2'},
 }
 
-# Helper Map
+# Helper Map untuk Collector
 IP_TO_MAC = {v['ip']: v['mac'] for k, v in HOST_INFO.items()}
 
 stop_event = threading.Event()
-cmd_lock = threading.Lock()
 
-# Cari lokasi binary D-ITG
+# Auto-Detect ITG Binary
 ITG_SEND_BIN = shutil.which("ITGSend") or "/usr/local/bin/ITGSend"
 ITG_RECV_BIN = shutil.which("ITGRecv") or "/usr/local/bin/ITGRecv"
 
 # ================= 2. TOPOLOGI =================
 class LeafSpineTopo(Topo):
     def build(self):
-        info("*** Building Topo: 3-Leaf 3-Spine...\n")
+        info("*** Building Topo: 3-Leaf 3-Spine (Full Mesh)...\n")
         spines = [self.addSwitch(f'spine{i}', dpid=f'10{i}') for i in range(1, 4)]
         leaves = [self.addSwitch(f'leaf{i}', dpid=f'20{i}') for i in range(1, 4)]
 
-        # Link Spine-Leaf (1Gbps)
+        # Backbone Links (1Gbps)
         for leaf in leaves:
             for spine in spines:
                 self.addLink(leaf, spine, bw=1000) 
 
-        # Link Host-Leaf (100Mbps)
+        # Host Links (100Mbps)
+        # Leaf 1
         self.addLink(self.addHost('user1', ip='10.0.1.1/8', mac='00:00:00:00:01:01'), leaves[0], bw=100)
         self.addLink(self.addHost('user2', ip='10.0.1.2/8', mac='00:00:00:00:01:02'), leaves[0], bw=100)
+        # Leaf 2
         self.addLink(self.addHost('web1', ip='10.0.2.1/8', mac='00:00:00:00:02:01'), leaves[1], bw=100)
         self.addLink(self.addHost('web2', ip='10.0.2.2/8', mac='00:00:00:00:02:02'), leaves[1], bw=100)
+        # Leaf 3
         self.addLink(self.addHost('app1', ip='10.0.3.1/8', mac='00:00:00:00:03:01'), leaves[2], bw=100)
         self.addLink(self.addHost('db1', ip='10.0.3.2/8', mac='00:00:00:00:03:02'), leaves[2], bw=100)
 
 # ================= 3. COLLECTOR =================
 def run_ns_cmd(host_name, cmd):
+    # Cek apakah namespace file ada
     if not os.path.exists(f"/var/run/netns/{host_name}"): return None
     try:
+        # Timeout cepat agar tidak memblokir loop
         return subprocess.run(['sudo', 'ip', 'netns', 'exec', host_name] + cmd, 
-                            capture_output=True, text=True, timeout=0.5).stdout
+                            capture_output=True, text=True, timeout=0.2).stdout
     except: return None
 
 def get_stats(host_name):
+    # Ambil statistik TX/RX dari interface host
     out = run_ns_cmd(host_name, ['ip', '-s', 'link', 'show', f"{host_name}-eth0"])
     if not out: return None
     rx = re.search(r'RX:.*?\n\s*(\d+)\s+(\d+)', out, re.MULTILINE)
@@ -93,10 +101,13 @@ def get_stats(host_name):
     return None
 
 def collector_thread():
-    info("*** [Collector] Monitoring Started.\n")
+    info("*** [Collector] Monitoring Started...\n")
     conn = None
-    try: conn = psycopg2.connect(DB_CONN)
-    except: pass
+    try: 
+        conn = psycopg2.connect(DB_CONN)
+    except Exception as e:
+        info(f"!!! [Collector] DB Connection Failed: {e}\n")
+        # Kita tidak return, agar simulasi tetap jalan walau DB mati (untuk debug)
     
     last_stats = {}
     while not stop_event.is_set():
@@ -106,34 +117,36 @@ def collector_thread():
 
         for h_name, meta in HOST_INFO.items():
             curr = get_stats(h_name)
-            if not curr: continue
+            if not curr: continue # Skip jika gagal ambil stats
+
             if h_name not in last_stats:
                 last_stats[h_name] = curr
                 continue
 
             prev = last_stats[h_name]
+            # Hitung Delta (Perubahan)
             dtx_bytes = curr['tx_bytes'] - prev['tx_bytes']
             drx_bytes = curr['rx_bytes'] - prev['rx_bytes']
             dtx_pkts = curr['tx_pkts'] - prev['tx_pkts']
             drx_pkts = curr['rx_pkts'] - prev['rx_pkts']
             
-            bytes_sec_tx = dtx_bytes
-            
-            # Labeling
+            # Labeling Logic (Simple)
+            bytes_sec = dtx_bytes
             label = "idle"
-            if bytes_sec_tx > 25000: label = "burst"
-            elif (TARGET_BYTES_MIN - 2000) <= bytes_sec_tx: label = "normal"
-            elif bytes_sec_tx > 500: label = "background"
+            if bytes_sec > 25000: label = "burst"
+            elif bytes_sec > 10000: label = "normal" # Toleransi bawah agak longgar
+            elif bytes_sec > 500: label = "background"
 
             last_stats[h_name] = curr
             
-            if dtx_bytes > 100 or drx_bytes > 100:
+            # Hanya simpan ke DB jika ada aktivitas traffic
+            if dtx_bytes > 0 or drx_bytes > 0:
                 dst_mac = IP_TO_MAC.get(meta['dst_ip'], '00:00:00:00:00:00')
                 rows.append((now, 0, meta['ip'], meta['dst_ip'], meta['mac'], dst_mac,
                              17, 5060, 5060, dtx_bytes, drx_bytes, dtx_pkts, drx_pkts, 
                              COLLECT_INTERVAL, label))
 
-        if rows and conn:
+        if rows and conn and not conn.closed:
             try:
                 cur = conn.cursor()
                 q = """INSERT INTO traffic.flow_stats_ (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
@@ -142,27 +155,22 @@ def collector_thread():
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
                 cur.executemany(q, rows)
                 conn.commit()
-            except: conn.rollback()
+            except Exception as e: 
+                conn.rollback()
+                # Uncomment di bawah ini jika ingin lihat error DB di terminal
+                # info(f"DB Insert Error: {e}\n")
 
-# ================= 4. TRAFFIC GENERATOR (D-ITG CORRECTED) =================
-def safe_cmd(node, cmd):
-    if stop_event.is_set(): return
-    # Kita jalankan command di background dengan '&'
-    # dan kita log error ke /tmp untuk debugging jika gagal
-    full_cmd = f"{cmd}"
-    try: node.cmd(full_cmd)
-    except: pass
-
+# ================= 4. TRAFFIC GENERATOR =================
 def run_voip_traffic(net):
-    info(f"*** [Traffic] Generating D-ITG Traffic...\n")
-    info(f"*** Using Binary: {ITG_SEND_BIN}\n")
+    info(f"*** [Traffic] Generating Traffic via D-ITG...\n")
+    info(f"*** Binary Path: {ITG_SEND_BIN}\n")
     
-    # 1. Start Receivers (Kill old ones first)
-    info("*** Starting Receivers...\n")
+    # 1. Start Receivers
+    info("*** Starting Receivers (Logs at /tmp/itg_recv_*.log)...\n")
     for h in net.hosts:
         h.cmd("killall -9 ITGRecv")
-        # Log receiver ke /dev/null biar gak menuhin disk, run in background
-        h.cmd(f"{ITG_RECV_BIN} > /dev/null 2>&1 &")
+        # Jalankan Receiver di background
+        h.cmd(f"{ITG_RECV_BIN} > /tmp/itg_recv_{h.name}.log 2>&1 &")
     
     time.sleep(3) # Tunggu receiver siap
 
@@ -170,47 +178,52 @@ def run_voip_traffic(net):
         for h_name, meta in HOST_INFO.items():
             src_node = net.get(h_name)
             
-            # --- CALCULATE PARAMETERS ---
-            # Kita mau 13.000 - 19.800 Bytes/sec
-            # Packet Size (Payload) = 160 bytes (Khas G.711) + Header UDP/IP
-            payload_size = 160 
+            # --- FORMULA RATE ---
+            # Kita ingin Bytes yang tercatat di interface (Wire Speed) = 13.000 - 19.800
+            # Packet Size D-ITG (-c) adalah Payload.
+            # Wire Size = Payload + 14(Eth) + 20(IP) + 8(UDP) = Payload + 42 bytes
             
-            # Hitung Rate (Packets Per Second)
-            # Total Size on wire approx = Payload + 42 bytes (Eth+IP+UDP Headers) = ~200 bytes
-            # Target 15000 bytes/sec / 200 bytes/pkt = 75 pps
+            payload_size = 160 
+            wire_packet_size = payload_size + 42
             
             target_bytes = random.randint(TARGET_BYTES_MIN, TARGET_BYTES_MAX)
-            rate_pps = int(target_bytes / (payload_size + 42)) 
             
-            # Command D-ITG
-            # -T UDP : Protocol
-            # -a : Destination IP
-            # -c : Payload size
-            # -C : Rate (pps)
-            # -t : Duration (1000ms)
-            # -x /tmp/recv_log : Log receiver (opsional, kita dev/null dulu biar jalan)
+            # Berapa paket per detik untuk mencapai target bytes?
+            pps = int(target_bytes / wire_packet_size)
             
-            # PENINGKATAN: Kita boost rate sedikit (1.2x) karena D-ITG kadang under-send di virtual environment
-            boosted_rate = int(rate_pps * 1.2)
+            # Boosting: Virtual environment sering loss atau delay,
+            # Kita naikkan rate kirim 20% agar yang SAMPAI sesuai target.
+            boosted_pps = int(pps * 1.2)
 
+            # Command D-ITG
+            # Output error dibuang ke file log spesifik agar bisa didebug
             cmd = (f"{ITG_SEND_BIN} -T UDP -a {meta['dst_ip']} "
                    f"-c {payload_size} "
-                   f"-C {boosted_rate} "
-                   f"-t 1000 > /dev/null 2>&1 &")
+                   f"-C {boosted_pps} "
+                   f"-t 1000 > /tmp/itg_send_{h_name}.log 2>&1 &")
             
-            safe_cmd(src_node, cmd)
+            try:
+                src_node.cmd(cmd)
+            except:
+                pass
         
-        # Loop setiap 1.1 detik (beri jeda sedikit biar process spawn gak numpuk)
+        # Loop setiap 1.1 detik
         time.sleep(1.1)
 
 # ================= 5. MAIN SETUP =================
+def force_cleanup():
+    # Fungsi bersih-bersih brutal sebelum start
+    subprocess.run("sudo rm -rf /var/run/netns/*", shell=True, stderr=subprocess.DEVNULL)
+    subprocess.run("sudo killall -9 ITGSend ITGRecv", shell=True, stderr=subprocess.DEVNULL)
+
 def setup_network_config(net):
+    # Set IP Flat /8 dan Static ARP
+    info("*** Configuring Flat Network (IP /8 & Static ARP)...\n")
     for h in net.hosts:
         h.cmd(f"ip addr flush dev {h.name}-eth0")
         h.cmd(f"ip addr add {HOST_INFO[h.name]['ip']}/8 brd 10.255.255.255 dev {h.name}-eth0")
         h.cmd(f"ip link set dev {h.name}-eth0 up")
     
-    # Static ARP
     for src in net.hosts:
         src_meta = HOST_INFO[src.name]
         for dst_name, dst_meta in HOST_INFO.items():
@@ -218,7 +231,8 @@ def setup_network_config(net):
                 src.cmd(f"arp -s {dst_meta['ip']} {dst_meta['mac']}")
 
 def wait_for_convergence(net):
-    info("*** WARMUP: Waiting for Network Convergence (0% Loss)...\n")
+    info("*** WARMUP: Pinging to ensure Topology Discovery...\n")
+    # PingAll berkali-kali sampai loss 0%
     for i in range(1, 6):
         loss = net.pingAll()
         info(f"   Run {i}: {loss}% Dropped\n")
@@ -228,19 +242,18 @@ def wait_for_convergence(net):
         time.sleep(2)
     return False
 
-def cleanup():
-    subprocess.run("sudo killall -9 ITGSend ITGRecv", shell=True, stderr=subprocess.DEVNULL)
-    subprocess.run("sudo rm -rf /var/run/netns/*", shell=True, stderr=subprocess.DEVNULL)
-
 if __name__ == "__main__":
+    force_cleanup() # BERSIHKAN SEBELUM MULAI
+    
     setLogLevel('info')
     topo = LeafSpineTopo()
+    # Pastikan Remote Controller aktif
     net = Mininet(topo=topo, controller=RemoteController, switch=OVSKernelSwitch, link=TCLink)
     
     try:
         net.start()
         
-        # Setup Netns
+        # Buat Namespace Symlink (Wajib untuk Collector)
         subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=False)
         for h in net.hosts:
             if not os.path.exists(f"/var/run/netns/{h.name}"):
@@ -248,19 +261,23 @@ if __name__ == "__main__":
 
         setup_network_config(net)
         
-        info("*** Waiting 5s for Ryu LLDP...\n")
+        info("*** Waiting 5s for Controller (LLDP)...\n")
         time.sleep(5)
         
+        # Wajib Converge dulu baru jalan traffic
         if wait_for_convergence(net):
             t_col = threading.Thread(target=collector_thread)
             t_col.start()
             run_voip_traffic(net)
         else:
-            info("!!! CRITICAL: Network Failed to Converge.\n")
+            info("!!! CRITICAL: Network Failed to Converge. Check Controller/Ryu.\n")
+            info("!!! Hint: Pastikan 'voip_controller_ksp.py' jalan dengan '--observe-links'\n")
 
     except KeyboardInterrupt:
-        info("\n*** Stopped.\n")
+        info("\n*** Stopped by User.\n")
+    except Exception as e:
+        info(f"\n!!! Crash: {e}\n")
     finally:
         stop_event.set()
-        cleanup()
+        force_cleanup()
         net.stop()
