@@ -165,15 +165,16 @@ def collector_thread():
 def run_traffic(net):
     info("*** [Traffic] Starting Traffic (Staggered Mode)...\n")
     
-    # 1. Start Receivers (Tunggu lebih lama biar siap)
+    # 1. Start Receivers
     print("-> Starting Receivers...")
     for h in net.hosts:
         h.cmd("killall ITGRecv")
-        h.cmd("ITGRecv &") 
+        # Tambahkan log file agar jika error bisa dibaca
+        h.cmd(f"ITGRecv -l /tmp/{h.name}_recv.log &") 
     
-    time.sleep(5) # Waktu napas buat Receiver
+    time.sleep(3) 
     
-    # 2. Start Senders (Satu per satu)
+    # 2. Start Senders
     print("-> Starting Senders (with ARP Warm-up)...")
     
     for h_name, meta in HOST_INFO.items():
@@ -182,15 +183,13 @@ def run_traffic(net):
         sender = net.get(h_name)
         dst_ip = meta['dst_ip']
         
-        # --- LANGKAH KUNCI: PING DULU ---
-        # Ini memaksa switch belajar MAC address sebelum traffic berat lewat
+        # PING DULU (Penting!)
         sender.cmd(f"ping -c 1 {dst_ip}")
         
-        # Target Random
-        target_bps = random.randint(110000, 140000) # Range aman 110k-140k
+        target_bps = random.randint(110000, 140000) 
         pkt_size = random.randint(120, 180)
         
-        # Rumus: Rate = Target_Bits / (Size_Bytes * 8)
+        # Rumus Rate
         rate_pps = int(target_bps / (pkt_size * 8))
         if rate_pps < 1: rate_pps = 1
         
@@ -198,14 +197,26 @@ def run_traffic(net):
         
         print(f"   + {h_name} -> {dst_ip} | Target: {target_bps} bps | Rate: {rate_pps} pps")
         
-        # Jalankan ITGSend
-        cmd = f"ITGSend -T UDP -a {dst_ip} -c {pkt_size} -C {rate_pps} -t {duration_ms} &"
+        # PERBAIKAN DI SINI:
+        # 1. Gunakan full path jika perlu (misal /usr/local/bin/ITGSend)
+        # 2. Tambahkan logging (-l) untuk debugging
+        # 3. Hapus argumen yang mungkin bikin crash jika folder log tidak ada
+        
+        # Opsi A: Command Standar (Coba ini dulu)
+        cmd = f"ITGSend -T UDP -a {dst_ip} -c {pkt_size} -C {rate_pps} -t {duration_ms} -l /tmp/{h_name}_send.log &"
+        
+        # Eksekusi
         sender.cmd(cmd)
         
-        # Jeda 0.5 detik biar gak crash CPU/Network di awal
         time.sleep(0.5)
 
     print("*** Traffic sedang berjalan... Monitor database sekarang! ***")
+    
+    # Cek apakah process benar-benar jalan di salah satu host
+    check_proc = net.get('user1').cmd("pgrep ITGSend")
+    if not check_proc.strip():
+        print("\n[CRITICAL ERROR] ITGSend tidak berjalan! Cek instalasi D-ITG.")
+        print("Coba jalankan: 'ITGSend -h' di terminal untuk memastikan terinstall.\n")
     
    
     # Biarkan jalan selama durasi simulasi
