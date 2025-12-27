@@ -1,10 +1,10 @@
 #!/usr/bin/python3
 """
-LEAF-SPINE VOIP SIMULATION (FINAL TUNED)
+LEAF-SPINE VOIP SIMULATION (D-ITG FIXED)
 Fitur:
-1. Auto-Warmup: Tidak akan mulai traffic kalau Ping masih loss.
-2. Aggressive Traffic: Mengirim traffic lebih deras untuk kompensasi loss.
-3. Correct Logging: MAC Address valid.
+1. Warmup Ping 0% Loss (Wajib).
+2. D-ITG Traffic Generator dengan Absolute Path.
+3. Kalkulasi Rate Presisi untuk target 13.000 - 19.800 Bytes/sec.
 """
 
 import threading
@@ -13,6 +13,7 @@ import random
 import os
 import subprocess
 import re
+import shutil
 import psycopg2
 from datetime import datetime
 
@@ -25,7 +26,8 @@ from mininet.log import setLogLevel, info
 # ================= 1. KONFIGURASI =================
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 COLLECT_INTERVAL = 1
-# Target Database: 13000 - 19800
+
+# Target: 13.000 - 19.800 BYTES per second
 TARGET_BYTES_MIN = 13000 
 TARGET_BYTES_MAX = 19800
 
@@ -44,6 +46,10 @@ IP_TO_MAC = {v['ip']: v['mac'] for k, v in HOST_INFO.items()}
 
 stop_event = threading.Event()
 cmd_lock = threading.Lock()
+
+# Cari lokasi binary D-ITG
+ITG_SEND_BIN = shutil.which("ITGSend") or "/usr/local/bin/ITGSend"
+ITG_RECV_BIN = shutil.which("ITGRecv") or "/usr/local/bin/ITGRecv"
 
 # ================= 2. TOPOLOGI =================
 class LeafSpineTopo(Topo):
@@ -111,18 +117,16 @@ def collector_thread():
             dtx_pkts = curr['tx_pkts'] - prev['tx_pkts']
             drx_pkts = curr['rx_pkts'] - prev['rx_pkts']
             
-            # Hitung Rate
             bytes_sec_tx = dtx_bytes
             
             # Labeling
             label = "idle"
             if bytes_sec_tx > 25000: label = "burst"
-            elif (TARGET_BYTES_MIN - 3000) <= bytes_sec_tx: label = "normal" # Sedikit toleransi bawah
+            elif (TARGET_BYTES_MIN - 2000) <= bytes_sec_tx: label = "normal"
             elif bytes_sec_tx > 500: label = "background"
 
             last_stats[h_name] = curr
             
-            # Hanya simpan jika ada traffic signifikan (> 100 bytes)
             if dtx_bytes > 100 or drx_bytes > 100:
                 dst_mac = IP_TO_MAC.get(meta['dst_ip'], '00:00:00:00:00:00')
                 rows.append((now, 0, meta['ip'], meta['dst_ip'], meta['mac'], dst_mac,
@@ -140,55 +144,73 @@ def collector_thread():
                 conn.commit()
             except: conn.rollback()
 
-# ================= 4. TRAFFIC GENERATOR (BOOSTED) =================
+# ================= 4. TRAFFIC GENERATOR (D-ITG CORRECTED) =================
 def safe_cmd(node, cmd):
     if stop_event.is_set(): return
-    with cmd_lock:
-        try: node.cmd(cmd)
-        except: pass
+    # Kita jalankan command di background dengan '&'
+    # dan kita log error ke /tmp untuk debugging jika gagal
+    full_cmd = f"{cmd}"
+    try: node.cmd(full_cmd)
+    except: pass
 
 def run_voip_traffic(net):
-    info(f"*** [Traffic] Generating BOOSTED Traffic...\n")
+    info(f"*** [Traffic] Generating D-ITG Traffic...\n")
+    info(f"*** Using Binary: {ITG_SEND_BIN}\n")
     
-    # 1. Start Receivers
+    # 1. Start Receivers (Kill old ones first)
+    info("*** Starting Receivers...\n")
     for h in net.hosts:
-        safe_cmd(h, "killall ITGRecv")
-        safe_cmd(h, "/usr/local/bin/ITGRecv &") # Pakai path lengkap jaga-jaga
+        h.cmd("killall -9 ITGRecv")
+        # Log receiver ke /dev/null biar gak menuhin disk, run in background
+        h.cmd(f"{ITG_RECV_BIN} > /dev/null 2>&1 &")
     
-    time.sleep(2)
+    time.sleep(3) # Tunggu receiver siap
 
     while not stop_event.is_set():
         for h_name, meta in HOST_INFO.items():
-            node = net.get(h_name)
+            src_node = net.get(h_name)
             
-            # --- LOGIC BARU: BOOSTING ---
-            # Kita minta ITG kirim 25.000 Bytes/sec, supaya yang sampai net 
-            # dan tercatat sekitar 15.000 - 19.000 (antisipasi loss & overhead)
+            # --- CALCULATE PARAMETERS ---
+            # Kita mau 13.000 - 19.800 Bytes/sec
+            # Packet Size (Payload) = 160 bytes (Khas G.711) + Header UDP/IP
+            payload_size = 160 
             
-            raw_target = random.randint(TARGET_BYTES_MIN, TARGET_BYTES_MAX)
-            boosted_target = int(raw_target * 1.5) # Boost 1.5x
+            # Hitung Rate (Packets Per Second)
+            # Total Size on wire approx = Payload + 42 bytes (Eth+IP+UDP Headers) = ~200 bytes
+            # Target 15000 bytes/sec / 200 bytes/pkt = 75 pps
             
-            pkt_size = random.randint(150, 300)
-            rate_pps = int(boosted_target / pkt_size)
+            target_bytes = random.randint(TARGET_BYTES_MIN, TARGET_BYTES_MAX)
+            rate_pps = int(target_bytes / (payload_size + 42)) 
             
-            # Jalankan ITGSend untuk 1000ms
-            # Output error dibuang agar tidak menuhin disk, fokus ke hasil DB
-            cmd = (f"/usr/local/bin/ITGSend -T UDP -a {meta['dst_ip']} -c {pkt_size} "
-                   f"-C {rate_pps} -t 1000 > /dev/null 2>&1 &")
+            # Command D-ITG
+            # -T UDP : Protocol
+            # -a : Destination IP
+            # -c : Payload size
+            # -C : Rate (pps)
+            # -t : Duration (1000ms)
+            # -x /tmp/recv_log : Log receiver (opsional, kita dev/null dulu biar jalan)
             
-            safe_cmd(node, cmd)
-        
-        time.sleep(1.0)
+            # PENINGKATAN: Kita boost rate sedikit (1.2x) karena D-ITG kadang under-send di virtual environment
+            boosted_rate = int(rate_pps * 1.2)
 
-# ================= 5. MAIN (WARMUP LOGIC) =================
+            cmd = (f"{ITG_SEND_BIN} -T UDP -a {meta['dst_ip']} "
+                   f"-c {payload_size} "
+                   f"-C {boosted_rate} "
+                   f"-t 1000 > /dev/null 2>&1 &")
+            
+            safe_cmd(src_node, cmd)
+        
+        # Loop setiap 1.1 detik (beri jeda sedikit biar process spawn gak numpuk)
+        time.sleep(1.1)
+
+# ================= 5. MAIN SETUP =================
 def setup_network_config(net):
-    # Flush & Set IP /8
     for h in net.hosts:
         h.cmd(f"ip addr flush dev {h.name}-eth0")
         h.cmd(f"ip addr add {HOST_INFO[h.name]['ip']}/8 brd 10.255.255.255 dev {h.name}-eth0")
         h.cmd(f"ip link set dev {h.name}-eth0 up")
     
-    # Static ARP Manual
+    # Static ARP
     for src in net.hosts:
         src_meta = HOST_INFO[src.name]
         for dst_name, dst_meta in HOST_INFO.items():
@@ -197,14 +219,13 @@ def setup_network_config(net):
 
 def wait_for_convergence(net):
     info("*** WARMUP: Waiting for Network Convergence (0% Loss)...\n")
-    # Coba PingAll sampai 5 kali
     for i in range(1, 6):
         loss = net.pingAll()
         info(f"   Run {i}: {loss}% Dropped\n")
         if loss == 0.0:
             info("   >>> Network READY! <<<\n")
             return True
-        time.sleep(3)
+        time.sleep(2)
     return False
 
 def cleanup():
@@ -227,20 +248,15 @@ if __name__ == "__main__":
 
         setup_network_config(net)
         
-        # --- PHASE PENTING: WARMUP ---
-        # Kita tunggu 5 detik agar LLDP Ryu jalan
         info("*** Waiting 5s for Ryu LLDP...\n")
         time.sleep(5)
         
-        # Paksa Ping sampai 0% Loss.
-        ready = wait_for_convergence(net)
-        
-        if ready:
+        if wait_for_convergence(net):
             t_col = threading.Thread(target=collector_thread)
             t_col.start()
             run_voip_traffic(net)
         else:
-            info("!!! CRITICAL: Network Failed to Converge. Check Controller/Ryu.\n")
+            info("!!! CRITICAL: Network Failed to Converge.\n")
 
     except KeyboardInterrupt:
         info("\n*** Stopped.\n")
