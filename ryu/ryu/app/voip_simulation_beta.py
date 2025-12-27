@@ -246,7 +246,7 @@ if __name__ == "__main__":
     topo = LeafSpineTopo()
     
     # Kita gunakan OVSKernelSwitch
-    net = Mininet(topo=topo, controller=Controller, switch=OVSKernelSwitch, link=TCLink)
+    net = Mininet(topo=topo, controller=RemoteController, switch=OVSKernelSwitch, link=TCLink)
     
     signal.signal(signal.SIGINT, signal_handler)
     
