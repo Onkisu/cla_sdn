@@ -249,19 +249,38 @@ def run_voip_traffic(net):
         time.sleep(1.0)
 
 # ================= 5. MAIN =================
-def setup_namespaces(net):
-    subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=False)
-    for h in net.hosts:
-        ns_path = f"/var/run/netns/{h.name}"
-        if os.path.exists(ns_path):
-            subprocess.run(['sudo', 'umount', ns_path], check=False, stderr=subprocess.DEVNULL)
-            subprocess.run(['sudo', 'rm', '-f', ns_path], check=False)
-        subprocess.run(['sudo', 'ip', 'netns', 'attach', h.name, str(h.pid)], check=False)
+# ================= 5. MAIN (UPDATED LOGIC) =================
+def setup_network_config(net):
+    info("*** Configuring Hosts (IP /8 & Static ARP)...\n")
+    
+    # 1. SETUP IP ADDRESS (/8 FLATTENED NETWORK)
+    # Kita flush IP bawaan Mininet, dan pasang IP manual dengan netmask /8
+    for h_name, meta in HOST_INFO.items():
+        h = net.get(h_name)
+        # Flush konfigurasi lama
+        h.cmd(f"ip addr flush dev {h.name}-eth0")
+        # Set IP baru dengan /8
+        h.cmd(f"ip addr add {meta['ip']}/8 brd 10.255.255.255 dev {h.name}-eth0")
+        h.cmd(f"ip link set dev {h.name}-eth0 up")
+    
+    # 2. SETUP STATIC ARP MANUAL
+    # Karena 'net.staticArp()' bisa hilang saat flush IP, kita isi manual satu per satu.
+    # Setiap host akan dipaksa "kenal" dengan host lain.
+    for src_name, src_meta in HOST_INFO.items():
+        src_node = net.get(src_name)
+        for dst_name, dst_meta in HOST_INFO.items():
+            if src_name != dst_name:
+                # Command: arp -s <IP_TUJUAN> <MAC_TUJUAN>
+                src_node.cmd(f"arp -s {dst_meta['ip']} {dst_meta['mac']}")
+
+    # Verifikasi satu host untuk memastikan ARP masuk
+    info("*** Verifying ARP on user1:\n")
+    print(net.get('user1').cmd("arp -n"))
 
 def cleanup():
     info("*** Cleaning up...\n")
     subprocess.run("sudo killall -9 ITGSend ITGRecv", shell=True, stderr=subprocess.DEVNULL)
-    subprocess.run("sudo umount /var/run/netns/*", shell=True, stderr=subprocess.DEVNULL)
+    # Hapus namespace sisa jika ada
     subprocess.run("sudo rm -rf /var/run/netns/*", shell=True, stderr=subprocess.DEVNULL)
 
 if __name__ == "__main__":
@@ -271,26 +290,27 @@ if __name__ == "__main__":
     
     try:
         net.start()
-        setup_namespaces(net)
         
-        # [PENTING!] Tambahkan baris ini agar tidak perlu ARP Broadcast
-        # Ini akan mengisi tabel ARP semua host secara otomatis
-        info("*** Populating Static ARP tables...\n")
-        net.staticArp() 
-        
-        # Setting ulang IP/Netmask secara eksplisit ke /8 agar satu subnet
-        # Walaupun di Topo() sudah diset, kadang perlu dipaksa agar dianggap satu segmen
+        # Setup Namespaces untuk monitoring (wajib untuk collector)
+        # Ini membuat symlink agar 'ip netns exec' bisa jalan
+        subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=False)
         for h in net.hosts:
-            h.cmd(f"ip addr flush dev {h.name}-eth0")
-            h.cmd(f"ip addr add {HOST_INFO[h.name]['ip']}/8 brd 10.255.255.255 dev {h.name}-eth0")
-            h.cmd(f"ip link set dev {h.name}-eth0 up")
+            pid = h.pid
+            h_name = h.name
+            if not os.path.exists(f"/var/run/netns/{h_name}"):
+                 subprocess.run(['sudo', 'ln', '-s', f'/proc/{pid}/ns/net', f'/var/run/netns/{h_name}'], check=False)
 
-        info("*** Network Ready. Waiting 5s...\n")
+        # Konfigurasi IP dan ARP
+        setup_network_config(net)
+
+        info("*** Network Ready. Waiting 5s for stability...\n")
         time.sleep(5)
         
+        # Jalankan Collector
         t_col = threading.Thread(target=collector_thread)
         t_col.start()
 
+        # Jalankan Traffic
         run_voip_traffic(net)
 
     except KeyboardInterrupt:
