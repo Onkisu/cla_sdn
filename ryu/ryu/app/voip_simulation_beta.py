@@ -189,10 +189,12 @@ def safe_cmd(node, cmd):
         try: node.cmd(cmd)
         except: pass
 
+# GANTI BAGIAN INI DI SCRIPT PYTHON ANDA
+
 def run_voip_traffic(net):
-    info("*** [Traffic] Generating Raw Traffic for 100k-150k BPS Target...\n")
+    info(f"*** [Traffic] Starting Continuous Stream (Target: {TARGET_BPS_MIN}-{TARGET_BPS_MAX} bps)...\n")
     
-    # Start Receivers
+    # 1. Start Receivers
     receivers = set()
     for meta in HOST_INFO.values(): receivers.add(meta['dst_ip'])
     
@@ -202,32 +204,46 @@ def run_voip_traffic(net):
             safe_cmd(h, "killall ITGRecv")
             safe_cmd(h, "ITGRecv &")
     
-    time.sleep(3)
-    print("-> Starting Loop Senders...")
-
+    time.sleep(3) # Tunggu receiver siap
+    
+    # 2. Start Senders (Sekali jalan durasi panjang)
+    print("-> Starting Continuous Senders...")
+    
+    # Durasi stream dilebihkan sedikit dari durasi simulasi agar tidak putus di tengah
+    # Misal kita ingin collect data 60 detik, kita set traffic 70 detik.
+    stream_duration = 70000 # ms
+    
+    for h_name, meta in HOST_INFO.items():
+        node = net.get(h_name)
+        
+        # --- KALKULASI TARGET STABIL ---
+        # Kita ambil nilai tengah/random di range target
+        target_bps = random.randint(TARGET_BPS_MIN, TARGET_BPS_MAX) 
+        
+        # Packet Size statis (mirip dataset VoIP: ~120-160 bytes)
+        pkt_size_bytes = random.randint(120, 160)
+        
+        # Hitung Rate (PPS) supaya pas target
+        # Rumus: Rate = Target_BPS / (Size_Bytes * 8)
+        rate_pps = int(target_bps / (pkt_size_bytes * 8))
+        
+        # Command ITGSend
+        # -t: Durasi (ms). Kita set panjang (70 detik) jadi dia ngirim TERUS menerus.
+        # Tidak ada loop start-stop.
+        cmd = f"ITGSend -T UDP -a {meta['dst_ip']} -c {pkt_size_bytes} -C {rate_pps} -t {stream_duration} > /dev/null 2>&1 &"
+        
+        print(f"   + {h_name} -> {meta['dst_ip']} | {target_bps} bps | {rate_pps} pps (Continuous)")
+        safe_cmd(node, cmd)
+        
+        # Beri jeda dikit antar host biar start-nya gak barengan banget (opsional)
+        time.sleep(0.2)
+        
+    print("*** Traffic sedang berjalan stabil. Silakan tunggu collector... ***")
+    
+    # Block thread ini selama simulasi agar script tidak exit
+    # Collector akan tetap berjalan di background
     while not stop_event.is_set():
-        
-        for h_name, meta in HOST_INFO.items():
-            node = net.get(h_name)
-            
-            # --- TARGET KALKULASI ---
-            # Kita ingin agar nanti: SUM(bytes_tx) * 8 = 100.000 s/d 150.000
-            # Maka kita harus menyuruh D-ITG mengirim dengan kecepatan segitu.
-            
-            target_bps = random.randint(TARGET_BPS_MIN, TARGET_BPS_MAX) # 100k - 150k
-            pkt_size_bytes = random.randint(100, 230)
-            
-            # Hitung Rate (PPS) yang dibutuhkan untuk mencapai target Bytes tersebut
-            pkt_size_bits = pkt_size_bytes * 8
-            rate_pps = int(target_bps / pkt_size_bits)
-            if rate_pps < 1: rate_pps = 1
-            
-            # Jalankan perintah
-            # Traffic ini akan menghasilkan bytes yang pas sesuai request
-            cmd = f"ITGSend -T UDP -a {meta['dst_ip']} -c {pkt_size_bytes} -C {rate_pps} -t 2000 > /dev/null 2>&1 &"
-            safe_cmd(node, cmd)
-        
-        time.sleep(2.0)
+        time.sleep(1)
 
 # ================= 5. MAIN =================
 def setup_namespaces(net):
