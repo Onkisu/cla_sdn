@@ -227,8 +227,16 @@ def traffic_generator(net):
 def setup_namespaces(net):
     """Link Mininet NS ke /var/run/netns agar 'ip netns' command works"""
     info("*** Setup Namespaces for Collector...\n")
+    # Buat folder jika belum ada
     subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=False)
+    
     for h in net.hosts:
+        ns_path = f"/var/run/netns/{h.name}"
+        # 1. Hapus symlink lama jika ada (ini solusi error "File exists")
+        if os.path.exists(ns_path):
+            subprocess.run(['sudo', 'rm', '-f', ns_path], check=False)
+            
+        # 2. Buat symlink baru
         subprocess.run(['sudo', 'ip', 'netns', 'attach', h.name, str(h.pid)], check=False)
 
 def cleanup():
