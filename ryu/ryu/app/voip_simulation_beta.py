@@ -161,38 +161,53 @@ def collector_thread():
     conn.close()
 
 # ================= 4. GENERATOR STABIL =================
+# ================= 4. GENERATOR (DENGAN WARM-UP) =================
 def run_traffic(net):
-    info("*** [Traffic] Starting Continuous Stream (No Loop Restart)...\n")
+    info("*** [Traffic] Starting Traffic (Staggered Mode)...\n")
     
-    # 1. Start Receivers
+    # 1. Start Receivers (Tunggu lebih lama biar siap)
+    print("-> Starting Receivers...")
     for h in net.hosts:
         h.cmd("killall ITGRecv")
-        h.cmd("ITGRecv &") # Jalankan di background
+        h.cmd("ITGRecv &") 
     
-    time.sleep(2) # Tunggu receiver siap
+    time.sleep(5) # Waktu napas buat Receiver
     
-    # 2. Start Senders (Sekali jalan, durasi panjang)
-    # Target: ~125.000 bps
-    # Size: 160 bytes
-    # Rate: 125.000 / (160*8) = ~97 pps
+    # 2. Start Senders (Satu per satu)
+    print("-> Starting Senders (with ARP Warm-up)...")
     
     for h_name, meta in HOST_INFO.items():
+        if stop_event.is_set(): break
+        
         sender = net.get(h_name)
+        dst_ip = meta['dst_ip']
         
-        # Randomize dikit biar gak robotik, tapi tetap di range 100k-150k
-        target_bps = random.randint(110000, 140000)
+        # --- LANGKAH KUNCI: PING DULU ---
+        # Ini memaksa switch belajar MAC address sebelum traffic berat lewat
+        sender.cmd(f"ping -c 1 {dst_ip}")
+        
+        # Target Random
+        target_bps = random.randint(110000, 140000) # Range aman 110k-140k
         pkt_size = random.randint(120, 180)
-        rate_pps = int(target_bps / (pkt_size * 8))
         
-        # Durasi di set ke SIMULATION_DURATION (detik) * 1000 (ms)
+        # Rumus: Rate = Target_Bits / (Size_Bytes * 8)
+        rate_pps = int(target_bps / (pkt_size * 8))
+        if rate_pps < 1: rate_pps = 1
+        
         duration_ms = SIMULATION_DURATION * 1000
         
-        print(f"STARTING {h_name}: Target {target_bps} bps | Size {pkt_size}B | Rate {rate_pps} pps")
+        print(f"   + {h_name} -> {dst_ip} | Target: {target_bps} bps | Rate: {rate_pps} pps")
         
-        # Command D-ITG
-        cmd = f"ITGSend -T UDP -a {meta['dst_ip']} -c {pkt_size} -C {rate_pps} -t {duration_ms} &"
+        # Jalankan ITGSend
+        cmd = f"ITGSend -T UDP -a {dst_ip} -c {pkt_size} -C {rate_pps} -t {duration_ms} &"
         sender.cmd(cmd)
+        
+        # Jeda 0.5 detik biar gak crash CPU/Network di awal
+        time.sleep(0.5)
 
+    print("*** Traffic sedang berjalan... Monitor database sekarang! ***")
+    
+   
     # Biarkan jalan selama durasi simulasi
     time.sleep(SIMULATION_DURATION)
 
