@@ -10,13 +10,15 @@ from mininet.link import TCLink
 
 def run_experiment():
     # 1. Initialize Mininet
-    net = Mininet(controller=RemoteController, switch=OVSKernelSwitch, link=TCLink)
+    # Hapus konfigurasi controller IP disini, kita set manual di bawah
+    net = Mininet(controller=None, switch=OVSKernelSwitch, link=TCLink)
 
     info('*** Adding Controller\n')
+    # Connect ke Ryu Controller
     c0 = net.addController('c0', controller=RemoteController, ip='127.0.0.1', port=6633)
 
     info('*** Adding Leaf and Spine Switches (OpenFlow 1.3)\n')
-    # PENTING: protocols='OpenFlow13' agar sinkron dengan Ryu
+    # Pastikan protocols='OpenFlow13'
     s1 = net.addSwitch('s1', cls=OVSKernelSwitch, protocols='OpenFlow13')
     s2 = net.addSwitch('s2', cls=OVSKernelSwitch, protocols='OpenFlow13')
     s3 = net.addSwitch('s3', cls=OVSKernelSwitch, protocols='OpenFlow13')
@@ -30,6 +32,7 @@ def run_experiment():
     h2 = net.addHost('h2', mac='00:00:00:00:00:02', ip='10.0.0.2/24')
 
     info('*** Creating Links (Leaf-Spine Full Mesh)\n')
+    # Full mesh connections
     leaves = [l1, l2, l3]
     spines = [s1, s2, s3]
 
@@ -45,23 +48,23 @@ def run_experiment():
     c0.start()
     for sw in spines + leaves:
         sw.start([c0])
-        # Enable STP pada switch OVS
-        sw.cmd('ovs-vsctl set Bridge %s stp_enable=true' % sw.name)
+        # [PENTING] JANGAN aktifkan OVS STP disini ('ovs-vsctl set Bridge ... stp_enable=true')
+        # Biarkan Ryu controller yang mengatur port blocking via OpenFlow.
 
-    info('*** Waiting for STP convergence (30 seconds)...\n')
-    time.sleep(30)
+    info('*** Waiting for Controller STP convergence (45 seconds)...\n')
+    # Ryu STP butuh waktu agak lama untuk kalkulasi topology
+    time.sleep(45)
 
     info('*** Testing connectivity (Ping)...\n')
-    # Jika ping ini masih X, traffic generator tidak akan jalan
+    # Lakukan ping manual untuk memicu ARP learning path
     net.ping([h1, h2])
 
     info('*** Preparing Output File & TShark\n')
     output_file = "traffic_result.txt"
-    
-    # Hapus file lama jika ada agar bersih
     if os.path.exists(output_file):
         os.remove(output_file)
 
+    # Command TShark sama seperti sebelumnya
     tshark_cmd = (
         "tshark -i h2-eth0 -n -l -Y 'udp.port==8999' "
         "-T fields "
@@ -94,18 +97,16 @@ def run_experiment():
     info('*** Formatting Output (Header + Content)\n')
     header = "time\tsource\tprotocol\tlength\tArrival Time\tinfo\tNo.\tdestination\n"
     
-    # Cek apakah file terbuat dan ada isinya
-    if os.path.exists(output_file):
+    if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
         with open(output_file, 'r+') as f:
             content = f.read()
             f.seek(0, 0)
             f.write(header + content)
             
         info('*** Uploading to PostgreSQL...\n')
-        # Panggil script DB
         os.system('python3 pcap_psql.py')
     else:
-        info('*** ERROR: File output tidak terbentuk. Cek koneksi/Ping.\n')
+        info('*** WARNING: File output kosong. Cek apakah Ping berhasil.\n')
 
     info('*** Stopping Network\n')
     net.stop()
