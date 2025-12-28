@@ -18,7 +18,7 @@ def start_tcpdump():
     if os.path.exists(PCAP):
         os.remove(PCAP)
     return subprocess.Popen(
-        ["tcpdump", "-i", "any", "udp", "-w", PCAP],
+        ["tcpdump", "-i", "any", "-s", "0", "-w", PCAP],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         preexec_fn=os.setsid
