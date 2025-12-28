@@ -1,126 +1,80 @@
 #!/usr/bin/python3
+
+"""
+VOIP EXPERIMENT – FULL AUTOMATION
+Mininet + Ryu + D-ITG + tcpdump
+Output: /tmp/voip.pcap
+"""
+
+import os
+import time
+import subprocess
 from mininet.net import Mininet
-from mininet.node import RemoteController, OVSSwitch
+from mininet.node import RemoteController, OVSKernelSwitch
+from mininet.topo import Topo
 from mininet.link import TCLink
-from mininet.cli import CLI
-import subprocess, time, os, signal
+from mininet.log import setLogLevel
 
-from scapy.all import rdpcap, IP, UDP
-import psycopg2
-from datetime import datetime
+PCAP_FILE = "/tmp/voip.pcap"
+DURATION = 15  # seconds
 
-PCAP = "/tmp/voip.pcap"
+# ================= TOPOLOGY =================
+class SimpleTopo(Topo):
+    def build(self):
+        s1 = self.addSwitch("s1")
+        s2 = self.addSwitch("s2")
 
-# =====================================================
-# 1. START TCPDUMP
-# =====================================================
-def start_tcpdump():
-    if os.path.exists(PCAP):
-        os.remove(PCAP)
-    return subprocess.Popen(
-        ["tcpdump", "-i", "any", "-s", "0", "-w", PCAP],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        preexec_fn=os.setsid
-    )
+        h1 = self.addHost("h1", ip="131.202.240.101/24")
+        h2 = self.addHost("h2", ip="131.202.240.65/24")
 
-# =====================================================
-# 2. PARSE PCAP → POSTGRES
-# =====================================================
-def parse_to_psql():
-    conn = psycopg2.connect(
-        dbname="development",
-        user="dev_one",
-        password="hijack332.",
-        host="localhost"
-    )
-    cur = conn.cursor()
+        self.addLink(h1, s1, bw=100)
+        self.addLink(s1, s2, bw=100)
+        self.addLink(s2, h2, bw=100)
 
-    pkts = rdpcap(PCAP)
-    base_time = pkts[0].time
-    no = 1
+# ================= MAIN =================
+def main():
+    setLogLevel("info")
 
-    for p in pkts:
-        if IP in p and UDP in p:
-            ts = float(p.time - base_time)
-            src = p[IP].src
-            dst = p[IP].dst
-            length = len(p)
-            arrival = datetime.fromtimestamp(p.time)
+    if os.path.exists(PCAP_FILE):
+        os.remove(PCAP_FILE)
 
-            sport = p[UDP].sport
-            dport = p[UDP].dport
-            payload_len = len(p[UDP].payload)
-
-            info = f"{sport}  >  {dport} Len={payload_len}"
-
-            cur.execute("""
-                INSERT INTO pcap_logs
-                ("time", source, protocol, length,
-                 "Arrival Time", info, "No.", destination)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-            """, (
-                ts, src, "UDP", length,
-                arrival, info, no, dst
-            ))
-            no += 1
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-# =====================================================
-# 3. MININET + D-ITG
-# =====================================================
-def run():
     net = Mininet(
+        topo=SimpleTopo(),
         controller=RemoteController,
-        switch=OVSSwitch,
-        link=TCLink,
-        autoSetMacs=True
+        switch=OVSKernelSwitch,
+        link=TCLink
     )
-
-    net.addController("c0", ip="127.0.0.1", port=6633)
-
-    leaves = [net.addSwitch(f"leaf{i}") for i in range(1,4)]
-    spines = [net.addSwitch(f"spine{i}") for i in range(1,4)]
-
-    h1 = net.addHost("h1", ip="131.202.240.101/24")
-    h2 = net.addHost("h2", ip="131.202.240.65/24")
-
-    for l in leaves:
-        for s in spines:
-            net.addLink(l, s, bw=1000)
-
-    net.addLink(h1, leaves[0], bw=100)
-    net.addLink(h2, leaves[2], bw=100)
 
     net.start()
+    h1, h2 = net.get("h1", "h2")
 
-    # --- tcpdump ---
-    tcpdump = start_tcpdump()
-    time.sleep(2)
+    print("[*] Starting ITGRecv on h2")
+    h2.cmd("killall ITGRecv")
+    h2.cmd("ITGRecv &")
 
-    # --- D-ITG ---
-    h2.cmd("pkill ITGRecv; ITGRecv &")
-    time.sleep(2)
-
-    h1.cmd(
-        "ITGSend -T UDP "
-        "-a 131.202.240.65 "
-        "-rp 4000 "
-        "-C 50 -c 160 "
-        "-t 15000 &"
+    print("[*] Starting tcpdump")
+    tcpdump = subprocess.Popen(
+        ["tcpdump", "-i", "any", "udp", "-w", PCAP_FILE],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
     )
 
-    time.sleep(15)
+    time.sleep(2)
 
-    os.killpg(os.getpgid(tcpdump.pid), signal.SIGTERM)
+    print("[*] Starting ITGSend")
+    h1.cmd(
+        "ITGSend -T UDP -a 131.202.240.65 "
+        "-c 120 -C 100 -t 10000 > /dev/null 2>&1 &"
+    )
+
+    time.sleep(DURATION)
+
+    print("[*] Stopping tcpdump")
+    tcpdump.terminate()
+    tcpdump.wait()
+
     net.stop()
-
-    parse_to_psql()
     print("=== EXPERIMENT COMPLETE ===")
 
-# =====================================================
 if __name__ == "__main__":
-    run()
+    main()
