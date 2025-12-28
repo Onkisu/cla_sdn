@@ -1,11 +1,10 @@
 #!/usr/bin/python3
 """
-LEAF-SPINE VOIP SIMULATION (CONTINUOUS STREAM EDITION)
-Strategi:
-1. Fire & Forget: Jalankan Traffic Generator SEKALI saja dengan durasi sangat lama (1 jam).
-2. Rate Fixed: Set rate di angka tengah (16.500 Bytes/sec).
-   Variasi alami jaringan (jitter/delay) akan membuat angkanya naik turun cantik di 13k-19k.
-3. Watchdog: Collector akan memantau, jika traffic mati, dia akan menyalakan ulang otomatis.
+LEAF-SPINE VOIP SIMULATION (SINE WAVE PATTERN)
+Fitur:
+1. SINE WAVE: Traffic naik turun otomatis (13k - 19.8k) setiap 60 detik.
+2. NO GAPS: Menggunakan teknik Overlap (Jalan dulu, baru matiin).
+3. RANDOM NOISE: Ada variasi acak kecil biar terlihat natural.
 """
 
 import threading
@@ -16,10 +15,8 @@ import subprocess
 import re
 import shutil
 import psycopg2
+import math
 from datetime import datetime
-import signal
-import sys
-
 from mininet.net import Mininet
 from mininet.node import RemoteController, OVSKernelSwitch
 from mininet.link import TCLink
@@ -30,9 +27,10 @@ from mininet.log import setLogLevel, info
 DB_CONN = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 COLLECT_INTERVAL = 1.0
 
-# Target Range: 13.000 - 19.800
-# Kita tembak di tengah-tengah: 16.500 Bytes/sec
-TARGET_CENTER = 16500 
+# CONFIG SINE WAVE
+MIN_BYTES = 13000
+MAX_BYTES = 19800
+WAVE_PERIOD = 60  # Satu gelombang penuh (naik-puncak-turun-lembah) = 60 detik
 
 HOST_INFO = {
     'user1': {'ip': '10.0.1.1', 'mac': '00:00:00:00:01:01', 'dst_ip': '10.0.2.1'},
@@ -67,7 +65,7 @@ class LeafSpineTopo(Topo):
         self.addLink(self.addHost('app1', ip='10.0.3.1/8', mac='00:00:00:00:03:01'), leaves[2], bw=100)
         self.addLink(self.addHost('db1', ip='10.0.3.2/8', mac='00:00:00:00:03:02'), leaves[2], bw=100)
 
-# ================= 3. COLLECTOR =================
+# ================= 3. COLLECTOR (SIMPLE & ROBUST) =================
 def run_ns_cmd(host_name, cmd):
     if not os.path.exists(f"/var/run/netns/{host_name}"): return None
     try:
@@ -85,8 +83,8 @@ def get_stats(host_name):
                 'tx_pkts': int(tx.group(2)), 'rx_pkts': int(rx.group(2))}
     return None
 
-def collector_thread(net):
-    info("*** [Collector] STARTED.\n")
+def collector_thread():
+    info("*** [Collector] STARTED. Saving Data...\n")
     conn = None
     try: conn = psycopg2.connect(DB_CONN)
     except: pass
@@ -97,10 +95,6 @@ def collector_thread(net):
         time.sleep(COLLECT_INTERVAL)
         rows = []
         now = datetime.now()
-        
-        # WATCHDOG LOGIC
-        # Kita cek apakah traffic drop ke 0. Jika ya, kita kick lagi traffic generatornya
-        traffic_alive = False
 
         for h_name, meta in HOST_INFO.items():
             curr = get_stats(h_name)
@@ -117,18 +111,15 @@ def collector_thread(net):
             
             last_stats[h_name] = curr
             
-            # Labeling & Storing
             label = "normal"
             dst_mac = IP_TO_MAC.get(meta['dst_ip'], '00:00:00:00:00:00')
             
-            # Hanya simpan ke DB kalau bukan data sampah (128 bytes)
-            # Karena ini Continuous Stream, harusnya isinya belasan ribu.
+            # Filter noise kecil (< 500 bytes)
             if dtx_bytes > 500: 
-                traffic_alive = True
                 rows.append((now, 0, meta['ip'], meta['dst_ip'], meta['mac'], dst_mac,
                                 17, 5060, 5060, dtx_bytes, drx_bytes, dtx_pkts, drx_pkts, 
                                 COLLECT_INTERVAL, label))
-            
+
         if rows and conn:
             try:
                 cur = conn.cursor()
@@ -139,45 +130,62 @@ def collector_thread(net):
                 cur.executemany(q, rows)
                 conn.commit()
             except: conn.rollback()
-        
-        # WATCHDOG: Kalau semua host idle (traffic_alive = False), kickstart lagi!
-        if not traffic_alive:
-            info("... (Watchdog) Traffic seems dead. Kicking generator again ...\n")
-            start_traffic_stream(net)
 
-# ================= 4. TRAFFIC GENERATOR (CONTINUOUS) =================
-def start_traffic_stream(net):
-    """
-    Menyalakan traffic SEKALI SAJA dengan durasi 1 jam (3600000 ms).
-    Tidak ada loop. Tidak ada start-stop. Mengalir terus.
-    """
-    info(f"*** [Traffic] Starting Continuous Stream ({TARGET_CENTER} Bps)...\n")
+# ================= 4. TRAFFIC GENERATOR (SINE WAVE) =================
+def run_sine_wave_traffic(net):
+    info(f"*** [Traffic] Starting SINE WAVE Pattern (Period: {WAVE_PERIOD}s)...\n")
     
-    # 1. Pastikan Receiver Jalan
+    # 1. Start Receivers
     for h in net.hosts:
-        h.cmd(f"killall -9 ITGRecv") # Bersihkan dulu
+        h.cmd("killall -9 ITGRecv")
         h.cmd(f"{ITG_RECV_BIN} > /dev/null 2>&1 &")
     
     time.sleep(2)
     
-    # 2. Start Sender (Long Duration)
-    for h_name, meta in HOST_INFO.items():
-        src_node = net.get(h_name)
+    # Variables for Sine Wave
+    center = (MAX_BYTES + MIN_BYTES) / 2
+    amplitude = (MAX_BYTES - MIN_BYTES) / 2
+    step_time = 0
+    
+    # UPDATE INTERVAL (Semakin kecil, semakin mulus gelombangnya)
+    UPDATE_SEC = 2.0 
+    
+    while not stop_event.is_set():
+        # A. HITUNG TARGET BYTES (Matematika Sinus)
+        # Rumus: Center + Amp * sin(waktu) + Noise
+        sine_val = math.sin(2 * math.pi * step_time / WAVE_PERIOD)
+        noise = random.randint(-500, 500) # Biar gak kaku banget
         
-        # Hitung PPS untuk target 16.500 Bytes/sec
-        payload_size = 160 
-        wire_size = 202 
+        target_bytes = int(center + (amplitude * sine_val) + noise)
         
-        # Target PPS = 16500 / 202 = ~81 PPS
-        pps = int(TARGET_CENTER / wire_size)
+        # Clip (Jaga batas aman)
+        target_bytes = max(MIN_BYTES, min(target_bytes, MAX_BYTES))
         
-        # -t 3600000 = 1 Jam.
-        cmd = (f"{ITG_SEND_BIN} -T UDP -a {meta['dst_ip']} "
-               f"-c {payload_size} "
-               f"-C {pps} "
-               f"-t 3600000 > /dev/null 2>&1 &")
+        # Hitung PPS
+        wire_size = 202
+        pps = int(target_bytes / wire_size)
         
-        src_node.cmd(cmd)
+        # Print info ke layar biar Anda bisa pantau polanya
+        phase = "RISING" if sine_val > 0 else "FALLING"
+        # info(f"   >>> Traffic Phase: {phase} | Target: {target_bytes} Bps ({pps} pps)\n")
+
+        # B. EKSEKUSI (Teknik Overlap)
+        # Kita set durasi ITG sedikit lebih lama dari loop sleep
+        # Durasi ITG = 2500ms, Sleep Loop = 2000ms.
+        # Ada overlap 500ms. Ini menjamin TIDAK ADA GAP.
+        
+        for h_name, meta in HOST_INFO.items():
+            src_node = net.get(h_name)
+            cmd = (f"{ITG_SEND_BIN} -T UDP -a {meta['dst_ip']} "
+                   f"-c 160 "
+                   f"-C {pps} "
+                   f"-t {int(UPDATE_SEC * 1000) + 500} " # Overlap 500ms
+                   f"> /dev/null 2>&1 &")
+            try: src_node.cmd(cmd)
+            except: pass
+        
+        time.sleep(UPDATE_SEC)
+        step_time += UPDATE_SEC
 
 # ================= 5. MAIN SETUP =================
 def force_cleanup():
@@ -224,12 +232,12 @@ if __name__ == "__main__":
         time.sleep(5)
         
         if wait_for_convergence(net):
-            # 1. Jalankan Traffic DULUAN biar ngalir
-            start_traffic_stream(net)
+            # Jalanin Collector
+            t_col = threading.Thread(target=collector_thread)
+            t_col.start()
             
-            # 2. Baru jalankan Collector untuk mencatat
-            # (Collector punya watchdog untuk restart traffic kalau mati)
-            collector_thread(net) 
+            # Jalanin Traffic Sine Wave
+            run_sine_wave_traffic(net)
         else:
             info("!!! CRITICAL: Network Failed to Converge.\n")
 
