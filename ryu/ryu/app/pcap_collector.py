@@ -32,7 +32,7 @@ def main():
     cur = conn.cursor()
 
     insert_q = """
-        INSERT INTO traffic.pcap_dataset (
+        INSERT INTO pcap_logs (
             time,
             source,
             protocol,
