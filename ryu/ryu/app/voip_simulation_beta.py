@@ -1,16 +1,13 @@
 #!/usr/bin/python3
 """
-REAL TRAFFIC SIMULATION (NO FAKE DATA)
-Mechanism:
-1. Traffic Gen: Tuned to produce ~15kbps physically (-C 95 -c 160).
-2. Measurement: Reads REAL Linux Kernel Counters (/sys/class/net/...).
-3. Result: Valid data in range 13.000 - 19.800 bytes/sec.
+REAL TRAFFIC SIMULATION (STABLE VERSION)
+Fix: Menggunakan native Mininet command untuk baca counters, 
+bukan manual namespace yang sering 'Device busy'.
 """
 
 import threading
 import time
 import os
-import subprocess
 import psycopg2
 from datetime import datetime
 
@@ -23,7 +20,7 @@ from mininet.log import setLogLevel, info
 # ================= DATABASE CONFIG =================
 DB_CONFIG = "dbname=development user=dev_one password=hijack332. host=127.0.0.1"
 
-# Mapping Host Mininet -> Database Info
+# Mapping: Nama Host -> Info Database
 HOST_MAP = {
     'user1': {'ip': '192.168.100.1', 'dst': '10.10.1.1', 'mac': '00:00:00:00:01:01'},
     'user2': {'ip': '192.168.100.2', 'dst': '10.10.2.1', 'mac': '00:00:00:00:01:02'},
@@ -63,49 +60,65 @@ class SimpleTopo(Topo):
         self.addLink(w1, sw2); self.addLink(a1, sw2); self.addLink(d1, sw2)
         self.addLink(sw2, cr1, intfName2='cr1-eth2', params2={'ip': '10.10.1.254/24'})
 
-# ================= REAL DATA COLLECTOR =================
-def read_linux_bytes(host_name):
+# ================= REAL DATA COLLECTOR (FIXED) =================
+def get_node_bytes(net, node_name):
     """
-    Membaca langsung file kernel Linux untuk statistik interface.
-    Ini adalah cara paling valid untuk mengukur traffic di Mininet.
+    Menggunakan API Mininet langsung, lebih stabil daripada ip netns exec
     """
     try:
-        # Mininet menyimpan network namespace di /var/run/netns/
-        # Kita pakai command 'ip netns exec' untuk baca file stat
-        cmd = ["sudo", "ip", "netns", "exec", host_name, "cat", f"/sys/class/net/{host_name}-eth0/statistics/tx_bytes"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return int(result.stdout.strip())
-    except:
+        node = net.get(node_name)
+        # Baca file bytes langsung dari dalam node
+        output = node.cmd(f"cat /sys/class/net/{node_name}-eth0/statistics/tx_bytes")
+        return int(output.strip())
+    except Exception as e:
+        # print(f"Read Error {node_name}: {e}")
         return 0
 
-def monitor_thread():
+def monitor_thread(net):
     info("*** [Monitor] Starting Real-Time Interface Polling...\n")
-    conn = psycopg2.connect(DB_CONFIG)
-    
-    # Simpan state terakhir (Total Bytes)
-    last_stats = {h: read_linux_bytes(h) for h in HOST_MAP.keys()}
+    conn = None
+    try:
+        conn = psycopg2.connect(DB_CONFIG)
+    except Exception as e:
+        info(f"!!! DB CONNECT ERROR: {e}\n")
+        return
+
+    # Initial State
+    last_stats = {h: get_node_bytes(net, h) for h in HOST_MAP.keys()}
     
     while not stop_event.is_set():
-        time.sleep(1.0) # Sampling setiap 1 detik
+        time.sleep(1.0)
         rows = []
         now = datetime.now()
+        
+        total_delta_batch = 0 # Untuk debug log
 
         for h_name, meta in HOST_MAP.items():
-            # 1. Baca data Total Bytes tebaru dari Kernel
-            current_total = read_linux_bytes(h_name)
+            current_total = get_node_bytes(net, h_name)
             
-            # 2. Hitung selisih (Delta) = Traffic per detik ini
+            # Hitung selisih
             delta_bytes = current_total - last_stats[h_name]
-            last_stats[h_name] = current_total
+            
+            # Update last state (HANYA jika current > last, antisipasi reset counter)
+            if current_total >= last_stats[h_name]:
+                last_stats[h_name] = current_total
+            else:
+                last_stats[h_name] = current_total # Reset detected
+                delta_bytes = 0 
 
-            # Hitung packet count (estimasi kasar dr bytes biar db ga error)
-            delta_pkts = int(delta_bytes / 180) if delta_bytes > 0 else 0
+            total_delta_batch += delta_bytes
 
-            # 3. Masukkan ke DB (Hanya jika ada traffic > 0)
-            # Karena ini data asli, kadang ada noise kecil, kita filter
-            if delta_bytes > 0:
+            # Insert jika ada traffic (filter noise kecil < 100 bytes)
+            if delta_bytes > 100:
+                pkts = int(delta_bytes / 180) 
                 rows.append((now, 0, meta['ip'], meta['dst'], meta['mac'], 'FF:FF:FF:FF:FF:FF',
-                             17, 5060, 5060, delta_bytes, 0, delta_pkts, 0, 1.0, 'data'))
+                             17, 5060, 5060, delta_bytes, 0, pkts, 0, 1.0, 'data'))
+
+        # Debug di Terminal biar kamu tenang
+        if total_delta_batch > 0:
+            print(f"   >>> Inserting Data... Total Bytes this second: {total_delta_batch}")
+        else:
+            print(f"   ... Waiting for traffic ... (Current Read: 0)")
 
         if rows:
             try:
@@ -117,52 +130,30 @@ def monitor_thread():
                 cur.executemany(q, rows)
                 conn.commit()
             except Exception as e:
-                print(f"DB Error: {e}")
+                print(f"!!! DB INSERT ERROR: {e}")
                 conn.rollback()
     
-    conn.close()
+    if conn: conn.close()
 
-# ================= TRAFFIC TUNING =================
+# ================= TRAFFIC GEN =================
 def traffic_thread(net):
-    info("*** [Traffic] Starting Tuned VoIP Generator (Target: ~16KB/s)...\n")
-    
+    info("*** [Traffic] Generator Running (-C 95 -c 160)...\n")
     # Setup Receivers
     for h in net.hosts:
         h.cmd("killall ITGRecv; ITGRecv &")
-    time.sleep(1)
+    time.sleep(2)
 
     while not stop_event.is_set():
         for h_name, meta in HOST_MAP.items():
             sender = net.get(h_name)
-            
-            # --- RUMUS TUNING (PENTING) ---
-            # Kita mau range 13.000 - 19.800 bytes/sec
-            # Packet Size (-c) = 160 bytes (Payload VoIP G.711 standard)
-            # Header Overhead (IP+UDP+Eth) ~= 42 bytes. Total wire size ~= 202 bytes.
-            # Rate (-C) = 95 packets/sec.
-            # Hitungan kasar: 95 pkts * 202 bytes = ~19.190 bytes/sec (Wire speed)
-            # Hitungan payload: 95 * 160 = 15.200 bytes/sec (App speed)
-            # D-ITG kadang menghitung payload, Linux menghitung wire.
-            # Setting ini akan menghasilkan angka 'real' di Linux sekitar 15k - 20k.
-            
+            # -C 95 packets/sec, -c 160 bytes payload
             cmd = f"ITGSend -T UDP -a {meta['dst']} -c 160 -C 95 -t 3000 > /dev/null 2>&1 &"
             sender.cmd(cmd)
-        
-        # Loop tiap 3 detik (biar overlap dan continuous)
         time.sleep(2.8)
 
 # ================= MAIN =================
-def setup_namespaces(net):
-    # Trik supaya Python bisa baca file /sys/class/net di dalam namespace mininet
-    for h in net.hosts:
-        subprocess.run(['sudo', 'mkdir', '-p', '/var/run/netns'], check=False)
-        ns_path = f"/var/run/netns/{h.name}"
-        if not os.path.exists(ns_path):
-             subprocess.run(['sudo', 'ip', 'netns', 'attach', h.name, str(h.pid)], check=False)
-
 def cleanup():
     os.system("sudo killall -9 ITGSend ITGRecv > /dev/null 2>&1")
-    os.system("sudo rm -rf /var/run/netns/*")
 
 if __name__ == "__main__":
     setLogLevel('info')
@@ -173,20 +164,19 @@ if __name__ == "__main__":
     
     try:
         net.start()
-        # Routing Server Subnet 2
         net['cr1'].cmd('ip addr add 10.10.2.254/24 dev cr1-eth2')
         
-        setup_namespaces(net)
-        info("*** Network Ready. Pinging...\n")
+        info("*** Ping Check...\n")
         net.pingAll()
         
-        t_mon = threading.Thread(target=monitor_thread)
+        # Pass 'net' object to monitor thread
+        t_mon = threading.Thread(target=monitor_thread, args=(net,))
         t_gen = threading.Thread(target=traffic_thread, args=(net,))
         
         t_mon.start()
         t_gen.start()
         
-        info("*** RUNNING REAL SIMULATION. Press Ctrl+C to stop.\n")
+        info("*** SIMULATION RUNNING.\n")
         while True:
             time.sleep(1)
 
