@@ -85,15 +85,13 @@ class SpineLeafTopology:
         """Build Spine-Leaf topology"""
         info("*** Creating Spine-Leaf topology\n")
         
-        net = Mininet(
-            topo=topo,
+        self.net = Mininet(
             controller=RemoteController,
             switch=lambda name: OVSSwitch(name, stp=True),
+            link=TCLink,
             autoSetMacs=True,
-            autoStaticArp=True,
-            build=False
+            autoStaticArp=True
         )
-
         
         # Add Ryu controller
         info("*** Adding Ryu controller\n")
