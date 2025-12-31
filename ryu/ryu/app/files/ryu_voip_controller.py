@@ -10,7 +10,7 @@ from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISP
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub
-from ryu.lib.packet import packet, ethernet, ether_types, ipv4, udp, tcp, arp
+from ryu.lib.packet import packet, ethernet, ether_types, ipv4, udp, tcp, arp, icmp
 import psycopg2
 from datetime import datetime
 import random
@@ -171,6 +171,29 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
                                           ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
 
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+
+        match = parser.OFPMatch()
+        actions = [
+            parser.OFPActionOutput(
+                ofproto.OFPP_CONTROLLER,
+                ofproto.OFPCML_NO_BUFFER
+            )
+        ]
+        inst = [parser.OFPInstructionActions(
+            ofproto.OFPIT_APPLY_ACTIONS, actions
+        )]
+
+        mod = parser.OFPFlowMod(
+            datapath=datapath,
+            priority=0,
+            match=match,
+            instructions=inst
+        )
+        datapath.send_msg(mod)
+
+
     def add_flow(self, datapath, priority, match, actions, buffer_id=None):
         """Add flow entry to switch"""
         ofproto = datapath.ofproto
@@ -271,6 +294,39 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
                                   in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
+
+        out_port = self.ip_to_port.get(dst_ip)
+        if not out_port:
+            return
+
+        actions = [parser.OFPActionOutput(out_port)]
+
+        inst = [parser.OFPInstructionActions(
+            ofproto.OFPIT_APPLY_ACTIONS, actions
+        )]
+
+        flow_mod = parser.OFPFlowMod(
+            datapath=datapath,
+            priority=100,
+            match=parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src=src_ip,
+                ipv4_dst=dst_ip,
+                ip_proto=ip_pkt.proto
+            ),
+            instructions=inst
+        )
+        datapath.send_msg(flow_mod)
+
+        pkt_out = parser.OFPPacketOut(
+            datapath=datapath,
+            buffer_id=msg.buffer_id,
+            in_port=in_port,
+            actions=actions,
+            data=msg.data
+        )
+        datapath.send_msg(pkt_out)
+
 
     def _monitor(self):
         """Monitor thread to request flow statistics"""
