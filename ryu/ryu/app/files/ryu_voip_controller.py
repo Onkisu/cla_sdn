@@ -361,7 +361,10 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         cycle_position = elapsed_seconds % 3600
         cycle_phase = "NAIK" if cycle_position < 1800 else "TURUN"
         cycle_minute = cycle_position // 60
-        
+
+         # Scale each flow's REAL data to match target while keeping proportions
+        num_flows = len(valid_flows)
+
         # Log summary for this second
         self.logger.info(f"=" * 80)
         self.logger.info(f"Second: {elapsed_seconds}s | Cycle: {cycle_minute}min | Phase: {cycle_phase}")
@@ -370,8 +373,8 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         self.logger.info(f"Active flows: {num_flows}")
         self.logger.info(f"-" * 80)
         
-        # Scale each flow's REAL data to match target while keeping proportions
-        num_flows = len(valid_flows)
+       
+        
         
         # Insert each flow with scaled bytes
         for i, flow_info in enumerate(valid_flows):
