@@ -53,10 +53,28 @@ sudo apt-get update
 sudo apt-get install mininet
 ```
 
-### 2. Install Ryu SDN Controller
+### 2. Install Ryu SDN Controller (di Virtual Environment)
+
+**VENV sudah ada di:** `/home/takemi/ryu-env`
+
 ```bash
-pip3 install ryu eventlet
+# Aktivasi venv yang sudah ada
+source /home/takemi/ryu-env/bin/activate
+
+# Check apakah Ryu sudah terinstall
+ryu-manager --version
+
+# Jika belum terinstall, install Ryu di dalam venv
+pip install ryu eventlet
+
+# Deactivate (akan auto-activate oleh start script)
+deactivate
 ```
+
+**PENTING:** 
+- Ryu HARUS di venv `/home/takemi/ryu-env`
+- Start script akan otomatis aktivasi venv ini
+- File simulasi di: `/home/takemi/cla_sdn/ryu/ryu/app/files`
 
 ### 3. Install D-ITG (Distributed Internet Traffic Generator)
 ```bash
@@ -91,13 +109,26 @@ sudo ./start_simulation.sh
 
 ### Option B: Manual (2 Terminal)
 
-**Terminal 1: Start Ryu Controller**
+**Terminal 1: Start Ryu Controller (di venv)**
 ```bash
+# Aktivasi venv dari path absolute
+source /home/takemi/ryu-env/bin/activate
+
+# Masuk ke directory files
+cd /home/takemi/cla_sdn/ryu/ryu/app/files
+
+# Start Ryu
 ryu-manager --observe-links ryu_voip_controller.py
+
+# Jangan close terminal ini!
 ```
 
-**Terminal 2: Start Mininet**
+**Terminal 2: Start Mininet (NO venv)**
 ```bash
+# Masuk ke directory files
+cd /home/takemi/cla_sdn/ryu/ryu/app/files
+
+# Langsung jalankan (tanpa venv)
 sudo python3 spine_leaf_voip_simulation.py
 ```
 
@@ -132,6 +163,26 @@ python3 verify_database.py
         [l1]----[l2]----[l3]    <- Leaf Layer
         / \     / \     / \
       h1  h2  h3  h4  h5  h6    <- Host Layer
+```
+
+## 📁 FILE STRUCTURE
+
+```
+/home/takemi/
+├── ryu-env/                             # Ryu virtual environment
+│   ├── bin/
+│   │   ├── activate                     # Aktivasi venv
+│   │   └── ryu-manager                  # Ryu binary
+│   └── lib/
+│
+└── cla_sdn/ryu/ryu/app/files/          # Simulation files
+    ├── ryu_voip_controller.py          # Ryu controller (RUN in venv)
+    ├── spine_leaf_voip_simulation.py   # Mininet (NO venv)
+    ├── start_simulation.sh             # Auto-start script
+    ├── install_dependencies.sh         # Setup script
+    ├── verify_database.py              # Database check
+    ├── requirements.txt                # Python deps
+    └── README.md                       # Documentation
 ```
 
 ## Komponen Sistem
@@ -203,6 +254,18 @@ ORDER BY flow_count DESC;
 
 ## Troubleshooting
 
+### Error: "Ryu virtual environment not found"
+Check venv location:
+```bash
+ls -la /home/takemi/ryu-env/bin/activate
+
+# Jika tidak ada, buat venv baru:
+python3 -m venv /home/takemi/ryu-env
+source /home/takemi/ryu-env/bin/activate
+pip install ryu eventlet
+deactivate
+```
+
 ### Error: "Cannot connect to Ryu controller"
 Pastikan Ryu controller running di port 6653:
 ```bash
@@ -212,21 +275,19 @@ ps aux | grep ryu-manager
 # Check port
 netstat -tulpn | grep 6653
 
-# Restart Ryu
+# Restart Ryu (di venv)
 pkill -f ryu-manager
+source /home/takemi/ryu-env/bin/activate
+cd /home/takemi/cla_sdn/ryu/ryu/app/files
 ryu-manager --observe-links ryu_voip_controller.py
 ```
 
-### Error: "Permission denied"
-Jalankan dengan sudo:
+### Error: "Ryu not found" (saat manual start)
+Aktivasi venv:
 ```bash
-sudo ./start_simulation.sh
-```
-
-### Error: "Ryu not found"
-Install Ryu:
-```bash
-pip3 install ryu eventlet
+source /home/takemi/ryu-env/bin/activate
+cd /home/takemi/cla_sdn/ryu/ryu/app/files
+ryu-manager --observe-links ryu_voip_controller.py
 ```
 
 ### Error: "D-ITG not found"

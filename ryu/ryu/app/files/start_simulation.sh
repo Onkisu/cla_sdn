@@ -21,11 +21,27 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Check if Ryu is installed
+# Check if Ryu venv exists
+RYU_VENV="/home/takemi/ryu-env"
+
+if [ ! -d "$RYU_VENV" ]; then
+    echo -e "${RED}Error: Ryu virtual environment not found at $RYU_VENV${NC}"
+    echo "Please check venv location"
+    exit 1
+fi
+
+# Activate Ryu venv
+echo "Activating Ryu virtual environment from $RYU_VENV..."
+source $RYU_VENV/bin/activate
+
+# Check if Ryu is installed in venv
 if ! command -v ryu-manager &> /dev/null; then
-    echo -e "${YELLOW}Warning: Ryu is not installed${NC}"
-    echo "Installing Ryu..."
-    pip3 install ryu
+    echo -e "${RED}Error: Ryu is not installed in venv${NC}"
+    echo "Install with:"
+    echo "  source ryu-env/bin/activate"
+    echo "  pip install ryu eventlet"
+    deactivate
+    exit 1
 fi
 
 # Check if Mininet is installed
@@ -100,6 +116,9 @@ echo "================================================================"
 # Stop Ryu controller
 echo "Stopping Ryu controller..."
 kill $RYU_PID 2>/dev/null
+
+# Deactivate venv
+deactivate
 
 # Clean Mininet
 echo "Cleaning Mininet..."
