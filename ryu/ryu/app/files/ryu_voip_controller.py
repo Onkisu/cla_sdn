@@ -11,6 +11,7 @@ from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub
 from ryu.lib.packet import packet, ethernet, ether_types, ipv4, udp, tcp
+from ryu.lib.packet import arp
 import psycopg2
 from datetime import datetime
 import random
@@ -201,6 +202,18 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
             return
+            # === HANDLE ARP (SETELAH eth ADA) ===
+        if eth.ethertype == ether_types.ETH_TYPE_ARP:
+            actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+            out = parser.OFPPacketOut(
+                datapath=datapath,
+                buffer_id=msg.buffer_id,
+                in_port=in_port,
+                actions=actions,
+                data=msg.data
+            )
+            datapath.send_msg(out)
+            return
 
         dst = eth.dst
         src = eth.src
@@ -224,7 +237,24 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
 
         # Install flow to avoid packet_in next time
         if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+            ip_pkt = pkt.get_protocol(ipv4.ipv4)
+
+            if ip_pkt:
+                match = parser.OFPMatch(
+                    in_port=in_port,
+                    eth_src=src,
+                    eth_dst=dst,
+                    eth_type=0x0800,
+                    ipv4_src=ip_pkt.src,
+                    ipv4_dst=ip_pkt.dst
+                )
+            else:
+                match = parser.OFPMatch(
+                    in_port=in_port,
+                    eth_src=src,
+                    eth_dst=dst
+                )
+
             
             if msg.buffer_id != ofproto.OFP_NO_BUFFER:
                 self.add_flow(datapath, 1, match, actions, msg.buffer_id)
@@ -362,6 +392,8 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         cycle_phase = "NAIK" if cycle_position < 1800 else "TURUN"
         cycle_minute = cycle_position // 60
         
+        num_flows = len(valid_flows)
+
         # Log summary for this second
         self.logger.info(f"=" * 80)
         self.logger.info(f"Second: {elapsed_seconds}s | Cycle: {cycle_minute}min | Phase: {cycle_phase}")
@@ -371,7 +403,7 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         self.logger.info(f"-" * 80)
         
         # Scale each flow's REAL data to match target while keeping proportions
-        num_flows = len(valid_flows)
+        
         
         # Insert each flow with scaled bytes
         for i, flow_info in enumerate(valid_flows):
