@@ -298,39 +298,9 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
 
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
                                   in_port=in_port, actions=actions, data=data)
-        datapath.send_msg(out)
+        datapath.send_msg(out)  
+        return
 
-        out_port = self.ip_to_port.get(dst_ip)
-        if not out_port:
-            return
-
-        actions = [parser.OFPActionOutput(out_port)]
-
-        inst = [parser.OFPInstructionActions(
-            ofproto.OFPIT_APPLY_ACTIONS, actions
-        )]
-
-        flow_mod = parser.OFPFlowMod(
-            datapath=datapath,
-            priority=100,
-            match=parser.OFPMatch(
-                eth_type=0x0800,
-                ipv4_src=src_ip,
-                ipv4_dst=dst_ip,
-                ip_proto=ip_pkt.proto
-            ),
-            instructions=inst
-        )
-        datapath.send_msg(flow_mod)
-
-        pkt_out = parser.OFPPacketOut(
-            datapath=datapath,
-            buffer_id=msg.buffer_id,
-            in_port=in_port,
-            actions=actions,
-            data=msg.data
-        )
-        datapath.send_msg(pkt_out)
 
 
     def _monitor(self):
