@@ -87,7 +87,7 @@ class SpineLeafTopology:
         
         self.net = Mininet(
             controller=RemoteController,
-            switch=lambda name: OVSSwitch(name, stp=True),
+            switch=lambda name, **kwargs: OVSSwitch(name, stp=True, **kwargs),
             link=TCLink,
             autoSetMacs=True,
             autoStaticArp=True
