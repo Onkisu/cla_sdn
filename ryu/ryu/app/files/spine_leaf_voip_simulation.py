@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mininet Spine-Leaf Simulation - FLAT NETWORK FIX
+Mininet Spine-Leaf Simulation - NO STP (INSTANT CONNECT)
 """
 from mininet.net import Mininet
 from mininet.node import OVSSwitch, RemoteController
@@ -18,7 +18,7 @@ class SpineLeafTopology:
         self.hosts = []
 
     def create_database_table(self):
-        # Database setup (sama seperti sebelumnya, pastikan table ada)
+        # Setup Database (Sama kayak sebelumnya)
         try:
             conn = psycopg2.connect(host='103.181.142.165', database='development', 
                                   user='dev_one', password='hijack332.', port=5432)
@@ -29,38 +29,35 @@ class SpineLeafTopology:
                 ip_proto INTEGER, tp_src INTEGER, tp_dst INTEGER, bytes_tx BIGINT, bytes_rx BIGINT,
                 pkts_tx INTEGER, pkts_rx INTEGER, duration_sec FLOAT, traffic_label VARCHAR(50));""")
             conn.commit(); conn.close()
-        except Exception as e:
-            info(f"*** DB Info: {e} (Continuing...)\n")
+        except: pass
 
     def run(self):
         self.create_database_table()
         
-        # 1. BUILD TOPOLOGY
         self.net = Mininet(
             controller=RemoteController,
-            # [PENTING] Protokol harus OpenFlow13 biar ngomong sama Ryu
-            switch=lambda name, **kwargs: OVSSwitch(name, stp=True, protocols='OpenFlow13', **kwargs),
+            # [FIX FATAL] stp=False (Biar gak diblok OVS), protocols='OpenFlow13' (Biar connect Ryu)
+            switch=lambda name, **kwargs: OVSSwitch(name, stp=False, protocols='OpenFlow13', **kwargs),
             link=TCLink,
             autoSetMacs=True, autoStaticArp=True
         )
         
+        info("*** Adding Controller\n")
         self.net.addController('c0', controller=RemoteController, ip='127.0.0.1', port=6653)
 
-        # Switches
+        info("*** Building Spine-Leaf Topology\n")
         for i in range(1, 4): self.spines.append(self.net.addSwitch(f's{i}', dpid=f'000000000000000{i}'))
         for i in range(1, 4): self.leaves.append(self.net.addSwitch(f'l{i}', dpid=f'00000000000000{i+3}'))
 
-        # Links (Spine-Leaf)
         for spine in self.spines:
             for leaf in self.leaves:
                 self.net.addLink(spine, leaf, bw=1000, delay='1ms')
 
-        # Hosts (FLAT NETWORK)
+        info("*** Adding Hosts (FLAT NETWORK)\n")
         host_id = 1
         for i, leaf in enumerate(self.leaves):
             for j in range(2):
-                # [FIX FATAL] Semua host satu subnet (10.0.0.x)
-                # Ini membuat mereka kirim ARP broadcast, bukan mencari Router gateway
+                # Semua host satu subnet 10.0.0.x biar ARP broadcast nyampe
                 h = self.net.addHost(f'h{host_id}', ip=f'10.0.0.{host_id}/24')
                 self.hosts.append(h)
                 self.net.addLink(h, leaf, bw=100, delay='1ms')
@@ -68,23 +65,27 @@ class SpineLeafTopology:
 
         self.net.start()
         
-        # 2. WAIT FOR CONVERGENCE
-        info("*** Waiting 35s for STP & Switch Handshake...\n")
-        time.sleep(35) 
+        # Gak perlu nunggu 35 detik lagi karena STP mati. 5 detik cukup buat Controller connect.
+        info("*** Waiting 5s for Controller Connection...\n")
+        time.sleep(5) 
         
-        # 3. PING ALL
         info("*** Ping All...\n")
-        self.net.pingAll()
+        loss = self.net.pingAll()
+        
+        if loss > 0:
+            info("*** Retrying Ping (ARP Warming)...\n")
+            time.sleep(2)
+            self.net.pingAll()
 
-        # 4. TRAFFIC GENERATION
         info("*** Starting D-ITG Traffic...\n")
         for h in self.hosts: h.cmd('ITGRecv &')
-        time.sleep(2)
+        time.sleep(1)
         
         for i, src in enumerate(self.hosts):
-            dst = self.hosts[(i + 1) % len(self.hosts)] # Kirim ke tetangga
+            dst = self.hosts[(i + 1) % len(self.hosts)]
+            # Kirim traffic VoIP
             src.cmd(f'ITGSend -T UDP -a {dst.IP()} -c 160 -C 50 -t 3600000 &')
-            info(f"    {src.name} -> {dst.name} (UDP flow started)\n")
+            info(f"    {src.name} -> {dst.name} (UDP Flow)\n")
 
         CLI(self.net)
         self.net.stop()
