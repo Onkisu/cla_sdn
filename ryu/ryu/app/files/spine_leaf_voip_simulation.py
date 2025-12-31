@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mininet Spine-Leaf Simulation (ULTIMATE EDITION)
+Mininet Spine-Leaf Simulation (PROTOCOL FIXED)
 """
 from mininet.net import Mininet
 from mininet.node import OVSSwitch, RemoteController
@@ -9,7 +9,9 @@ from mininet.log import setLogLevel, info
 from mininet.link import TCLink
 import time
 import psycopg2
+import sys
 
+# DB Config (Optional check)
 DB_CONFIG = {
     'host': '103.181.142.165',
     'database': 'development',
@@ -51,33 +53,40 @@ class SpineLeafTopology:
             """)
             conn.commit()
             conn.close()
-            info("*** Database table verified.\n")
+            info("*** Database check: OK.\n")
             return True
         except Exception as e:
-            info(f"*** DB Connection Failed: {e}\n")
-            info("*** Check VPN or IP Reachability!\n")
-            return False
+            info(f"*** DB Warning: {e}\n")
+            info("*** Continuing without DB init (Controller will handle handle it)...\n")
+            return True # Allow run even if DB init fails here (Controller logic is separate)
 
     def build_topology(self):
         self.net = Mininet(
             controller=RemoteController,
-            switch=lambda name, **kwargs: OVSSwitch(name, stp=True, **kwargs),
+            # --- FIX UTAMA DISINI: PROTOCOLS='OpenFlow13' ---
+            switch=lambda name, **kwargs: OVSSwitch(name, stp=True, protocols='OpenFlow13', **kwargs),
             link=TCLink,
             autoSetMacs=True,
             autoStaticArp=True
         )
         
-        info("*** Adding Controller (127.0.0.1:6653)\n")
+        info("*** Adding Controller\n")
         self.net.addController('c0', controller=RemoteController, ip='127.0.0.1', port=6653)
 
-        info("*** Building Spine-Leaf\n")
-        for i in range(1, 4): self.spines.append(self.net.addSwitch(f's{i}', dpid=f'000000000000000{i}'))
-        for i in range(1, 4): self.leaves.append(self.net.addSwitch(f'l{i}', dpid=f'00000000000000{i+3}'))
+        info("*** Building Spine-Leaf Topology\n")
+        # Spine switches
+        for i in range(1, 4): 
+            self.spines.append(self.net.addSwitch(f's{i}', dpid=f'000000000000000{i}'))
+        # Leaf switches
+        for i in range(1, 4): 
+            self.leaves.append(self.net.addSwitch(f'l{i}', dpid=f'00000000000000{i+3}'))
 
+        # Links Spine <-> Leaf
         for spine in self.spines:
             for leaf in self.leaves:
                 self.net.addLink(spine, leaf, bw=1000, delay='1ms')
 
+        # Hosts
         host_id = 1
         for i, leaf in enumerate(self.leaves):
             for j in range(2):
@@ -87,33 +96,34 @@ class SpineLeafTopology:
                 host_id += 1
 
     def run(self):
-        if not self.create_database_table(): return
+        self.create_database_table()
         self.build_topology()
         self.net.start()
         
-        # --- CRITICAL FIX: INCREASED WAIT TIME ---
-        info("*** Waiting 35 seconds for STP Convergence (DO NOT SKIP)...\n")
+        # OVS perlu waktu untuk inisialisasi OpenFlow 1.3 session
+        info("*** Waiting 35 seconds for STP & OF1.3 Handshake...\n")
         time.sleep(35) 
         
-        info("*** Ping All (Testing Connectivity)...\n")
+        info("*** Ping All (Attempt 1)...\n")
         loss = self.net.pingAll()
         
         if loss > 0:
-            info("*** WARNING: Some pings failed. Retrying in 10s...\n")
-            time.sleep(10)
+            info(f"*** Loss detected ({loss}%). Retrying in 5s...\n")
+            time.sleep(5)
             self.net.pingAll()
 
-        info("*** Starting VoIP Traffic (D-ITG)...\n")
+        info("*** Starting Traffic...\n")
+        # Start Receivers
         for h in self.hosts: h.cmd('ITGRecv &')
-        time.sleep(2)
+        time.sleep(1)
         
+        # Start Senders (Ring traffic pattern)
         for i, src in enumerate(self.hosts):
             dst = self.hosts[(i + 1) % len(self.hosts)]
-            # VoIP Codec simulation
             src.cmd(f'ITGSend -T UDP -a {dst.IP()} -c 160 -C 50 -t 3600000 &')
             info(f"    {src.name} -> {dst.name} (UDP Started)\n")
 
-        info("*** Running... Press Ctrl+C to stop.\n")
+        info("*** Simulation Running. Press Ctrl+C to stop.\n")
         CLI(self.net)
         self.net.stop()
 
