@@ -1,7 +1,7 @@
 #!/bin/bash
 """
 Startup script for VoIP Simulation
-Runs Ryu controller and Mininet topology together
+Runs Ryu controller (in venv) and Mininet topology (system Python) together
 """
 
 echo "================================================================"
@@ -30,25 +30,25 @@ if [ ! -d "$RYU_VENV" ]; then
     exit 1
 fi
 
-# Activate Ryu venv
-echo "Activating Ryu virtual environment from $RYU_VENV..."
-source $RYU_VENV/bin/activate
-
-# Check if Ryu is installed in venv
-if ! command -v ryu-manager &> /dev/null; then
-    echo -e "${RED}Error: Ryu is not installed in venv${NC}"
-    echo "Install with:"
-    echo "  source ryu-env/bin/activate"
-    echo "  pip install ryu eventlet"
-    deactivate
+# Check if Mininet is installed (system-wide for sudo)
+if ! command -v mn &> /dev/null; then
+    echo -e "${RED}Error: Mininet is not installed${NC}"
+    echo "Install with: sudo apt-get install mininet python3-mininet"
     exit 1
 fi
 
-# Check if Mininet is installed
-if ! command -v mn &> /dev/null; then
-    echo -e "${RED}Error: Mininet is not installed${NC}"
-    echo "Install with: sudo apt-get install mininet"
+# Check if python3-mininet module is available (system Python)
+echo "Checking Mininet Python module (system)..."
+if ! python3 -c "import mininet" 2>/dev/null; then
+    echo -e "${RED}Error: Mininet Python module not found${NC}"
+    echo ""
+    echo "Please install python3-mininet:"
+    echo "  sudo apt-get update"
+    echo "  sudo apt-get install python3-mininet"
+    echo ""
     exit 1
+else
+    echo -e "  ${GREEN}✓${NC} Mininet module available"
 fi
 
 # Check if D-ITG is installed
@@ -67,12 +67,25 @@ echo -e "${GREEN}[2/5]${NC} Stopping existing Ryu controllers..."
 pkill -f ryu-manager > /dev/null 2>&1
 sleep 2
 
-# Start Ryu controller in background
-echo -e "${GREEN}[3/5]${NC} Starting Ryu SDN controller..."
+# Start Ryu controller in background (IN VENV)
+echo -e "${GREEN}[3/5]${NC} Starting Ryu SDN controller (in venv)..."
+echo "       Venv: $RYU_VENV"
 echo "       Controller will listen on port 6653"
 
-ryu-manager --observe-links ryu_voip_controller.py > /tmp/ryu_controller.log 2>&1 &
-RYU_PID=$!
+# Run Ryu in subshell with venv activated
+(
+    source $RYU_VENV/bin/activate
+    ryu-manager --observe-links ryu_voip_controller.py > /tmp/ryu_controller.log 2>&1 &
+    echo $! > /tmp/ryu_pid.txt
+)
+
+# Get Ryu PID
+sleep 1
+if [ -f /tmp/ryu_pid.txt ]; then
+    RYU_PID=$(cat /tmp/ryu_pid.txt)
+else
+    RYU_PID="unknown"
+fi
 
 echo "       Ryu PID: $RYU_PID"
 echo "       Log file: /tmp/ryu_controller.log"
@@ -82,30 +95,33 @@ echo -e "${GREEN}[4/5]${NC} Waiting for Ryu controller to initialize..."
 sleep 5
 
 # Check if Ryu is running
-if ps -p $RYU_PID > /dev/null; then
+if [ "$RYU_PID" != "unknown" ] && ps -p $RYU_PID > /dev/null 2>&1; then
     echo -e "       ${GREEN}✓${NC} Ryu controller is running"
 else
     echo -e "       ${RED}✗${NC} Ryu controller failed to start"
     echo "       Check log: tail -f /tmp/ryu_controller.log"
+    rm -f /tmp/ryu_pid.txt
     exit 1
 fi
 
-# Start Mininet simulation
-echo -e "${GREEN}[5/5]${NC} Starting Mininet topology..."
+# Start Mininet simulation (SYSTEM PYTHON - NO VENV)
+echo -e "${GREEN}[5/5]${NC} Starting Mininet topology (system Python)..."
 echo ""
 echo "================================================================"
 echo "  Simulation Started!"
 echo "================================================================"
 echo ""
-echo "Ryu Controller: Running (PID: $RYU_PID)"
+echo "Ryu Controller: Running in venv (PID: $RYU_PID)"
+echo "Mininet: Running with system Python"
 echo "Log file: /tmp/ryu_controller.log"
 echo ""
 echo "Starting Mininet..."
 echo "Type 'exit' in Mininet CLI to stop simulation"
 echo ""
 
-# Run Mininet
-python3 spine_leaf_voip_simulation.py
+# CRITICAL: Run Mininet with system Python (NO venv)
+# Use absolute path to system python3
+/usr/bin/python3 spine_leaf_voip_simulation.py
 
 # Cleanup after exit
 echo ""
@@ -115,10 +131,13 @@ echo "================================================================"
 
 # Stop Ryu controller
 echo "Stopping Ryu controller..."
-kill $RYU_PID 2>/dev/null
+if [ "$RYU_PID" != "unknown" ]; then
+    kill $RYU_PID 2>/dev/null
+fi
+pkill -f ryu-manager 2>/dev/null
 
-# Deactivate venv
-deactivate
+# Clean up PID file
+rm -f /tmp/ryu_pid.txt
 
 # Clean Mininet
 echo "Cleaning Mininet..."
