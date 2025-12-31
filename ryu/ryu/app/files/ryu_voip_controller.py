@@ -189,6 +189,8 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
+        
+        """Handle packet in events"""
         msg = ev.msg
         datapath = msg.datapath
         ofproto = datapath.ofproto
@@ -196,12 +198,12 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         in_port = msg.match['in_port']
 
         pkt = packet.Packet(msg.data)
-        eth = pkt.get_protocol(ethernet.ethernet)
+        eth = pkt.get_protocols(ethernet.ethernet)[0]
 
-        if eth is None:
+        if eth.ethertype == ether_types.ETH_TYPE_LLDP:
             return
 
-        # === ARP: FLOOD SAJA ===
+                # === HANDLE ARP (WAJIB) ===
         if eth.ethertype == ether_types.ETH_TYPE_ARP:
             actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
             out = parser.OFPPacketOut(
@@ -214,22 +216,20 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
             datapath.send_msg(out)
             return
 
-        # === HANYA PROSES IPV4 ===
-        if eth.ethertype != ether_types.ETH_TYPE_IP:
-            return
 
-        ip_pkt = pkt.get_protocol(ipv4.ipv4)
-        if ip_pkt is None:
-            return
-
-        src = eth.src
         dst = eth.dst
+        src = eth.src
         dpid = datapath.id
 
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
 
-        # Tentukan output port
+        # Learn IP to MAC mapping
+        ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        if ip_pkt:
+            self.ip_to_mac[ip_pkt.src] = src
+            self.ip_to_mac[ip_pkt.dst] = dst
+
         if dst in self.mac_to_port[dpid]:
             out_port = self.mac_to_port[dpid][dst]
         else:
@@ -237,26 +237,40 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
 
         actions = [parser.OFPActionOutput(out_port)]
 
-        # === MATCH BERBASIS IP ===
-        match = parser.OFPMatch(
-            in_port=in_port,
-            eth_type=0x0800,
-            ipv4_src=ip_pkt.src,
-            ipv4_dst=ip_pkt.dst
-        )
+        # Install flow to avoid packet_in next time
+        if out_port != ofproto.OFPP_FLOOD:
+            ip_pkt = pkt.get_protocol(ipv4.ipv4)
 
-        # === PRIORITAS LEBIH TINGGI ===
-        self.add_flow(datapath, priority=10, match=match, actions=actions)
+            if ip_pkt:
+                match = parser.OFPMatch(
+                    in_port=in_port,
+                    eth_src=src,
+                    eth_dst=dst,
+                    eth_type=0x0800,
+                    ipv4_src=ip_pkt.src,
+                    ipv4_dst=ip_pkt.dst
+                )
+            else:
+                match = parser.OFPMatch(
+                    in_port=in_port,
+                    eth_src=src,
+                    eth_dst=dst
+                )
 
-        out = parser.OFPPacketOut(
-            datapath=datapath,
-            buffer_id=msg.buffer_id,
-            in_port=in_port,
-            actions=actions,
-            data=msg.data
-        )
+            
+            if msg.buffer_id != ofproto.OFP_NO_BUFFER:
+                self.add_flow(datapath, 1, match, actions, msg.buffer_id)
+                return
+            else:
+                self.add_flow(datapath, 1, match, actions)
+
+        data = None
+        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+            data = msg.data
+
+        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                  in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
-
 
     def _monitor(self):
         """Monitor thread to request flow statistics"""
