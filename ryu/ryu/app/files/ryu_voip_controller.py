@@ -19,10 +19,10 @@ import time
 
 # PostgreSQL Configuration
 DB_CONFIG = {
-    'host': '103.181.142.165',
+    'host': '103.181.142.121',
     'database': 'development',
     'user': 'dev_one',
-    'password': 'hijack332.',
+    'password': 'hiroshi451.',
     'port': 5432
 }
 
@@ -96,17 +96,25 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
 
     def generate_bytes_pattern(self, elapsed_seconds):
         """
-        Generate bytes_tx with random pattern (sine wave + noise)
-        One period = 1 hour (3600 seconds)
+        Generate bytes_tx with pattern (sine wave)
+        30 minutes UP (0-1800s), 30 minutes DOWN (1800-3600s) = 1 hour cycle
         Range: 13000 - 19800 bytes
         """
-        base = 16400
-        amplitude = 3400
-        period = 3600
+        base = 16400  # Middle point
+        amplitude = 3400  # Half range
+        period = 3600  # 1 hour = 3600 seconds
         
+        # Sine wave: naik 30 menit, turun 30 menit
         phase = (elapsed_seconds % period) / period * 2 * math.pi
         sine_value = math.sin(phase)
-        noise = random.uniform(-0.1, 0.1)
+        
+        # Small random noise for variation
+        noise = random.uniform(-0.05, 0.05)
+        
+        bytes_tx = int(base + (amplitude * sine_value) + (base * noise))
+        bytes_tx = max(13000, min(19800, bytes_tx))
+        
+        return bytes_tx
         
         bytes_tx = int(base + (amplitude * sine_value) + (base * noise))
         bytes_tx = max(13000, min(19800, bytes_tx))
@@ -349,6 +357,19 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         # Generate TARGET total bytes per flow for this second (13000-19800)
         target_bytes_per_flow = self.generate_bytes_pattern(elapsed_seconds)
         
+        # Calculate cycle position (for logging)
+        cycle_position = elapsed_seconds % 3600
+        cycle_phase = "NAIK" if cycle_position < 1800 else "TURUN"
+        cycle_minute = cycle_position // 60
+        
+        # Log summary for this second
+        self.logger.info(f"=" * 80)
+        self.logger.info(f"Second: {elapsed_seconds}s | Cycle: {cycle_minute}min | Phase: {cycle_phase}")
+        self.logger.info(f"Total REAL traffic from D-ITG: {total_real_bytes} bytes")
+        self.logger.info(f"Target per flow: {target_bytes_per_flow} bytes (13000-19800 range)")
+        self.logger.info(f"Active flows: {num_flows}")
+        self.logger.info(f"-" * 80)
+        
         # Scale each flow's REAL data to match target while keeping proportions
         num_flows = len(valid_flows)
         
@@ -405,6 +426,16 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
             # Insert into database
             self.insert_flow_data(flow_data)
             
-            self.logger.info(f"Flow {i+1}/{num_flows}: {flow_info['src_ip']}→{flow_info['dst_ip']} "
-                           f"real:{flow_info['real_bytes']}B scaled:{flow_bytes_tx}B "
-                           f"proportion:{flow_proportion:.2%} time:{elapsed_seconds}s")
+            # Detailed logging per flow
+            self.logger.info(f"  Flow {i+1}/{num_flows}: {flow_info['src_ip']}→{flow_info['dst_ip']}")
+            self.logger.info(f"    D-ITG Real: {flow_info['real_bytes']:,}B ({flow_info['real_pkts']} pkts)")
+            self.logger.info(f"    Scaled:     {flow_bytes_tx:,}B ({pkts_tx} pkts)")
+            self.logger.info(f"    Proportion: {flow_proportion:.2%} of total traffic")
+            self.logger.info(f"    Saved to DB: bytes_tx={flow_bytes_tx}, bytes_rx={bytes_rx}")
+        
+        # Summary line after all flows
+        total_scaled = sum([max(13000, min(19800, int(target_bytes_per_flow * (1 + ((flow_info['real_bytes'] / total_real_bytes) - 0.5) * 0.4)))) 
+                           for flow_info in valid_flows])
+        self.logger.info(f"-" * 80)
+        self.logger.info(f"SUMMARY: Total scaled traffic saved: ~{total_scaled:,} bytes")
+        self.logger.info(f"=" * 80 + "\n")
