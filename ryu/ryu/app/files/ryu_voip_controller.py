@@ -10,7 +10,7 @@ from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISP
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub
-from ryu.lib.packet import packet, ethernet, ether_types, ipv4, udp, tcp
+from ryu.lib.packet import packet, ethernet, ether_types, ipv4, udp, tcp, arp
 import psycopg2
 from datetime import datetime
 import random
@@ -189,6 +189,19 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
+                # === HANDLE ARP (WAJIB) ===
+        if eth.ethertype == ether_types.ETH_TYPE_ARP:
+            actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+            out = parser.OFPPacketOut(
+                datapath=datapath,
+                buffer_id=msg.buffer_id,
+                in_port=in_port,
+                actions=actions,
+                data=msg.data
+            )
+            datapath.send_msg(out)
+            return
+
         """Handle packet in events"""
         msg = ev.msg
         datapath = msg.datapath
@@ -224,7 +237,24 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
 
         # Install flow to avoid packet_in next time
         if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+            ip_pkt = pkt.get_protocol(ipv4.ipv4)
+
+            if ip_pkt:
+                match = parser.OFPMatch(
+                    in_port=in_port,
+                    eth_src=src,
+                    eth_dst=dst,
+                    eth_type=0x0800,
+                    ipv4_src=ip_pkt.src,
+                    ipv4_dst=ip_pkt.dst
+                )
+            else:
+                match = parser.OFPMatch(
+                    in_port=in_port,
+                    eth_src=src,
+                    eth_dst=dst
+                )
+
             
             if msg.buffer_id != ofproto.OFP_NO_BUFFER:
                 self.add_flow(datapath, 1, match, actions, msg.buffer_id)
