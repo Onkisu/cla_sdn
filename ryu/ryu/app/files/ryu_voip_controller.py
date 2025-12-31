@@ -33,6 +33,11 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
 
     def __init__(self, *args, **kwargs):
         super(VoIPTrafficMonitor, self).__init__(*args, **kwargs)
+
+            # =====================================
+        # FIX: IP → PORT MAPPING STATE
+        # =====================================
+        self.ip_to_port = {}
         
         # MAC to IP mapping
         self.mac_to_port = {}
