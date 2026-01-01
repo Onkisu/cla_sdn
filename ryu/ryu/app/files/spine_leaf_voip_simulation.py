@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-BURSTY Spine-Leaf Simulation
-- h1 -> h2: VoIP Traffic (Stabil 1 Jam)
-- h3 -> h2: BURST Attack (5 detik ON, 25 detik OFF) - Setiap 30 Detik
+SIMPLIFIED Spine-Leaf VoIP Simulation
+- 3 Hosts only (h1, h2, h3) attached to separate Leaves
+- Traffic only h1 -> h2
+- Loop Protection & Port Ordering preserved
 """
 
 from mininet.net import Mininet
@@ -20,77 +21,80 @@ def check_ditg():
     return True
 
 def run():
-    info("*** Starting Spine-Leaf VoIP Simulation (With Burst Attack)\n")
+    info("*** Starting Spine-Leaf VoIP Simulation (3 Hosts Version)\n")
     
     net = Mininet(controller=RemoteController, switch=OVSSwitch, link=TCLink, autoSetMacs=True)
     
     info("*** Adding Controller\n")
+    # Arahkan ke IP lokal dimana script python Ryu jalan
     net.addController('c0', ip='127.0.0.1', port=6653)
     
     spines = []
     leaves = []
     
-    # Spines
+    # Create Spines (DPID 1-3)
     for i in range(1, 4):
         s = net.addSwitch(f's{i}', dpid=f'{i:016x}', protocols='OpenFlow13')
         spines.append(s)
         
-    # Leaves
+    # Create Leaves (DPID 4-6)
     for i in range(1, 4):
         l = net.addSwitch(f'l{i}', dpid=f'{i+3:016x}', protocols='OpenFlow13')
         leaves.append(l)
         
-    info("*** Creating Links\n")
+    info("*** Creating Links (Spine-Leaf)\n")
+    # Connect Leaves to Spines FIRST (Port 1-3 on Leaf -> Spines)
     for leaf in leaves:
         for spine in spines:
             net.addLink(leaf, spine, bw=1000, delay='1ms')
             
-    info("*** Adding Hosts\n")
+    info("*** Adding Hosts (Manual Assignment)\n")
+    # Kita sebar host ke leaf yang berbeda supaya komunikasi harus lewat spine
     hosts = []
     
-    # h1 di l1
+    # Host h1 -> Leaf l1
     h1 = net.addHost('h1', ip='10.0.0.1/24')
-    net.addLink(h1, leaves[0], bw=100, delay='1ms')
+    net.addLink(h1, leaves[0], bw=100, delay='1ms') # leaves[0] adalah l1
     hosts.append(h1)
     
-    # h2 di l2 (Target Korban)
+    # Host h2 -> Leaf l2
     h2 = net.addHost('h2', ip='10.0.0.2/24')
-    net.addLink(h2, leaves[1], bw=100, delay='1ms')
+    net.addLink(h2, leaves[1], bw=100, delay='1ms') # leaves[1] adalah l2
     hosts.append(h2)
     
-    # h3 di l3 (Penyerang / Pengganggu)
+    # Host h3 -> Leaf l3
     h3 = net.addHost('h3', ip='10.0.0.3/24')
-    net.addLink(h3, leaves[2], bw=100, delay='1ms')
+    net.addLink(h3, leaves[2], bw=100, delay='1ms') # leaves[2] adalah l3
     hosts.append(h3)
 
     info("*** Starting Network\n")
     net.start()
+    
+    # Tunggu sebentar agar Switch connect ke Controller
     time.sleep(3)
     
-    info("*** Testing Connectivity\n")
+    info("*** Testing Connectivity (PingAll)\n")
     net.pingAll()
     
     if check_ditg():
-        info("*** Starting Traffic Scenarios\n")
+        info("*** Starting D-ITG Traffic (h1 -> h2 ONLY)\n")
         
-        # 1. Receiver di h2 (Menerima dari h1 dan h3)
+        # Setup: h2 bertindak sebagai Receiver
         h2.cmd('ITGRecv -l /tmp/recv.log &')
+        
         time.sleep(1)
         
-        # 2. Normal VoIP: h1 -> h2 (Stabil)
-        info("    h1 -> h2: Normal VoIP (Started)\n")
-        h1.cmd(f'ITGSend -T UDP -a {h2.IP()} -c 160 -C 50 -t 3600000 -l /tmp/send_voip.log &')
-        
-        # 3. BURST Traffic: h3 -> h2
-        # -O 5000  : ON selama 5000ms (5 detik)
-        # -V 25000 : OFF selama 25000ms (25 detik)
-        # Total Cycle = 30 Detik
-        # Rate: -c 500 -C 200 = 100.000 Bytes/sec (Jauh diatas Sine Wave 19.000) -> SPIKE!
-        info("    h3 -> h2: BURST Attack (5s ON, 25s OFF) - Every 30s\n")
-        h3.cmd(f'ITGSend -T UDP -a {h2.IP()} -c 500 -C 200 -t 3600000 -O 5000 -V 25000 -l /tmp/send_burst.log &')
+        # Setup: h1 mengirim trafik ke h2
+        # UDP VoIP G.711 codec simulation
+        # Duration: 3600000 ms (1 Jam)
+        dst_ip = h2.IP()
+        info(f"    h1 -> h2 (UDP VoIP started for 1 hour)\n")
+        h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 3600000 -l /tmp/send.log &')
             
     info("*** Running CLI\n")
     CLI(net)
+    
+    info("*** Stopping Network\n")
     net.stop()
 
 if __name__ == '__main__':
