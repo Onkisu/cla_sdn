@@ -199,16 +199,29 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
                                     hard_timeout=hard_timeout)
         datapath.send_msg(mod)
 
-    #NEW CODE BELOW
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
+        # 🔥 SAPU JAGAT FLOW
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
-        self.add_flow(datapath, 0, match, actions)
+
+        inst = [parser.OFPInstructionActions(
+            ofproto.OFPIT_APPLY_ACTIONS, actions)]
+
+        mod = parser.OFPFlowMod(
+            datapath=datapath,
+            priority=0,
+            match=match,
+            instructions=inst
+        )
+
+        datapath.send_msg(mod)
+        self.logger.info("🔥 NORMAL forwarding enabled on switch %s",
+                        datapath.id)
 
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
