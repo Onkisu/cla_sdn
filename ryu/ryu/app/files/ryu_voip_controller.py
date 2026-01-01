@@ -19,10 +19,10 @@ import time
 
 # PostgreSQL Configuration
 DB_CONFIG = {
-    'host': '103.181.142.165',
+    'host': '103.181.142.121',
     'database': 'development',
     'user': 'dev_one',
-    'password': 'hijack332.',
+    'password': 'hiroshi451.',
     'port': 5432
 }
 
@@ -354,6 +354,9 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         if not valid_flows or total_real_bytes == 0:
             return
         
+        # Count number of flows
+        num_flows = len(valid_flows)
+        
         # Generate TARGET total bytes per flow for this second (13000-19800)
         target_bytes_per_flow = self.generate_bytes_pattern(elapsed_seconds)
         
@@ -371,7 +374,6 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         self.logger.info(f"-" * 80)
         
         # Scale each flow's REAL data to match target while keeping proportions
-        num_flows = len(valid_flows)
         
         # Insert each flow with scaled bytes
         for i, flow_info in enumerate(valid_flows):
