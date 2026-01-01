@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-SIMPLIFIED Spine-Leaf VoIP Simulation
+SIMPLIFIED Spine-Leaf VoIP Simulation + BURST ATTACK
 - 3 Hosts only (h1, h2, h3) attached to separate Leaves
-- Traffic only h1 -> h2
-- Loop Protection & Port Ordering preserved
+- Traffic h1 -> h2 (Steady VoIP)
+- Traffic h3 -> h2 (BURSTY every 30s to create spikes)
 """
 
 from mininet.net import Mininet
@@ -13,6 +13,7 @@ from mininet.log import setLogLevel, info
 from mininet.link import TCLink
 import time
 import subprocess
+import threading # Added for background burst task
 
 def check_ditg():
     if subprocess.run(['which', 'ITGSend'], capture_output=True).returncode != 0:
@@ -77,19 +78,32 @@ def run():
     net.pingAll()
     
     if check_ditg():
-        info("*** Starting D-ITG Traffic (h1 -> h2 ONLY)\n")
+        info("*** Starting D-ITG Traffic Setup\n")
         
-        # Setup: h2 bertindak sebagai Receiver
+        # 1. Setup Receiver di h2 (Menerima dari h1 dan h3)
         h2.cmd('ITGRecv -l /tmp/recv.log &')
-        
         time.sleep(1)
         
-        # Setup: h1 mengirim trafik ke h2
-        # UDP VoIP G.711 codec simulation
-        # Duration: 3600000 ms (1 Jam)
+        # 2. Main Traffic: h1 -> h2 (Steady VoIP - 1 Jam)
         dst_ip = h2.IP()
-        info(f"    h1 -> h2 (UDP VoIP started for 1 hour)\n")
-        h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 3600000 -l /tmp/send.log &')
+        info(f"    [STEADY] h1 -> h2 (UDP VoIP started for 1 hour)\n")
+        h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 3600000 -l /tmp/send_h1.log &')
+        
+        # 3. BURST Traffic Logic: h3 -> h2 (Setiap 30 detik)
+        def burst_loop():
+            info(f"    [BURST] h3 armed to attack h2 every 30 seconds...\n")
+            while True:
+                time.sleep(30) # Tunggu 30 detik
+                info("\n*** [BURST] h3 SENDING SPIKE TRAFFIC TO h2 (5 seconds) ***\n")
+                # Command Burst: Packet Size 1KB, Rate 8000 pkt/s (~65Mbps), Duration 5s
+                # Ini cukup besar untuk membebani link h2 (bw=100Mbps) jika digabung traffic h1
+                h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 1024 -C 8000 -t 5000 -l /tmp/send_h3_burst.log')
+                info("*** [BURST] Done. Waiting next cycle...\n")
+
+        # Jalankan loop burst di thread terpisah agar tidak memblokir CLI
+        t = threading.Thread(target=burst_loop)
+        t.daemon = True # Thread mati otomatis kalau program utama stop
+        t.start()
             
     info("*** Running CLI\n")
     CLI(net)
