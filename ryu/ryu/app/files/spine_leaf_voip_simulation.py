@@ -102,16 +102,18 @@ class SpineLeafTopology:
             port=6653
         )
         
-        # Add 3 Spine switches
+        # Add 3 Spine switches with OpenFlow 1.3
         info("*** Adding Spine switches\n")
         for i in range(1, 4):
-            spine = self.net.addSwitch(f's{i}', dpid=f'000000000000000{i}')
+            spine = self.net.addSwitch(f's{i}', dpid=f'000000000000000{i}', 
+                                      protocols='OpenFlow13')
             self.spines.append(spine)
         
-        # Add 3 Leaf switches
+        # Add 3 Leaf switches with OpenFlow 1.3
         info("*** Adding Leaf switches\n")
         for i in range(1, 4):
-            leaf = self.net.addSwitch(f'l{i}', dpid=f'00000000000000{i+3}')
+            leaf = self.net.addSwitch(f'l{i}', dpid=f'00000000000000{i+3}',
+                                     protocols='OpenFlow13')
             self.leaves.append(leaf)
         
         # Connect Spines to Leaves (full mesh)
