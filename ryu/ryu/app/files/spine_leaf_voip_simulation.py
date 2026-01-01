@@ -90,7 +90,7 @@ class SpineLeafTopology:
             switch=OVSSwitch,
             link=TCLink,
             autoSetMacs=True,
-            autoStaticArp=False
+            autoStaticArp=False  # Let controller learn via packet_in
         )
         
         # Add Ryu controller
@@ -127,7 +127,7 @@ class SpineLeafTopology:
             for j in range(2):
                 host = self.net.addHost(
                     f'h{host_id}',
-                    ip=f'10.0.{i+1}.{j+1}/24',
+                    ip=f'10.0.0.{host_id}/24',  # All in same subnet 10.0.0.0/24
                     mac=f'00:00:00:00:00:{host_id:02x}'
                 )
                 self.hosts.append(host)

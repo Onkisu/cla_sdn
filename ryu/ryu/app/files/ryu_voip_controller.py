@@ -10,7 +10,7 @@ from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISP
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub
-from ryu.lib.packet import packet, ethernet, ether_types, ipv4, udp, tcp
+from ryu.lib.packet import packet, ethernet, ether_types, ipv4, udp, tcp, arp
 import psycopg2
 from datetime import datetime
 import random
@@ -220,11 +220,19 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
 
-        # Learn IP to MAC mapping
+        # Learn IP to MAC mapping from IPv4 packets
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         if ip_pkt:
             self.ip_to_mac[ip_pkt.src] = src
             self.ip_to_mac[ip_pkt.dst] = dst
+        
+        # Learn IP to MAC mapping from ARP packets
+        arp_pkt = pkt.get_protocol(arp.arp)
+        if arp_pkt:
+            self.ip_to_mac[arp_pkt.src_ip] = arp_pkt.src_mac
+            # Log ARP for debugging
+            self.logger.debug(f"ARP: {arp_pkt.opcode} {arp_pkt.src_ip}({arp_pkt.src_mac}) -> "
+                            f"{arp_pkt.dst_ip}({arp_pkt.dst_mac})")
 
         if dst in self.mac_to_port[dpid]:
             out_port = self.mac_to_port[dpid][dst]
@@ -234,7 +242,8 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(out_port)]
 
         # Install flow to avoid packet_in next time
-        if out_port != ofproto.OFPP_FLOOD:
+        # BUT: Don't install flow for broadcast/multicast (like ARP)
+        if out_port != ofproto.OFPP_FLOOD and not (dst.startswith('ff:ff:ff') or dst.startswith('01:00:0')):
             match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
             
             # Log flow installation
