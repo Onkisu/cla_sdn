@@ -60,7 +60,8 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
     def connect_database(self):
         """Connect to PostgreSQL database"""
         try:
-            self.db_conn = psycopg2.connect(**DB_CONFIG)
+            self.logger.info("Connecting to PostgreSQL database...")
+            self.db_conn = psycopg2.connect(**DB_CONFIG, connect_timeout=10)
             cursor = self.db_conn.cursor()
             
             # Create table if not exists
@@ -93,6 +94,8 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
             
         except Exception as e:
             self.logger.error(f"Database connection error: {e}")
+            self.logger.warning("Controller will continue without database storage")
+            self.db_conn = None
 
     def generate_bytes_pattern(self, elapsed_seconds):
         """
@@ -123,6 +126,10 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
 
     def insert_flow_data(self, flow_data):
         """Insert flow data into PostgreSQL"""
+        # Skip if no database connection
+        if not self.db_conn:
+            return
+            
         try:
             cursor = self.db_conn.cursor()
             
@@ -143,6 +150,7 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
             try:
                 self.db_conn.rollback()
             except:
+                # Reconnect on error
                 self.connect_database()
 
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
@@ -205,6 +213,9 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         dst = eth.dst
         src = eth.src
         dpid = datapath.id
+        
+        # Log packet received
+        self.logger.debug(f"PacketIn: dpid={dpid:016x} src={src} dst={dst} in_port={in_port}")
 
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
@@ -226,12 +237,16 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
             
+            # Log flow installation
+            self.logger.info(f"Installing flow: dpid={dpid:016x} src={src} dst={dst} out_port={out_port}")
+            
+            # Install the flow
             if msg.buffer_id != ofproto.OFP_NO_BUFFER:
                 self.add_flow(datapath, 1, match, actions, msg.buffer_id)
-                return
             else:
                 self.add_flow(datapath, 1, match, actions)
-
+        
+        # Always send packet_out to forward the packet
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
