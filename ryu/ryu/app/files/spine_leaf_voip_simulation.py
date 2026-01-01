@@ -89,11 +89,11 @@ def run():
         info(f"    [STEADY] h1 -> h2 (UDP VoIP started for 1 hour)\n")
         h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 3600000 -l /tmp/send_h1.log &')
         
-        # 3. BURST Traffic Logic: h3 -> h2 (Setiap 30 detik)
+        # 3. BURST Traffic Logic: h3 -> h2 (Setiap 30 menit)
         def burst_loop():
             info(f"    [BURST] h3 armed to attack h2 every 30 seconds...\n")
             while True:
-                time.sleep(30) # Tunggu 30 detik
+                time.sleep(1800) # Tunggu 30 menit
                 info("\n*** [BURST] h3 SENDING SPIKE TRAFFIC TO h2 (5 seconds) ***\n")
                 # Command Burst: Packet Size 1KB, Rate 8000 pkt/s (~65Mbps), Duration 5s
                 # Ini cukup besar untuk membebani link h2 (bw=100Mbps) jika digabung traffic h1
