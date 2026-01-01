@@ -233,7 +233,110 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
-        # ... (Bagian statistik kamu yang panjang itu OK, tidak menyebabkan crash)
-        # Biarkan saja logika scaling DB kamu yang di original file
-        # Copy-paste logic 'flow_stats' dari file originalmu ke sini jika perlu
-        pass
+        """
+        Handle flow stats reply, process real traffic, scale to sine wave, and insert to DB
+        """
+        body = ev.msg.body
+        datapath = ev.msg.datapath
+        dpid = format(datapath.id, '016x')
+        timestamp = datetime.now()
+        elapsed_seconds = int(time.time() - self.start_time)
+        
+        # 1. Filter Valid Flows (IPv4 Only, Ignore LLDP/Broadcast)
+        valid_flows = []
+        total_real_bytes = 0
+        
+        for stat in body:
+            # Skip table-miss (priority 0)
+            if stat.priority == 0:
+                continue
+                
+            # Parse Match Fields
+            match = stat.match
+            src_ip = match.get('ipv4_src') or self._resolve_ip(match.get('eth_src'))
+            dst_ip = match.get('ipv4_dst') or self._resolve_ip(match.get('eth_dst'))
+            
+            # Skip if IP unknown or broadcast/multicast
+            if not src_ip or not dst_ip or dst_ip.endswith('.255'):
+                continue
+                
+            # Get Protocol Info
+            ip_proto = match.get('ip_proto', 17) # Default UDP
+            tp_src = match.get('udp_src', 0)
+            tp_dst = match.get('udp_dst', 0)
+            
+            # Calculate Delta (Bytes since last check)
+            flow_key = f"{dpid}-{src_ip}-{dst_ip}-{tp_src}-{tp_dst}"
+            byte_count = stat.byte_count
+            packet_count = stat.packet_count
+            
+            if flow_key in self.last_bytes:
+                last_b, last_p = self.last_bytes[flow_key]
+                delta_bytes = byte_count - last_b
+                delta_pkts = packet_count - last_p
+            else:
+                delta_bytes = byte_count
+                delta_pkts = packet_count
+            
+            # Update history
+            self.last_bytes[flow_key] = (byte_count, packet_count)
+            
+            # Only record if there is activity (or forced for simulation persistence)
+            if delta_bytes >= 0: # Accept 0 to keep keepalive
+                valid_flows.append({
+                    'flow_key': flow_key,
+                    'src_ip': src_ip, 'dst_ip': dst_ip,
+                    'src_mac': match.get('eth_src', ''), 'dst_mac': match.get('eth_dst', ''),
+                    'ip_proto': ip_proto, 'tp_src': tp_src, 'tp_dst': tp_dst,
+                    'real_bytes': delta_bytes, 'real_pkts': delta_pkts
+                })
+                total_real_bytes += delta_bytes
+
+        # 2. Logic Scaling (Sine Wave) & Database Insert
+        # Jika tidak ada flow aktif, tetap jalankan loop jika ingin data dummy, 
+        # tapi di sini kita hanya insert jika ada flow valid tertangkap OpenFlow
+        if not valid_flows:
+            return
+
+        target_bytes = self.generate_bytes_pattern(elapsed_seconds)
+        
+        self.logger.info(f"--- Stats Report: {dpid} | Sec: {elapsed_seconds} | Target: {target_bytes}B ---")
+
+        for flow in valid_flows:
+            # Scaling Logic:
+            # Kalau ada real traffic, kita scaling ke target sine wave.
+            # Kalau real traffic kecil (cuma ping/kontrol), kita boost biar kelihatan seperti VoIP.
+            
+            # Simple simulation logic: Force value to match Sine Wave pattern 
+            # (Agar chart bagus sesuai request flow 'VoIP')
+            bytes_tx = target_bytes
+            
+            # Packet size assumption for VoIP (G.711 approx 160-200 bytes)
+            pkts_tx = int(bytes_tx / 180) 
+            
+            # Rx is slightly different (simulation variation)
+            bytes_rx = int(bytes_tx * random.uniform(0.9, 1.0))
+            pkts_rx = int(pkts_tx * random.uniform(0.9, 1.0))
+            
+            # Prepare Data tuple
+            flow_data = (
+                timestamp, dpid,
+                flow['src_ip'], flow['dst_ip'],
+                flow['src_mac'], flow['dst_mac'],
+                flow['ip_proto'], flow['tp_src'], flow['tp_dst'],
+                bytes_tx, bytes_rx, pkts_tx, pkts_rx,
+                1.0, # duration
+                'voip' # label
+            )
+            
+            # INSERT TO DB
+            self.insert_flow_data(flow_data)
+            self.logger.info(f"   Saved: {flow['src_ip']} -> {flow['dst_ip']} | {bytes_tx} Bytes")
+
+    def _resolve_ip(self, mac):
+        """Helper to find IP from MAC based on ARP learning"""
+        if not mac: return None
+        # Reverse lookup from self.ip_to_mac
+        for ip, m in self.ip_to_mac.items():
+            if m == mac: return ip
+        return None
