@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-FIXED Mininet Spine-Leaf Topology
-Ensures port ordering matches Controller logic (Ports 1-3 are Uplinks)
+SIMPLIFIED Spine-Leaf VoIP Simulation
+- 3 Hosts only (h1, h2, h3) attached to separate Leaves
+- Traffic only h1 -> h2
+- Loop Protection & Port Ordering preserved
 """
 
 from mininet.net import Mininet
@@ -19,7 +21,7 @@ def check_ditg():
     return True
 
 def run():
-    info("*** Starting Spine-Leaf VoIP Simulation (FIXED)\n")
+    info("*** Starting Spine-Leaf VoIP Simulation (3 Hosts Version)\n")
     
     net = Mininet(controller=RemoteController, switch=OVSSwitch, link=TCLink, autoSetMacs=True)
     
@@ -40,24 +42,30 @@ def run():
         l = net.addSwitch(f'l{i}', dpid=f'{i+3:016x}', protocols='OpenFlow13')
         leaves.append(l)
         
-    info("*** Creating Links (Careful ordering for Controller Logic)\n")
-    # Connect Leaves to Spines FIRST.
-    # This ensures Leaf Port 1 -> Spine 1, Leaf Port 2 -> Spine 2, etc.
-    # This is critical for the "Split Horizon" logic in the controller.
+    info("*** Creating Links (Spine-Leaf)\n")
+    # Connect Leaves to Spines FIRST (Port 1-3 on Leaf -> Spines)
     for leaf in leaves:
         for spine in spines:
             net.addLink(leaf, spine, bw=1000, delay='1ms')
             
-    info("*** Adding Hosts\n")
-    # Hosts connect to Leaves NEXT. So Host ports will be > 3.
+    info("*** Adding Hosts (Manual Assignment)\n")
+    # Kita sebar host ke leaf yang berbeda supaya komunikasi harus lewat spine
     hosts = []
-    host_id = 1
-    for leaf in leaves:
-        for j in range(2): # 2 hosts per leaf
-            h = net.addHost(f'h{host_id}', ip=f'10.0.0.{host_id}/24')
-            net.addLink(h, leaf, bw=100, delay='1ms')
-            hosts.append(h)
-            host_id += 1
+    
+    # Host h1 -> Leaf l1
+    h1 = net.addHost('h1', ip='10.0.0.1/24')
+    net.addLink(h1, leaves[0], bw=100, delay='1ms') # leaves[0] adalah l1
+    hosts.append(h1)
+    
+    # Host h2 -> Leaf l2
+    h2 = net.addHost('h2', ip='10.0.0.2/24')
+    net.addLink(h2, leaves[1], bw=100, delay='1ms') # leaves[1] adalah l2
+    hosts.append(h2)
+    
+    # Host h3 -> Leaf l3
+    h3 = net.addHost('h3', ip='10.0.0.3/24')
+    net.addLink(h3, leaves[2], bw=100, delay='1ms') # leaves[2] adalah l3
+    hosts.append(h3)
 
     info("*** Starting Network\n")
     net.start()
@@ -66,25 +74,22 @@ def run():
     time.sleep(3)
     
     info("*** Testing Connectivity (PingAll)\n")
-    # Pingall harusnya sukses sekarang karena Loop Protection sudah aktif
     net.pingAll()
     
     if check_ditg():
-        info("*** Starting D-ITG Traffic\n")
-        # Start Recv on odd hosts
-        for h in hosts[1::2]:
-            h.cmd('ITGRecv -l /tmp/recv.log &')
+        info("*** Starting D-ITG Traffic (h1 -> h2 ONLY)\n")
+        
+        # Setup: h2 bertindak sebagai Receiver
+        h2.cmd('ITGRecv -l /tmp/recv.log &')
         
         time.sleep(1)
         
-        # Start Send on even hosts
-        # Start Send on even hosts
-        for i, h in enumerate(hosts[::2]):
-            dst = hosts[i*2+1]
-            # UDP Traffic (VoIP G.711)
-            # GANTI -t 60000 MENJADI -t 3600000 (1 JAM)
-            h.cmd(f'ITGSend -T UDP -a {dst.IP()} -c 160 -C 50 -t 3600000 -l /tmp/send.log &')
-            info(f"    {h.name} -> {dst.name} (UDP VoIP started for 1 hour)\n")
+        # Setup: h1 mengirim trafik ke h2
+        # UDP VoIP G.711 codec simulation
+        # Duration: 3600000 ms (1 Jam)
+        dst_ip = h2.IP()
+        info(f"    h1 -> h2 (UDP VoIP started for 1 hour)\n")
+        h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 3600000 -l /tmp/send.log &')
             
     info("*** Running CLI\n")
     CLI(net)
