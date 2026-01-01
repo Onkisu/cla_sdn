@@ -271,13 +271,20 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         # --- LANGKAH 2: Hitung Target (Sine Wave) ---
         target_total_bytes = self.get_target_total_bytes(elapsed_seconds)
         
-        # --- LANGKAH 3: Hitung Scaling Factor ---
-        # Hindari pembagian dengan nol. Jika real 0, kita anggap 1 agar tidak error,
-        # tapi nanti distribusinya akan kita bagi rata (force distribution).
+    
+        # --- LANGKAH 3: Hitung Scaling Factor (MODIFIED) ---
         if total_real_bytes_dpid > 0:
-            scaling_factor = target_total_bytes / total_real_bytes_dpid
+            # LOGIKA BARU: Deteksi Burst
+            # Jika traffic asli lebih besar dari 2x Target Sine Wave, anggap itu SERANGAN/BURST.
+            # Biarkan scaling_factor = 1.0 (Traffic asli masuk DB apa adanya)
+            if total_real_bytes_dpid > (target_total_bytes * 2):
+                scaling_factor = 1.0
+                self.logger.warning(f"!!! SPIKE DETECTED on {dpid} !!! Passing Real Traffic ({total_real_bytes_dpid} B)")
+            else:
+                # Jika traffic normal/kecil, paksa ikut bentuk Sine Wave
+                scaling_factor = target_total_bytes / total_real_bytes_dpid
         else:
-            scaling_factor = 0 # Nanti kita handle khusus
+            scaling_factor = 0 
             
         self.logger.info(f"--- DPID {dpid} Report (Sec: {elapsed_seconds}) ---")
         self.logger.info(f"    Real (D-ITG): {total_real_bytes_dpid} B | Target (Sine): {target_total_bytes} B | Scale: {scaling_factor:.2f}x")
