@@ -179,7 +179,7 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
                                           ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
 
-    def add_flow(self, datapath, priority, match, actions, buffer_id=None):
+    def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=0, hard_timeout=0):
         """Add flow entry to switch"""
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -189,10 +189,14 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         if buffer_id:
             mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
                                     priority=priority, match=match,
-                                    instructions=inst)
+                                    instructions=inst,
+                                    idle_timeout=idle_timeout,
+                                    hard_timeout=hard_timeout)
         else:
             mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
-                                    match=match, instructions=inst)
+                                    match=match, instructions=inst,
+                                    idle_timeout=idle_timeout,
+                                    hard_timeout=hard_timeout)
         datapath.send_msg(mod)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -249,11 +253,11 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
             # Log flow installation
             self.logger.info(f"Installing flow: dpid={dpid:016x} src={src} dst={dst} out_port={out_port}")
             
-            # Install the flow
+            # Install the flow with 30 second idle timeout
             if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                self.add_flow(datapath, 1, match, actions, msg.buffer_id)
+                self.add_flow(datapath, 1, match, actions, msg.buffer_id, idle_timeout=30)
             else:
-                self.add_flow(datapath, 1, match, actions)
+                self.add_flow(datapath, 1, match, actions, idle_timeout=30)
         
         # Always send packet_out to forward the packet
         data = None
