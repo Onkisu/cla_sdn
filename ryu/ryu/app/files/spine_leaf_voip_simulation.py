@@ -90,7 +90,7 @@ class SpineLeafTopology:
             switch=OVSSwitch,
             link=TCLink,
             autoSetMacs=True,
-            autoStaticArp=True
+            autoStaticArp=False
         )
         
         # Add Ryu controller
