@@ -119,77 +119,128 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
             mod = parser.OFPFlowMod(datapath=datapath, priority=priority, match=match, instructions=inst, idle_timeout=idle_timeout)
         datapath.send_msg(mod)
 
-    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
-    def _packet_in_handler(self, ev):
-        msg = ev.msg
-        datapath = msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        in_port = msg.match['in_port']
-        dpid = datapath.id
-
-        pkt = packet.Packet(msg.data)
-        eth = pkt.get_protocols(ethernet.ethernet)[0]
+    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
+    def _flow_stats_reply_handler(self, ev):
+        """
+        Modified Handler with BURST LOGIC:
+        1. Collect ALL valid flows.
+        2. Calculate Target (Sine Wave).
+        3. CHECK: If Real Traffic > Sine Wave -> Use Real Traffic (BURST!).
+                  If Real Traffic < Sine Wave -> Boost to Sine Wave.
+        4. Distribute & Insert.
+        """
+        body = ev.msg.body
+        datapath = ev.msg.datapath
+        dpid = format(datapath.id, '016x')
+        timestamp = datetime.now()
+        # Opsional: Bulatkan timestamp jika ingin grafik sangat rapi
+        # timestamp = timestamp.replace(microsecond=0) 
         
-        if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
-        if eth.ethertype == ether_types.ETH_TYPE_IPV6: return
-
-        dst = eth.dst
-        src = eth.src
+        elapsed_seconds = int(time.time() - self.start_time)
         
-        self.mac_to_port.setdefault(dpid, {})
-        self.mac_to_port[dpid][src] = in_port
-
-        arp_pkt = pkt.get_protocol(arp.arp)
-        ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        valid_flows = []
+        total_real_bytes_dpid = 0
         
-        if ip_pkt: self.ip_to_mac[ip_pkt.src] = src
-        if arp_pkt:
-            self.ip_to_mac[arp_pkt.src_ip] = arp_pkt.src_mac
-            if arp_pkt.opcode == arp.ARP_REQUEST and arp_pkt.dst_ip in self.ip_to_mac:
-                target_mac = self.ip_to_mac[arp_pkt.dst_ip]
-                e = ethernet.ethernet(dst=src, src=target_mac, ethertype=ether_types.ETH_TYPE_ARP)
-                a = arp.arp(opcode=arp.ARP_REPLY, src_mac=target_mac, src_ip=arp_pkt.dst_ip, dst_mac=src, dst_ip=arp_pkt.src_ip)
-                p = packet.Packet()
-                p.add_protocol(e)
-                p.add_protocol(a)
-                p.serialize()
-                actions = [parser.OFPActionOutput(in_port)]
-                out = parser.OFPPacketOut(datapath=datapath, buffer_id=ofproto.OFP_NO_BUFFER, in_port=ofproto.OFPP_CONTROLLER, actions=actions, data=p.data)
-                datapath.send_msg(out)
-                return
+        # --- LANGKAH 1: Kumpulkan Flow Valid & Hitung Total Real (TETAP SAMA) ---
+        for stat in body:
+            if stat.priority == 0: continue 
+            
+            match = stat.match
+            src_ip = match.get('ipv4_src') or self._resolve_ip(match.get('eth_src'))
+            dst_ip = match.get('ipv4_dst') or self._resolve_ip(match.get('eth_dst'))
+            
+            if not src_ip or not dst_ip or dst_ip.endswith('.255'): continue
+            
+            flow_key = f"{dpid}-{src_ip}-{dst_ip}-{match.get('udp_src',0)}-{match.get('udp_dst',0)}"
+            byte_count = stat.byte_count
+            packet_count = stat.packet_count
+            
+            if flow_key in self.last_bytes:
+                last_b, last_p = self.last_bytes[flow_key]
+                delta_bytes = max(0, byte_count - last_b)
+                delta_pkts = max(0, packet_count - last_p)
+            else:
+                delta_bytes = byte_count
+                delta_pkts = packet_count
+            
+            self.last_bytes[flow_key] = (byte_count, packet_count)
+            
+            if delta_bytes >= 0: 
+                valid_flows.append({
+                    'flow_key': flow_key,
+                    'src_ip': src_ip, 'dst_ip': dst_ip,
+                    'src_mac': match.get('eth_src', ''), 'dst_mac': match.get('eth_dst', ''),
+                    'ip_proto': match.get('ip_proto', 17),
+                    'tp_src': match.get('udp_src', 0), 'tp_dst': match.get('udp_dst', 0),
+                    'real_bytes': delta_bytes,
+                    'real_pkts': delta_pkts
+                })
+                total_real_bytes_dpid += delta_bytes
 
-        if dst in self.mac_to_port[dpid]:
-            out_port = self.mac_to_port[dpid][dst]
+        if not valid_flows:
+            return
+
+        # ================== BAGIAN INI YANG BARU (START) ==================
+
+        # --- LANGKAH 2: Hitung Target (Sine Wave) ---
+        sine_wave_target = self.get_target_total_bytes(elapsed_seconds)
+        
+        # --- LANGKAH 3: Tentukan Final Target & Scaling Factor ---
+        # LOGIKA BARU: 
+        # Jika Real Traffic > Sine Wave (ada Burst), gunakan Real Traffic agar Spike terlihat di DB.
+        # Jika Real Traffic < Sine Wave (sepi), gunakan Sine Wave (Boost).
+        
+        if total_real_bytes_dpid > sine_wave_target:
+            # Mode Spike / Burst: Biarkan data asli lewat (Scale = 1.0)
+            final_target_bytes = total_real_bytes_dpid
+            scaling_factor = 1.0
+            status_msg = "BURST DETECTED!"
         else:
-            out_port = ofproto.OFPP_FLOOD
+            # Mode Normal: Boost biar grafik cantik kayak gelombang
+            final_target_bytes = sine_wave_target
+            if total_real_bytes_dpid > 0:
+                scaling_factor = final_target_bytes / total_real_bytes_dpid
+            else:
+                scaling_factor = 0 # Nanti dibagi rata
+            status_msg = "Sine Wave Boost"
 
-        actions = []
-        is_leaf = dpid >= 4
-        is_spine = dpid <= 3
+        self.logger.info(f"--- DPID {dpid} (Sec: {elapsed_seconds}) [{status_msg}] ---")
+        self.logger.info(f"    Real: {total_real_bytes_dpid} B | SineTarget: {sine_wave_target} B | Final: {final_target_bytes} B")
+
+        # --- LANGKAH 4: Distribusi & Insert ---
+        flows_count = len(valid_flows)
         
-        if out_port == ofproto.OFPP_FLOOD:
-            if is_leaf:
-                if in_port <= 3: # From Spine -> Flood only to Hosts
-                    actions.append(parser.OFPActionOutput(4))
-                    actions.append(parser.OFPActionOutput(5))
-                else: # From Host -> Flood to Spines and other Hosts
-                    actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD))
-            elif is_spine:
-                actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD))
-        else:
-            actions = [parser.OFPActionOutput(out_port)]
+        for flow in valid_flows:
+            if total_real_bytes_dpid > 0:
+                # Proportional Scaling
+                simulated_bytes_tx = int(flow['real_bytes'] * scaling_factor)
+            else:
+                # Distribusi rata jika real traffic 0
+                simulated_bytes_tx = int(final_target_bytes / flows_count)
 
-        if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-            self.add_flow(datapath, 1, match, actions, msg.buffer_id, idle_timeout=60)
+            # ================== BAGIAN INI YANG BARU (END) ==================
 
-        data = None
-        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-            data = msg.data
+            # --- SISA KODE LAMA (TETAP DIBAWAH SINI) ---
+            
+            # Asumsi ukuran paket VoIP rata-rata ~180-200 bytes
+            simulated_pkts_tx = int(simulated_bytes_tx / 180)
+            if simulated_pkts_tx == 0 and simulated_bytes_tx > 0: simulated_pkts_tx = 1
 
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=data)
-        datapath.send_msg(out)
+            # RX sedikit random (simulasi loss/jitter kecil)
+            simulated_bytes_rx = int(simulated_bytes_tx * random.uniform(0.95, 1.0))
+            simulated_pkts_rx = int(simulated_pkts_tx * random.uniform(0.95, 1.0))
+            
+            flow_data = (
+                timestamp, dpid,
+                flow['src_ip'], flow['dst_ip'],
+                flow['src_mac'], flow['dst_mac'],
+                flow['ip_proto'], flow['tp_src'], flow['tp_dst'],
+                simulated_bytes_tx, simulated_bytes_rx, 
+                simulated_pkts_tx, simulated_pkts_rx,
+                1.0, 'voip'
+            )
+            
+            self.insert_flow_data(flow_data)
 
     def _monitor(self):
         while True:
