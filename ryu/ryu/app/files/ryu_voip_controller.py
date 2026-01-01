@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PURE MONITORING Ryu Controller
-- No Data Manipulation.
-- Records REAL traffic stats from switches.
-- Polling Interval: 1 Second.
+RYU CONTROLLER WITH FILTERING
+- Hanya merekam traffic UDP > 800 Bytes (VoIP Traffic).
+- Memberikan label 'voip-ditg'.
+- Mengabaikan ICMP/ARP/Control Traffic (Noise).
 """
 
 from ryu.base import app_manager
@@ -35,11 +35,11 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         self.ip_to_mac = {}
         self.datapaths = {}
         self.db_conn = None
-        self.last_bytes = {} # Menyimpan counter terakhir untuk menghitung delta
+        self.last_bytes = {} 
         
         self.connect_database()
         self.monitor_thread = hub.spawn(self._monitor)
-        self.logger.info("Pure VoIP Monitor Started (Real Traffic Only)")
+        self.logger.info("VoIP Monitor Started (Filter: UDP Only & Label: voip-ditg)")
 
     def connect_database(self):
         try:
@@ -64,7 +64,6 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
             self.db_conn.commit()
             cursor.close()
         except Exception as e:
-            # self.logger.error(f"Insert Error: {e}")
             self.db_conn.rollback()
 
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
@@ -82,11 +81,8 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-
-        # Table-miss flow
         match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
-                                          ofproto.OFPCML_NO_BUFFER)]
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
 
     def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=0):
@@ -106,24 +102,19 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
         dpid = datapath.id
-
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
         
-        if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
-        if eth.ethertype == ether_types.ETH_TYPE_IPV6: return
+        if eth.ethertype == ether_types.ETH_TYPE_LLDP or eth.ethertype == ether_types.ETH_TYPE_IPV6: return
 
         dst = eth.dst
         src = eth.src
-
-        # Topology Logic
         is_leaf = dpid >= 4
         is_spine = dpid <= 3
 
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
 
-        # --- ARP PROXY ---
         arp_pkt = pkt.get_protocol(arp.arp)
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         
@@ -144,21 +135,16 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
                     datapath.send_msg(out)
                     return
 
-        # --- FORWARDING ---
         if dst in self.mac_to_port[dpid]:
             out_port = self.mac_to_port[dpid][dst]
         else:
             out_port = ofproto.OFPP_FLOOD
 
-        # --- SPLIT HORIZON ---
         actions = []
         if out_port == ofproto.OFPP_FLOOD:
             if is_leaf:
-                if in_port <= 3: # From Spine -> Flood only to Hosts
-                    actions.append(parser.OFPActionOutput(4))
-                    actions.append(parser.OFPActionOutput(5))
-                else: # From Host -> Flood to Spine & Hosts
-                    actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD))
+                if in_port <= 3: actions.extend([parser.OFPActionOutput(4), parser.OFPActionOutput(5)])
+                else: actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD))
             elif is_spine:
                 actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD))
         else:
@@ -180,7 +166,7 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         while True:
             for dp in self.datapaths.values():
                 self._request_stats(dp)
-            hub.sleep(1) # Polling tiap 1 detik
+            hub.sleep(1)
 
     def _request_stats(self, datapath):
         parser = datapath.ofproto_parser
@@ -195,7 +181,6 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         timestamp = datetime.now()
         
         for stat in body:
-            # Filter Flow yang valid
             if stat.priority == 0: continue
             
             match = stat.match
@@ -204,18 +189,14 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
             
             if not src_ip or not dst_ip or dst_ip.endswith('.255'): continue
             
-            ip_proto = match.get('ip_proto', 17)
+            ip_proto = match.get('ip_proto', 0)
             tp_src = match.get('udp_src', 0)
             tp_dst = match.get('udp_dst', 0)
             
-            # Key untuk flow unik
             flow_key = f"{dpid}-{src_ip}-{dst_ip}-{tp_src}-{tp_dst}"
-            
-            # Ambil counter TOTAL saat ini dari Switch
             current_bytes = stat.byte_count
             current_pkts = stat.packet_count
             
-            # Hitung DELTA (Real time traffic dalam 1 detik terakhir)
             if flow_key in self.last_bytes:
                 last_b, last_p = self.last_bytes[flow_key]
                 delta_bytes = current_bytes - last_b
@@ -224,23 +205,30 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
                 delta_bytes = current_bytes
                 delta_pkts = current_pkts
             
-            # Update history
             self.last_bytes[flow_key] = (current_bytes, current_pkts)
             
-            # Hanya simpan jika ada trafik (delta > 0)
-            # Controller JUJUR: Apa yang didapat, itu yang disimpan
-            if delta_bytes > 0:
-                self.logger.info(f"Saving Flow {dpid}: {src_ip}->{dst_ip} | {delta_bytes} Bytes")
+            # --- FILTERING LOGIC ---
+            # 1. Harus UDP (ip_proto == 17)
+            # 2. Bytes harus signifikan (> 800 bytes per detik) untuk dianggap VoIP aktif
+            #    Paket ARP/Control biasanya cuma 60-300 bytes.
+            
+            if ip_proto == 17 and delta_bytes > 800:
+                traffic_label = 'voip-ditg'
+                
+                self.logger.info(f"CAPTURED {traffic_label}: {src_ip}->{dst_ip} | {delta_bytes} Bytes")
                 
                 flow_data = (
                     timestamp, dpid,
                     src_ip, dst_ip,
                     match.get('eth_src', ''), match.get('eth_dst', ''),
                     ip_proto, tp_src, tp_dst,
-                    delta_bytes, 0, delta_pkts, 0, # Rx kita 0 kan saja atau simpan raw
-                    1.0, 'voip'
+                    delta_bytes, 0, delta_pkts, 0,
+                    1.0, 
+                    traffic_label # Disimpan sebagai 'voip-ditg'
                 )
                 self.insert_flow_data(flow_data)
+            
+            # Jika tidak memenuhi syarat (ICMP, atau traffic kecil), kita SKIP (tidak insert ke DB)
 
     def _resolve_ip(self, mac):
         if not mac: return None
