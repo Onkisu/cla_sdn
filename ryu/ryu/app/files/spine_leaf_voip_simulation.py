@@ -78,11 +78,13 @@ def run():
         time.sleep(1)
         
         # Start Send on even hosts
+        # Start Send on even hosts
         for i, h in enumerate(hosts[::2]):
             dst = hosts[i*2+1]
             # UDP Traffic (VoIP G.711)
-            h.cmd(f'ITGSend -T UDP -a {dst.IP()} -c 160 -C 50 -t 60000 -l /tmp/send.log &')
-            info(f"    {h.name} -> {dst.name} (UDP VoIP)\n")
+            # GANTI -t 60000 MENJADI -t 3600000 (1 JAM)
+            h.cmd(f'ITGSend -T UDP -a {dst.IP()} -c 160 -C 50 -t 3600000 -l /tmp/send.log &')
+            info(f"    {h.name} -> {dst.name} (UDP VoIP started for 1 hour)\n")
             
     info("*** Running CLI\n")
     CLI(net)
