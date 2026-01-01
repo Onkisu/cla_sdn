@@ -19,10 +19,10 @@ import time
 
 # PostgreSQL Configuration
 DB_CONFIG = {
-    'host': '103.181.142.121',
+    'host': '103.181.142.165',
     'database': 'development',
     'user': 'dev_one',
-    'password': 'hiroshi451.',
+    'password': 'hijack332.',
     'port': 5432
 }
 
