@@ -68,7 +68,7 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         sine_value = math.sin(phase)
         
         # Add small randomness (jitter) so it's not a perfect smooth line
-        noise = random.uniform(-0.1, 0.1) 
+        noise = random.uniform(-0.3, 0.3) 
         
         target = mid + (amp * sine_value) + (mid * 0.05 * noise)
         return int(max(min_val, min(max_val, target)))
