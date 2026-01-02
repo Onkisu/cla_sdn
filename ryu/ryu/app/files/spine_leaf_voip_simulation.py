@@ -97,7 +97,7 @@ def run():
                 info("\n*** [BURST] h3 SENDING SPIKE TRAFFIC TO h2 (5 seconds) ***\n")
                 # Command Burst: Packet Size 1KB, Rate 8000 pkt/s (~65Mbps), Duration 5s
                 # Ini cukup besar untuk membebani link h2 (bw=100Mbps) jika digabung traffic h1
-                h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 1024 -C 8000 -t 5000 -l /tmp/send_h3_burst.log')
+                h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 1024 -C 500 -t 60000 -l /tmp/send_h3_burst.log')
                 info("*** [BURST] Done. Waiting next cycle...\n")
 
         # Jalankan loop burst di thread terpisah agar tidak memblokir CLI
