@@ -103,7 +103,7 @@ def run():
                     
                     info(f"\n*** [BURST] h3 SENDING SPIKE TRAFFIC TO h2 (Duration: 60s) ***\n")
                     # Command Burst: Packet Size 1KB, Rate 500 pkt/s selama 60 detik (60000 ms)
-                    h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 1024 -C 500 -t 60000 -l /tmp/send_h3_burst.log')
+                    h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 1024 -C 350 -t 60000 -l /tmp/send_h3_burst.log')
                     
                     info("*** [BURST] Done. Preparing for next cycle...\n")
 
