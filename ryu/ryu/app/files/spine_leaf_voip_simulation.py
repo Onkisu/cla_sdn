@@ -86,8 +86,8 @@ def run():
             
             # Settingan Gunung
             duration_sec = 30
-            peak_rate = 400
-            base_rate = 100
+            peak_rate = 100
+            base_rate = 50
             noise_factor = 0.3
             
             # Rumus Parabola
