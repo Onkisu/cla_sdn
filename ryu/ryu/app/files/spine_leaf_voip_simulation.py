@@ -22,7 +22,8 @@ def keep_steady_traffic(host, dst_ip):
     - Jalankan ITGSend durasi terbatas
     - Jika selesai / mati → start ulang
     """
-    while True:
+    i = 1
+    for i < 1 :
         info("*** [WATCHDOG] (Re)starting STEADY VoIP h1 -> h2\n")
         host.cmd(
             f'ITGSend -T UDP -a {dst_ip} '
@@ -30,6 +31,7 @@ def keep_steady_traffic(host, dst_ip):
             f'-t {STEADY_DURATION_MS} -l /dev/null'
         )
         time.sleep(RESTART_DELAY)
+        i = 1
 
 def run():
     info("*** Starting Spine-Leaf Topology (STEADY ONLY + WATCHDOG)\n")
