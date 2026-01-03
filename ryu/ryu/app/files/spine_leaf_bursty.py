@@ -52,7 +52,7 @@ if __name__ == "__main__":
         # Burst 8
         burst(rate=150, duration=30)
 
-        time.sleep(1200) # Wait 20 minutes before starting bursts
+        time.sleep(180) # Wait 20 minutes before starting bursts
         burst(rate=150, duration=60)
         # Burst 2
         time.sleep(1)
@@ -82,7 +82,7 @@ if __name__ == "__main__":
         # Burst 8
         burst(rate=150, duration=30)
 
-        time.sleep(1800) # Wait 30 minutes before starting bursts
+        time.sleep(180) # Wait 30 minutes before starting bursts
         burst(rate=150, duration=60)
         # Burst 2
         time.sleep(1)
