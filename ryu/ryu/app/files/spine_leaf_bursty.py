@@ -22,7 +22,7 @@ def burst(rate, duration):
 if __name__ == "__main__":
     while True:
         # Burst 1
-        time.sleep(1800) # Wait 30 minutes before starting bursts
+        time.sleep(180) # Wait 30 minutes before starting bursts
         burst(rate=150, duration=60)
         # Burst 2
         time.sleep(1)
