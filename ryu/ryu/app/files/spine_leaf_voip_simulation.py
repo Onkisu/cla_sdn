@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """
-STEADY + DUAL FLAT BURST (SINGLE PORT 9000)
+FIXED BURST SIMULATION (SINGLE PORT 9000)
 
-- h1 -> h2 : Steady VoIP (50 pkt/s, long running)
-- h3 -> h2 : Burst A (300 pkt/s, 60s, interval [2,3,4])
-- h3 -> h2 : Burst B (500 pkt/s, 30s, interval [1,2,2])
-
-AMAN:
-- 1 ITGRecv
-- Tidak ada spawn per detik
-- Tidak ada pkill global
+- h1 -> h2 : steady VoIP (AMAN)
+- h3 -> h2 : 2 parallel flat bursts
 """
 
 from mininet.net import Mininet
@@ -21,23 +15,16 @@ import time
 import subprocess
 import threading
 
-# --------------------------------------------------
-# UTIL
-# --------------------------------------------------
+
 def check_ditg():
     if subprocess.run(['which', 'ITGSend'], capture_output=True).returncode != 0:
-        info("WARNING: D-ITG not found. Install: sudo apt-get install d-itg\n")
+        info("WARNING: D-ITG not found\n")
         return False
     return True
 
-def start_itgsend(host, cmd):
-    return host.popen(cmd, shell=True)
 
-# --------------------------------------------------
-# MAIN
-# --------------------------------------------------
 def run():
-    info("*** Starting Spine-Leaf VoIP Simulation (Dual Burst)\n")
+    info("*** Starting Spine-Leaf Simulation\n")
 
     net = Mininet(
         controller=RemoteController,
@@ -45,21 +32,27 @@ def run():
         link=TCLink,
         autoSetMacs=True
     )
+
     net.addController('c0', ip='127.0.0.1', port=6653)
 
     # ---------------- TOPOLOGY ----------------
-    spines, leaves = [], []
+    spines = []
+    leaves = []
 
     for i in range(1, 4):
-        spines.append(net.addSwitch(f's{i}', dpid=f'{i:016x}', protocols='OpenFlow13'))
+        spines.append(
+            net.addSwitch(f's{i}', dpid=f'{i:016x}', protocols='OpenFlow13')
+        )
+
     for i in range(1, 4):
-        leaves.append(net.addSwitch(f'l{i}', dpid=f'{i+3:016x}', protocols='OpenFlow13'))
+        leaves.append(
+            net.addSwitch(f'l{i}', dpid=f'{i+3:016x}', protocols='OpenFlow13')
+        )
 
-    for leaf in leaves:
-        for spine in spines:
-            net.addLink(leaf, spine, bw=1000, delay='1ms')
+    for l in leaves:
+        for s in spines:
+            net.addLink(l, s, bw=1000, delay='1ms')
 
-    # ---------------- HOSTS ----------------
     h1 = net.addHost('h1', ip='10.0.0.1/24')
     h2 = net.addHost('h2', ip='10.0.0.2/24')
     h3 = net.addHost('h3', ip='10.0.0.3/24')
@@ -73,90 +66,76 @@ def run():
     time.sleep(3)
     net.pingAll()
 
-    if not check_ditg():
-        CLI(net)
-        net.stop()
-        return
+    if check_ditg():
+        info("*** Starting ITGRecv on h2 (port 9000)\n")
+        h2.cmd('ITGRecv -p 9000 -l /tmp/itg_recv.log &')
 
-    dst_ip = h2.IP()
+        time.sleep(1)
+        dst_ip = h2.IP()
 
-    # ---------------- RECEIVER ----------------
-    info("*** Starting ITGRecv (port 9000)\n")
-    h2.cmd('ITGRecv -l /tmp/recv_all.log &')
-    time.sleep(1)
+        # -------- STEADY TRAFFIC (h1) --------
+        info("*** Steady traffic h1 -> h2\n")
+        h1.cmd(
+            f'ITGSend -T UDP -a {dst_ip} '
+            f'-rp 9000 -c 160 -C 50 '
+            f'-t 86400000 -l /dev/null &'
+        )
 
-    # ---------------- STEADY ----------------
-    info("*** Starting Steady Traffic: h1 -> h2\n")
-    h1.cmd(
-        f'ITGSend -T UDP -a {dst_ip} '
-        f'-c 160 -C 50 '
-        f'-t 86400000 '
-        f'-l /dev/null &'
-    )
+        # -------- BURST LOOP 300 --------
+        def burst_300():
+            intervals = [2, 3, 4]
+            rate = 300
+            duration = 60
 
-    # ---------------- BURST A (300 pkt/s) ----------------
-    def burst_loop_300():
-        intervals = [2, 3, 4]
-        rate = 300
-        duration = 60
+            while True:
+                for m in intervals:
+                    time.sleep(m * 60)
+                    info("\n[BURST 300 START]\n")
 
-        info("*** Burst Loop A (300 pkt/s) READY\n")
+                    p = h3.popen(
+                        f'ITGSend -T UDP -a {dst_ip} '
+                        f'-rp 9000 -c 160 -C {rate} '
+                        f'-t {duration * 1000} -l /dev/null',
+                        shell=True
+                    )
 
-        while True:
-            for mins in intervals:
-                info(f"[A] Waiting {mins} minutes...\n")
-                time.sleep(mins * 60)
+                    time.sleep(duration)
+                    p.terminate()
+                    info("[BURST 300 END]\n")
 
-                info(f"[A] START burst 300 pkt/s for {duration}s\n")
-                p = start_itgsend(
-                    h3,
-                    f'ITGSend -T UDP -a {dst_ip} '
-                    f'-c 160 -C {rate} '
-                    f'-t {duration * 1000} '
-                    f'-l /dev/null'
-                )
+        # -------- BURST LOOP 500 --------
+        def burst_500():
+            intervals = [1, 2, 2]
+            rate = 500
+            duration = 30
 
-                time.sleep(duration)
-                p.terminate()
-                info("[A] END burst\n")
+            while True:
+                for m in intervals:
+                    time.sleep(m * 60)
+                    info("\n[BURST 500 START]\n")
 
-    # ---------------- BURST B (500 pkt/s) ----------------
-    def burst_loop_500():
-        intervals = [1, 2, 2]
-        rate = 500
-        duration = 30
+                    p = h3.popen(
+                        f'ITGSend -T UDP -a {dst_ip} '
+                        f'-rp 9000 -c 160 -C {rate} '
+                        f'-t {duration * 1000} -l /dev/null',
+                        shell=True
+                    )
 
-        info("*** Burst Loop B (500 pkt/s) READY\n")
+                    time.sleep(duration)
+                    p.terminate()
+                    info("[BURST 500 END]\n")
 
-        while True:
-            for mins in intervals:
-                info(f"[B] Waiting {mins} minutes...\n")
-                time.sleep(mins * 60)
+        t1 = threading.Thread(target=burst_300, daemon=True)
+        t2 = threading.Thread(target=burst_500, daemon=True)
 
-                info(f"[B] START burst 500 pkt/s for {duration}s\n")
-                p = start_itgsend(
-                    h3,
-                    f'ITGSend -T UDP -a {dst_ip} '
-                    f'-c 160 -C {rate} '
-                    f'-t {duration * 1000} '
-                    f'-l /dev/null'
-                )
+        t1.start()
+        t2.start()
 
-                time.sleep(duration)
-                p.terminate()
-                info("[B] END burst\n")
-
-    # ---------------- THREADS ----------------
-    t1 = threading.Thread(target=burst_loop_300, daemon=True)
-    t2 = threading.Thread(target=burst_loop_500, daemon=True)
-
-    t1.start()
-    t2.start()
-
+    info("*** Running CLI\n")
     CLI(net)
     net.stop()
 
-# --------------------------------------------------
+
 if __name__ == '__main__':
     setLogLevel('info')
     run()
