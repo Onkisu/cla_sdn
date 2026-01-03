@@ -6,12 +6,33 @@ from mininet.log import setLogLevel, info
 from mininet.link import TCLink
 import time
 import subprocess
+import threading
+
+STEADY_DURATION_MS = 60000   # 60 detik per sesi (aman)
+STEADY_RATE = 50             # pps
+PKT_SIZE = 160               # bytes
+RESTART_DELAY = 1            # detik
 
 def check_ditg():
     return subprocess.run(['which', 'ITGSend'], capture_output=True).returncode == 0
 
+def keep_steady_traffic(host, dst_ip):
+    """
+    Watchdog loop:
+    - Jalankan ITGSend durasi terbatas
+    - Jika selesai / mati → start ulang
+    """
+    while True:
+        info("*** [WATCHDOG] (Re)starting STEADY VoIP h1 -> h2\n")
+        host.cmd(
+            f'ITGSend -T UDP -a {dst_ip} '
+            f'-c {PKT_SIZE} -C {STEADY_RATE} '
+            f'-t {STEADY_DURATION_MS} -l /dev/null'
+        )
+        time.sleep(RESTART_DELAY)
+
 def run():
-    info("*** Starting Spine-Leaf Topology (STEADY ONLY)\n")
+    info("*** Starting Spine-Leaf Topology (STEADY ONLY + WATCHDOG)\n")
 
     net = Mininet(
         controller=RemoteController,
@@ -48,14 +69,22 @@ def run():
     if check_ditg():
         info("*** Starting ITGRecv on h2 (port 9000)\n")
         h2.cmd('ITGRecv -l /tmp/recv_steady.log &')
+        time.sleep(1)
 
-        info("*** h1 -> h2 STEADY VoIP\n")
-        h1.cmd(f'ITGSend -T UDP -a {h2.IP()} -c 160 -C 50 -t 86400000 -l /dev/null &')
+        info("*** Starting STEADY VoIP Watchdog (h1 -> h2)\n")
+        t = threading.Thread(
+            target=keep_steady_traffic,
+            args=(h1, h2.IP())
+        )
+        t.daemon = True
+        t.start()
+    else:
+        info("!!! D-ITG not installed, traffic disabled\n")
 
+    info("*** Running Mininet CLI\n")
     CLI(net)
     net.stop()
 
 if __name__ == '__main__':
     setLogLevel('info')
     run()
-  
