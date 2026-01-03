@@ -9,7 +9,7 @@ import subprocess
 import threading
 import itertools
 
-STEADY_DURATION_MS = 60000   # 60 detik per sesi (aman)
+STEADY_DURATION_MS = 60000   # 60 detik per sesi
 STEADY_RATE = 50             # pps
 PKT_SIZE = 160               # bytes
 RESTART_DELAY = 1            # detik
@@ -17,20 +17,35 @@ RESTART_DELAY = 1            # detik
 def check_ditg():
     return subprocess.run(['which', 'ITGSend'], capture_output=True).returncode == 0
 
-def keep_steady_traffic(host, dst_ip):
+def keep_steady_traffic(src_host, dst_host, dst_ip):
     """
-    Watchdog loop:
-    - Jalankan ITGSend durasi terbatas
-    - Jika selesai / mati → start ulang
+    Watchdog loop yang diperbaiki:
+    1. Cek apakah ITGRecv di h2 masih hidup. Jika mati, nyalakan lagi.
+    2. Jalankan ITGSend di h1.
     """
     
-    for i in itertools.count(1) :
+    for i in itertools.count(1):
+        # --- FIX: CEK DAN HIDUPKAN KEMBALI RECEIVER JIKA MATI ---
+        # Cek apakah proses ITGRecv berjalan di dst_host (h2)
+        recv_pid = dst_host.cmd('pgrep -x ITGRecv').strip()
+        
+        if not recv_pid:
+            info(f"*** [WATCHDOG] ITGRecv on {dst_host.name} is DEAD. Restarting...\n")
+            # Restart ITGRecv (Log dipisah atau di-append agar aman)
+            dst_host.cmd('ITGRecv -l /tmp/recv_steady.log &')
+            time.sleep(1) # Beri waktu untuk bind port
+        # ---------------------------------------------------------
+
         info("*** [WATCHDOG] (Re)starting STEADY VoIP h1 -> h2\n")
-        host.cmd(
+        
+        # Menjalankan Sender
+        src_host.cmd(
             f'ITGSend -T UDP -a {dst_ip} '
             f'-c {PKT_SIZE} -C {STEADY_RATE} '
             f'-t {STEADY_DURATION_MS} -l /dev/null'
         )
+        
+        # Jika ITGSend exit (selesai atau error), tunggu sebentar sebelum loop
         time.sleep(RESTART_DELAY)
         
 
@@ -70,14 +85,18 @@ def run():
     net.pingAll()
 
     if check_ditg():
-        info("*** Starting ITGRecv on h2 (port 9000)\n")
+        # Kita tidak perlu start ITGRecv manual di sini lagi, 
+        # karena Watchdog sekarang cukup pintar untuk menyalakannya jika belum ada.
+        # Tapi untuk inisiasi awal yang cepat, kita nyalakan sekali.
+        info("*** Starting ITGRecv on h2 (Initial)\n")
         h2.cmd('ITGRecv -l /tmp/recv_steady.log &')
         time.sleep(1)
 
         info("*** Starting STEADY VoIP Watchdog (h1 -> h2)\n")
+        # FIX: Pass h2 object juga ke argumen thread
         t = threading.Thread(
             target=keep_steady_traffic,
-            args=(h1, h2.IP())
+            args=(h1, h2, h2.IP()) 
         )
         t.daemon = True
         t.start()
