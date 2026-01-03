@@ -62,10 +62,9 @@ def run():
         # --- KUNCI PERBAIKAN DI SINI ---
         # 1. Receiver Utama (Untuk h1) - Port Default (9000)
         h2.cmd('ITGRecv -l /tmp/recv_h1_voip.log &')
-        
-        # 2. Receiver Khusus Burst (Untuk h3) - Port 9001
-        # Kita pisahkan prosesnya supaya start-stop h3 tidak mematikan h1
-        h2.cmd('ITGRecv -Sp 9001 -l /tmp/recv_h3_burst.log &')
+        # 2. Receiver Burst (Untuk h3) - Port 9001 (WAJIB ADA LAGI)
+        h2.cmd('ITGRecv -Sp 9001 -l /tmp/recv_h1_voip.log &')
+    
         
         time.sleep(1)
         
@@ -94,7 +93,7 @@ def run():
             midpoint = duration_sec / 2
             curvature = (peak_rate - base_rate) / (midpoint ** 2)
 
-            info(f"    [BURST] h3 armed on Port 9001. Pattern: Mountain.\n")
+            info(f"    [BURST] h3  Pattern: Mountain.\n")
             
             while True:
                 for mins in intervals_minutes:
@@ -120,9 +119,9 @@ def run():
                         info(f"\r t={t:02d} | Rate={final:03d} | {bar}")
                         
                         # 3. TEMBAK D-ITG
-                        # -Sdp 9001 : Menembak ke port khusus Burst
+        
                         # -t 1000   : Durasi 1 detik
-                        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C {final} -t 1000 -l /dev/null &')
+                        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -Sdp 9001 -c 160 -C {final} -t 1000 -l /dev/null &')
                         time.sleep(1)
                         
                     
