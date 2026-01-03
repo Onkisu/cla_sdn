@@ -115,5 +115,5 @@ if __name__ == "__main__":
         # time.sleep(1)
         # # Burst 8
         # burst(rate=150, duration=30)
-        clear_recv_log()
-        print("[CYCLE COMPLETE] Restarting burst cycle...\n")
+        # clear_recv_log()
+        # print("[CYCLE COMPLETE] Restarting burst cycle...\n")
