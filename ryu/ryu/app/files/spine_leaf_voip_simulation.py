@@ -122,7 +122,7 @@ def run():
                         # 3. TEMBAK D-ITG
                         # -Sdp 9001 : Menembak ke port khusus Burst
                         # -t 1000   : Durasi 1 detik
-                        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -Sdp 9001 -c 1024 -C {final} -t 2000 -l /dev/null &')
+                        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 1024 -C {final} -t 60000 -l /dev/null &')
                         
                         
                     
