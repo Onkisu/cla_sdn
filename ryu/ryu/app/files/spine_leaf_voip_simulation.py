@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FIXED MOUNTAIN BURST (ISOLATED PORTS)
+FIXED MOUNTAIN BURST (ISOLATED PORTS) - Version 2
 - h1 -> h2 (Port 9000): AMAN, tidak akan putus.
 - h3 -> h2 (Port 9001): GUNUNG, naik turun tiap detik tanpa ganggu h1.
 """
@@ -22,7 +22,7 @@ def check_ditg():
     return True
 
 def run():
-    info("*** Starting Spine-Leaf VoIP Simulation (Fixed Version)\n")
+    info("*** Starting Spine-Leaf VoIP Simulation (Fixed Version v2)\n")
     
     net = Mininet(controller=RemoteController, switch=OVSSwitch, link=TCLink, autoSetMacs=True)
     net.addController('c0', ip='127.0.0.1', port=6653)
@@ -59,26 +59,44 @@ def run():
     if check_ditg():
         info("*** Setup Traffic Receiver (ISOLATED PORTS)\n")
         
-        # --- KUNCI PERBAIKAN DI SINI ---
-        # 1. Receiver Utama (Untuk h1) - Port Default (9000)
-        h2.cmd('ITGRecv -l /tmp/recv_h1_voip.log &')
+        # Kill any existing ITG processes
+        h1.cmd('pkill -9 -f ITGSend')
+        h2.cmd('pkill -9 -f ITGRecv')
+        h3.cmd('pkill -9 -f ITGSend')
+        time.sleep(1)
         
-        # 2. Receiver Khusus Burst (Untuk h3) - Port 9001
-        # Kita pisahkan prosesnya supaya start-stop h3 tidak mematikan h1
-        h2.cmd('ITGRecv -Sp 9001 -l /tmp/recv_h3_burst.log &')
+        # --- RECEIVERS (Isolated by Port) ---
+        # 1. Receiver for h1 traffic - Port 9000 (Default)
+        h2.cmd('ITGRecv -Sp 9000 -l /tmp/recv_h1_voip.log > /tmp/recv_h1.out 2>&1 &')
+        
+        # 2. Receiver for h3 traffic - Port 9001
+        h2.cmd('ITGRecv -Sp 9001 -l /tmp/recv_h3_burst.log > /tmp/recv_h3.out 2>&1 &')
+        
+        time.sleep(2)
+        
+        # Verify receivers are running
+        info("*** Verifying Receivers...\n")
+        result = h2.cmd('pgrep -a ITGRecv')
+        info(f"    Active receivers: {result}")
+        
+        # -----------------------------------------------------------
+        # TRAFIK 1: h1 -> h2 (Steady VoIP on Port 9000)
+        # -----------------------------------------------------------
+        dst_ip = h2.IP()
+        dst_port = 9000
+        
+        info(f"    [STEADY] Starting h1 -> h2:{dst_port} (Persistent VoIP)\n")
+        # Use nohup to ensure it doesn't get killed accidentally
+        h1.cmd(f'nohup ITGSend -T UDP -a {dst_ip} -rp {dst_port} -c 160 -C 50 -t 86400000 -l /tmp/h1_send.log > /tmp/h1_voip.out 2>&1 &')
         
         time.sleep(1)
         
-        # -----------------------------------------------------------
-        # TRAFIK 1: h1 -> h2 (Steady VoIP)
-        # -----------------------------------------------------------
-        dst_ip = h2.IP()
-        info(f"    [STEADY] h1 -> h2 running on Port 9000 (Safe)\n")
-        # Menggunakan durasi 24 jam (86400 detik) agar tidak overflow
-        h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 86400000 -l /dev/null &')
+        # Verify h1 sender is running
+        result = h1.cmd('pgrep -a ITGSend')
+        info(f"    h1 sender status: {result}")
         
         # -----------------------------------------------------------
-        # TRAFIK 2: h3 -> h2 (Mountain Burst)
+        # TRAFIK 2: h3 -> h2 (Mountain Burst on Port 9001)
         # -----------------------------------------------------------
         def burst_loop():
             # Interval waktu antar serangan (menit)
@@ -94,17 +112,19 @@ def run():
             midpoint = duration_sec / 2
             curvature = (peak_rate - base_rate) / (midpoint ** 2)
 
-            info(f"    [BURST] h3 armed on Port 9001. Pattern: Mountain.\n")
+            dst_port_burst = 9001
+            info(f"    [BURST] h3 armed on Port {dst_port_burst}. Pattern: Mountain.\n")
             
             while True:
                 for mins in intervals_minutes:
-                    # Ganti jadi (mins * 60) untuk real time, atau angka kecil untuk test
-                    seconds_to_wait = mins * 60 
+                    # For testing, use small values like 10, 20, 30 seconds
+                    # For production, use: mins * 60
+                    seconds_to_wait = mins * 60  # Change to small values for testing
                     
-                    info(f"\n[SCHEDULER] Waiting {mins} minutes...\n")
+                    info(f"\n[SCHEDULER] Waiting {mins} minutes ({seconds_to_wait}s)...\n")
                     time.sleep(seconds_to_wait) 
                     
-                    info(f"\n*** [ATTACK START] h3 sending Mountain Burst to h2:9001 ***\n")
+                    info(f"\n*** [ATTACK START] h3 sending Mountain Burst to {dst_ip}:{dst_port_burst} ***\n")
                     
                     # Looping Detik-per-Detik untuk membentuk gunung
                     for t in range(duration_sec + 1):
@@ -117,25 +137,38 @@ def run():
                         
                         # 2. Visualisasi
                         bar = "#" * int(final / 10)
-                        info(f"\r t={t:02d} | Rate={final:03d} | {bar}")
-                        h3.cmd('pkill -f ITGSend')
+                        info(f" t={t:02d} | Rate={final:03d} | {bar}\n")
                         
-                        # 3. TEMBAK D-ITG
-                        # -Sdp 9001 : Menembak ke port khusus Burst
-                        # -t 1000   : Durasi 1 detik
-                        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C {final} -t 30000 -l /dev/null &')
+                        # 3. Kill previous h3 ITGSend ONLY (not h1!)
+                        # Use more specific pattern to avoid killing h1
+                        h3.cmd('pkill -9 -f "ITGSend.*9001"')
+                        time.sleep(0.1)  # Small delay to ensure clean kill
                         
+                        # 4. Launch new ITGSend for 1 second burst
+                        # -t 1000 = 1 second duration
+                        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -rp {dst_port_burst} -c 160 -C {final} -t 1000 -l /dev/null > /dev/null 2>&1 &')
                         
-                    h3.cmd('pkill -f ITGSend')
-                    print("")
-                    info("*** [ATTACK END] Cycle finished.\n")
+                        time.sleep(1)  # Wait 1 second before next iteration
+                        
+                    # Clean up h3 sender after burst
+                    h3.cmd('pkill -9 -f "ITGSend.*9001"')
+                    info("\n*** [ATTACK END] Cycle finished.\n")
+                    
+                    # Verify h1 is still running
+                    result = h1.cmd('pgrep -a ITGSend')
+                    if 'ITGSend' not in result:
+                        info("!!! WARNING: h1 traffic stopped! Restarting...\n")
+                        h1.cmd(f'nohup ITGSend -T UDP -a {dst_ip} -rp {dst_port} -c 160 -C 50 -t 86400000 -l /tmp/h1_send.log > /tmp/h1_voip.out 2>&1 &')
 
         t = threading.Thread(target=burst_loop)
         t.daemon = True 
         t.start()
             
     info("*** Running CLI\n")
+    info("*** Tip: Check traffic with 'h1 ps aux | grep ITG' and 'h3 ps aux | grep ITG'\n")
     CLI(net)
+    
+    info("*** Stopping network\n")
     net.stop()
 
 if __name__ == '__main__':
