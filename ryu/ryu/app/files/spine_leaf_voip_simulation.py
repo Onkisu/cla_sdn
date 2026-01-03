@@ -86,8 +86,8 @@ def run():
             
             # Settingan Gunung
             duration_sec = 30
-            peak_rate = 20
-            base_rate = 12
+            peak_rate = 1000
+            base_rate = 500
             noise_factor = 0.3
             
             # Rumus Parabola
@@ -123,8 +123,8 @@ def run():
                         # 3. TEMBAK D-ITG
                         # -Sdp 9001 : Menembak ke port khusus Burst
                         # -t 1000   : Durasi 1 detik
-                        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C {final} -t 1000 -l /dev/null &')
-                        time.sleep(1)
+                        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C {final} -t 30000 -l /dev/null &')
+                        
                         
                     h3.cmd('pkill -f ITGSend')
                     print("")
