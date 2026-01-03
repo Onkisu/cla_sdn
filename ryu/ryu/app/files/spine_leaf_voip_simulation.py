@@ -7,6 +7,7 @@ from mininet.link import TCLink
 import time
 import subprocess
 import threading
+import itertools
 
 STEADY_DURATION_MS = 60000   # 60 detik per sesi (aman)
 STEADY_RATE = 50             # pps
