@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-FIXED BURST SIMULATION (SINGLE PORT 9000)
-
-- h1 -> h2 : steady VoIP (AMAN)
-- h3 -> h2 : 2 parallel flat bursts
+FLAT BURST (SINGLE PORT)
+- h1 -> h2 : Steady VoIP (AMAN)
+- h3 -> h2 : Flat Burst 300 pkt/s selama 60 detik
 """
 
 from mininet.net import Mininet
@@ -15,44 +14,36 @@ import time
 import subprocess
 import threading
 
-
 def check_ditg():
     if subprocess.run(['which', 'ITGSend'], capture_output=True).returncode != 0:
-        info("WARNING: D-ITG not found\n")
+        info("WARNING: D-ITG not found. Install: sudo apt-get install d-itg\n")
         return False
     return True
 
-
 def run():
-    info("*** Starting Spine-Leaf Simulation\n")
-
+    info("*** Starting Spine-Leaf VoIP Simulation (Flat Burst Version)\n")
+    
     net = Mininet(
         controller=RemoteController,
         switch=OVSSwitch,
         link=TCLink,
         autoSetMacs=True
     )
-
     net.addController('c0', ip='127.0.0.1', port=6653)
 
     # ---------------- TOPOLOGY ----------------
-    spines = []
-    leaves = []
+    spines, leaves = [], []
 
     for i in range(1, 4):
-        spines.append(
-            net.addSwitch(f's{i}', dpid=f'{i:016x}', protocols='OpenFlow13')
-        )
-
+        spines.append(net.addSwitch(f's{i}', dpid=f'{i:016x}', protocols='OpenFlow13'))
     for i in range(1, 4):
-        leaves.append(
-            net.addSwitch(f'l{i}', dpid=f'{i+3:016x}', protocols='OpenFlow13')
-        )
+        leaves.append(net.addSwitch(f'l{i}', dpid=f'{i+3:016x}', protocols='OpenFlow13'))
 
-    for l in leaves:
-        for s in spines:
-            net.addLink(l, s, bw=1000, delay='1ms')
+    for leaf in leaves:
+        for spine in spines:
+            net.addLink(leaf, spine, bw=1000, delay='1ms')
 
+    # ---------------- HOSTS ----------------
     h1 = net.addHost('h1', ip='10.0.0.1/24')
     h2 = net.addHost('h2', ip='10.0.0.2/24')
     h3 = net.addHost('h3', ip='10.0.0.3/24')
@@ -66,75 +57,62 @@ def run():
     time.sleep(3)
     net.pingAll()
 
-    if check_ditg():
-        info("*** Starting ITGRecv on h2 (port 9000)\n")
-        h2.cmd('ITGRecv -p 9000 -l /tmp/itg_recv.log &')
+    if not check_ditg():
+        CLI(net)
+        net.stop()
+        return
 
-        time.sleep(1)
-        dst_ip = h2.IP()
+    info("*** Starting ITG Receiver (Port 9000)\n")
+    h2.cmd('ITGRecv -l /tmp/recv_all.log &')
+    time.sleep(1)
 
-        # -------- STEADY TRAFFIC (h1) --------
-        info("*** Steady traffic h1 -> h2\n")
-        h1.cmd(
-            f'ITGSend -T UDP -a {dst_ip} '
-            f'-rp 9000 -c 160 -C 50 '
-            f'-t 86400000 -l /dev/null &'
-        )
+    dst_ip = h2.IP()
 
-        # -------- BURST LOOP 300 --------
-        def burst_300():
-            intervals = [2, 3, 4]
-            rate = 300
-            duration = 60
+    # ---------------- STEADY TRAFFIC ----------------
+    info("*** Starting Steady VoIP: h1 -> h2\n")
+    h1.cmd(
+        f'ITGSend -T UDP -a {dst_ip} '
+        f'-c 160 -C 50 '
+        f'-t 86400000 '
+        f'-l /dev/null &'
+    )
 
-            while True:
-                for m in intervals:
-                    time.sleep(m * 60)
-                    info("\n[BURST 300 START]\n")
+    # ---------------- FLAT BURST ----------------
+    def burst_loop():
+        intervals_minutes = [1, 3, 4]   # jeda antar burst
+        burst_rate = 300                # packet rate
+        burst_duration = 25             # detik
 
-                    p = h3.popen(
-                        f'ITGSend -T UDP -a {dst_ip} '
-                        f'-rp 9000 -c 160 -C {rate} '
-                        f'-t {duration * 1000} -l /dev/null',
-                        shell=True
-                    )
+        info("*** Burst Scheduler Ready (FLAT)\n")
 
-                    time.sleep(duration)
-                    p.terminate()
-                    info("[BURST 300 END]\n")
+        while True:
+            for mins in intervals_minutes:
+                info(f"\n[SCHEDULER] Waiting {mins} minutes...\n")
+                time.sleep(mins * 60)
 
-        # -------- BURST LOOP 500 --------
-        def burst_500():
-            intervals = [1, 2, 2]
-            rate = 500
-            duration = 30
+                info(f"\n*** [BURST START] h3 -> h2 | Rate={burst_rate} | Duration={burst_duration}s ***\n")
 
-            while True:
-                for m in intervals:
-                    time.sleep(m * 60)
-                    info("\n[BURST 500 START]\n")
+                # Pastikan tidak ada ITGSend lama
+                h3.cmd('pkill -f ITGSend')
 
-                    p = h3.popen(
-                        f'ITGSend -T UDP -a {dst_ip} '
-                        f'-rp 9000 -c 160 -C {rate} '
-                        f'-t {duration * 1000} -l /dev/null',
-                        shell=True
-                    )
+                h3.cmd(
+                    f'ITGSend -T UDP -a {dst_ip} '
+                    f'-c 160 -C {burst_rate} '
+                    f'-t {burst_duration * 1000} '
+                    f'-l /dev/null &'
+                )
 
-                    time.sleep(duration)
-                    p.terminate()
-                    info("[BURST 500 END]\n")
+                time.sleep(burst_duration)
+                h3.cmd('pkill -f ITGSend')
 
-        t1 = threading.Thread(target=burst_300, daemon=True)
-        t2 = threading.Thread(target=burst_500, daemon=True)
+                info("*** [BURST END]\n")
 
-        t1.start()
-        t2.start()
+    t = threading.Thread(target=burst_loop)
+    t.daemon = True
+    t.start()
 
-    info("*** Running CLI\n")
     CLI(net)
     net.stop()
-
 
 if __name__ == '__main__':
     setLogLevel('info')
