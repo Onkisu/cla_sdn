@@ -82,7 +82,7 @@ def run():
         # -----------------------------------------------------------
         def burst_loop():
             # Interval waktu antar serangan (menit)
-            intervals_minutes = [3, 5, 4]
+            intervals_minutes = [3, 3, 4]
             
             # Settingan Gunung
             duration_sec = 60
