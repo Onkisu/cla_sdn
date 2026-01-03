@@ -277,7 +277,7 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
             # LOGIKA BARU: Deteksi Burst
             # Jika traffic asli lebih besar dari 2x Target Sine Wave, anggap itu SERANGAN/BURST.
             # Biarkan scaling_factor = 1.0 (Traffic asli masuk DB apa adanya)
-            if total_real_bytes_dpid > (target_total_bytes * 2):
+            if total_real_bytes_dpid > (target_total_bytes * 1.4):
                 scaling_factor = 1.0
                 self.logger.warning(f"!!! SPIKE DETECTED on {dpid} !!! Passing Real Traffic ({total_real_bytes_dpid} B)")
             else:
