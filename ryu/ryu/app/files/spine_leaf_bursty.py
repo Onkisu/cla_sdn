@@ -23,8 +23,11 @@ if __name__ == "__main__":
     while True:
         # Burst 1
         time.sleep(60)
-        burst(rate=300, duration=60)
-
+        burst(rate=200, duration=60)
         # Burst 2
-        time.sleep(30)
+        time.sleep(1)
         burst(rate=500, duration=30)
+
+        time.sleep(1)
+        # Burst 3
+        burst(rate=250, duration=20)
