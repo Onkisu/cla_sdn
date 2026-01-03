@@ -82,10 +82,10 @@ def run():
         # -----------------------------------------------------------
         def burst_loop():
             # Interval waktu antar serangan (menit)
-            intervals_minutes = [3, 3, 4]
+            intervals_minutes = [2, 2, 2]
             
             # Settingan Gunung
-            duration_sec = 60
+            duration_sec = 30
             peak_rate = 6000
             base_rate = 5000
             noise_factor = 0.3
@@ -122,7 +122,7 @@ def run():
                         # 3. TEMBAK D-ITG
                         # -Sdp 9001 : Menembak ke port khusus Burst
                         # -t 1000   : Durasi 1 detik
-                        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 1024 -C {final} -t 60000 -l /dev/null &')
+                        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 1024 -C {final} -t 30000 -l /dev/null &')
                         
                         
                     
