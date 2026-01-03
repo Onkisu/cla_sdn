@@ -22,7 +22,67 @@ def burst(rate, duration):
 if __name__ == "__main__":
     while True:
         # Burst 1
-        time.sleep(60)
+        time.sleep(1800) # Wait 30 minutes before starting bursts
+        burst(rate=150, duration=60)
+        # Burst 2
+        time.sleep(1)
+        burst(rate=200, duration=30)
+        
+        time.sleep(1)
+        # Burst 3
+        burst(rate=250, duration=20)
+        time.sleep(1)
+
+        # Burst 3
+        burst(rate=300, duration=20)
+        time.sleep(1)
+        # Burst 4
+        burst(rate=400, duration=10)
+        time.sleep(1)
+
+        # Burst 5
+        burst(rate=250, duration=20)
+        time.sleep(1)
+        # Burst 6
+        burst(rate=360, duration=10)
+        time.sleep(1)
+        # Burst 7
+        burst(rate=200, duration=20)
+        time.sleep(1)
+        # Burst 8
+        burst(rate=150, duration=30)
+
+        time.sleep(1200) # Wait 20 minutes before starting bursts
+        burst(rate=150, duration=60)
+        # Burst 2
+        time.sleep(1)
+        burst(rate=200, duration=30)
+        
+        time.sleep(1)
+        # Burst 3
+        burst(rate=250, duration=20)
+        time.sleep(1)
+
+        # Burst 3
+        burst(rate=300, duration=20)
+        time.sleep(1)
+        # Burst 4
+        burst(rate=400, duration=10)
+        time.sleep(1)
+
+        # Burst 5
+        burst(rate=250, duration=20)
+        time.sleep(1)
+        # Burst 6
+        burst(rate=360, duration=10)
+        time.sleep(1)
+        # Burst 7
+        burst(rate=200, duration=20)
+        time.sleep(1)
+        # Burst 8
+        burst(rate=150, duration=30)
+
+        time.sleep(1800) # Wait 30 minutes before starting bursts
         burst(rate=150, duration=60)
         # Burst 2
         time.sleep(1)
