@@ -86,7 +86,7 @@ def run():
         # 2. Main Traffic: h1 -> h2 (Steady VoIP - 1 Jam)
         dst_ip = h2.IP()
         info(f"    [STEADY] h1 -> h2 (UDP VoIP started for 1 hour)\n")
-        h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 31536000000 -l /tmp/send_h1.log &')
+        h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 86400000 -l /tmp/send_h1.log &')
         
         # 3. BURST Traffic Logic: h3 -> h2 (MOUNTAIN SHAPE)
         def burst_loop():
