@@ -32,7 +32,7 @@ def get_latest_real():
 def get_forecast(ts):
     q = """
         SELECT y_pred
-        FROM traffic.forecast_1h
+        FROM forecast_1h
         WHERE ts = %s
         LIMIT 1
     """

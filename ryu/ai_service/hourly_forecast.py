@@ -123,7 +123,7 @@ forecast_df = pd.DataFrame({
 # SAVE TO DB
 # =====================
 forecast_df.to_sql(
-    "traffic.forecast_1h",
+    "forecast_1h",
     engine,
     if_exists="append",
     index=True
