@@ -26,13 +26,22 @@ engine = create_engine(DB_URI)
 # =====================
 def load_data(hours):
     q = f"""
-    SELECT
-        date_trunc('second', timestamp) AS ts,
-        max(bytes_tx) * 8 AS throughput_bps
+
+
+    with x as (
+    SELECT 
+        date_trunc('second', timestamp) as detik, 
+        dpid, 
+        max(bytes_tx) as total_bytes
     FROM traffic.flow_stats_
-    WHERE timestamp >= now() - interval '{hours} hour'
-    GROUP BY ts
-    ORDER BY ts
+    GROUP BY detik, dpid
+    ORDER BY detik desc, dpid 
+
+    )
+    select detik as ts, total_bytes * 8 as throughput_bps from x where dpid = 5
+    and (total_bytes * 8 ) > 100000 
+    and detik >= now() - interval '{hours} hour' order by 1 asc
+
     """
     df = pd.read_sql(q, engine)
     df["ts"] = pd.to_datetime(df["ts"])
