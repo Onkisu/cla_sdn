@@ -77,8 +77,8 @@ reg = xgb.XGBRegressor(
     learning_rate=0.01,
 
     max_depth=3,
-    min_child_weight=10,
-    gamma=1,
+    min_child_weight=5,
+    gamma=0.5,
 
     subsample=0.8,
     colsample_bytree=0.8,
@@ -97,7 +97,7 @@ reg.fit(
 pred = reg.predict(X_test)
 pred_series = pd.Series(pred, index=y_test.index)
 start = '2026-01-04 05:10:00+07:00'
-end   = '2026-01-04 05:13:00+07:00'
+end   = '2026-01-04 06:10:00+07:00'
 fig, ax = plt.subplots(figsize=(15,5))
 
 y_test.loc[start:end].sort_index().plot(
@@ -111,7 +111,7 @@ pred_series.loc[start:end].sort_index().plot(
     label='Predictions'
 )
 
-ax.set_title('3 minute of data: Actual vs Prediction')
+ax.set_title('1 hour of data: Actual vs Prediction')
 ax.legend()
 plt.show()
 
