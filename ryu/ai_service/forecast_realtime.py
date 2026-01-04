@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 DB_URI = "postgresql://dev_one:hijack332.@127.0.0.1:5432/development"
 TABLE  = "traffic"
 
-MODEL_PATH = "xgb_throughput.json"
+MODEL_PATH = "beta_model_voip_v3.json"
 
 TARGET = "throughput_bps"
 LAGS   = [1, 2, 3, 5, 10]
