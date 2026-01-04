@@ -7,17 +7,16 @@ from datetime import timedelta
 # CONFIG
 # =====================
 DB_URI = "postgresql://dev_one:hijack332.@127.0.0.1:5432/development"
-
 TARGET = "throughput_bps"
-LAGS = [1,2,3,5,10]
 
+LAGS = [1,2,3,5,10]
 FEATURES = (
     [f"lag_{l}" for l in LAGS] +
     ["roll_mean_5", "roll_std_5", "second", "delta_1", "abs_delta_1"]
 )
 
 TRAIN_HOURS  = 24
-FORECAST_SEC = 3600
+FORECAST_SEC = 3600  # 1 jam
 
 engine = create_engine(DB_URI)
 
@@ -26,8 +25,6 @@ engine = create_engine(DB_URI)
 # =====================
 def load_data(hours):
     q = f"""
-
-
     with x as (
     SELECT 
         date_trunc('second', timestamp) as detik, 
@@ -39,9 +36,9 @@ def load_data(hours):
 
     )
     select detik as ts, total_bytes * 8 as throughput_bps from x where dpid = 5
-    and (total_bytes * 8 ) > 100000 
+    and (total_bytes * 8 ) > 100000
     and detik >= now() - interval '{hours} hour' order by 1 asc
-
+    
     """
     df = pd.read_sql(q, engine)
     df["ts"] = pd.to_datetime(df["ts"])
@@ -68,60 +65,53 @@ def build_features(df):
 # =====================
 # MAIN
 # =====================
-print("📥 load data")
+print("📥 loading 24h data")
 df_raw = load_data(TRAIN_HOURS + 1)
 df_feat = build_features(df_raw)
 
-# TRAIN / VAL SPLIT (SAMA KAYAK OFFLINE)
-split = int(len(df_feat) * 0.8)
+ts_last = df_feat.index.max()
+X_base = df_feat[FEATURES]
 
-train = df_feat.iloc[:split]
-val   = df_feat.iloc[split:]
+predictions = []
 
-X_tr, y_tr = train[FEATURES], train[TARGET]
-X_val, y_val = val[FEATURES], val[TARGET]
+print("🚀 training + direct forecasting")
 
-# =====================
-# TRAIN MODEL (IDENTIK)
-# =====================
-print("🚀 training model")
+for h in range(1, FORECAST_SEC + 1):
+    df_feat[f"y_t+{h}"] = df_feat[TARGET].shift(-h)
 
-model = xgb.XGBRegressor(
-    n_estimators=10000,
-    learning_rate=0.01,
-    max_depth=3,
-    min_child_weight=5,
-    gamma=0.5,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    objective="reg:squarederror",
-    random_state=42,
-    early_stopping_rounds=50
-)
+data = df_feat.dropna()
 
-model.fit(
-    X_tr, y_tr,
-    eval_set=[(X_val, y_val)],
-    verbose=False
-)
+X = data[FEATURES]
 
-# =====================
-# DIRECT 1H FORECAST
-# =====================
-print("🔮 forecasting 1 hour")
+for h in range(1, FORECAST_SEC + 1):
+    y = data[f"y_t+{h}"]
 
-last_block = df_feat.iloc[-FORECAST_SEC:][FEATURES]
-pred = model.predict(last_block)
+    model = xgb.XGBRegressor(
+        n_estimators=10000,
+        learning_rate=0.01,
+        max_depth=3,
+        min_child_weight=5,
+        gamma=0.5,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        objective="reg:squarederror",
+        random_state=42
+    )
 
-forecast_ts = df_feat.index[-FORECAST_SEC:]
-forecast_df = pd.DataFrame({
-    "ts": forecast_ts,
-    "y_pred": pred
-}).set_index("ts")
+    model.fit(X, y, verbose=False)
+
+    y_pred = model.predict(X_base.iloc[-1:])[0]
+
+    predictions.append({
+        "ts": ts_last + timedelta(seconds=h),
+        "y_pred": y_pred
+    })
 
 # =====================
-# SAVE TO DB
+# SAVE FORECAST
 # =====================
+forecast_df = pd.DataFrame(predictions).set_index("ts")
+
 forecast_df.to_sql(
     "forecast_1h",
     engine,
@@ -129,4 +119,4 @@ forecast_df.to_sql(
     index=True
 )
 
-print("✅ train + forecast + save done")
+print("✅ NON-RECURSIVE hourly forecast completed")
