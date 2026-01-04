@@ -110,7 +110,8 @@ def forecast_next_hour(df, reg, FEATURES):
     next_timestamps = pd.date_range(last_ts + pd.Timedelta(seconds=1),
                                     last_ts + pd.Timedelta(hours=1),
                                     freq=freq)
-    df_pred = df.copy()
+                                    
+    df_pred = df_feat[[TARGET]].copy()  # cuma keep kolom TARGET
     preds = []
 
     for ts in next_timestamps:
@@ -124,7 +125,6 @@ def forecast_next_hour(df, reg, FEATURES):
             row[f'delta_{lag}'] = row[f'lag_{lag}'] - df_pred[TARGET].iloc[-1]
             row[f'abs_delta_{lag}'] = abs(row[f'delta_{lag}'])
 
-        # rolling stats
         row['roll_mean_5']  = df_pred[TARGET].iloc[-5:].mean()
         row['roll_std_5']   = df_pred[TARGET].iloc[-5:].std()
         row['roll_mean_30'] = df_pred[TARGET].iloc[-30:].mean()
@@ -137,7 +137,10 @@ def forecast_next_hour(df, reg, FEATURES):
 
         y_hat = reg.predict(X_row)[0]
         preds.append((ts, y_hat))
-        df_pred.loc[ts] = [y_hat]
+
+        # append prediksi ke TARGET saja
+        df_pred.loc[ts, TARGET] = y_hat
+
 
     return preds
 
