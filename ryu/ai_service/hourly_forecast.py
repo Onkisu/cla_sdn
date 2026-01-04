@@ -76,12 +76,43 @@ predictions = []
 
 print("🚀 training + direct forecasting")
 
+base = df_feat.copy()
+
+X = base[FEATURES]
+ts_last = base.index.max()
+X_last = X.iloc[-1:]
+
+predictions = []
+
 for h in range(1, FORECAST_SEC + 1):
-    df_feat[f"y_t+{h}"] = df_feat[TARGET].shift(-h)
+    y = base[TARGET].shift(-h)
 
-data = df_feat.dropna()
+    data = pd.concat([X, y.rename("y")], axis=1).dropna()
 
-X = data[FEATURES]
+    X_train = data[FEATURES]
+    y_train = data["y"]
+
+    model = xgb.XGBRegressor(
+        n_estimators=300,
+        learning_rate=0.05,
+        max_depth=3,
+        min_child_weight=5,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        objective="reg:squarederror",
+        n_jobs=-1,
+        random_state=42
+    )
+
+    model.fit(X_train, y_train, verbose=False)
+
+    y_pred = model.predict(X_last)[0]
+
+    predictions.append({
+        "ts": ts_last + timedelta(seconds=h),
+        "y_pred": y_pred
+    })
+
 
 for h in range(1, FORECAST_SEC + 1):
     y = data[f"y_t+{h}"]
