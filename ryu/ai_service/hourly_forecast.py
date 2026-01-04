@@ -106,11 +106,11 @@ def train_model(X_train, y_train):
 def forecast_next_hour(df, reg, FEATURES):
     """Forecast 1 jam ke depan"""
     last_ts = df.index[-1]
-    freq = df.index.inferred_freq or 'S'
+    freq = df.index.inferred_freq or 's'
     next_timestamps = pd.date_range(last_ts + pd.Timedelta(seconds=1),
                                     last_ts + pd.Timedelta(hours=1),
                                     freq=freq)
-                                    
+
     df_pred = df_feat[[TARGET]].copy()  # cuma keep kolom TARGET
     preds = []
 
@@ -148,8 +148,9 @@ def save_forecast(preds):
     """Simpan hasil forecast ke DB, avoid duplicate"""
     df_save = pd.DataFrame(preds, columns=['ts', 'y_pred'])
     # hapus ts yg sudah ada di DB
-    existing = pd.read_sql(f"SELECT ts FROM {TABLE_FORECAST} WHERE ts >= %s", engine, params=[df_save['ts'].min()])
+    existing = pd.read_sql(f"SELECT ts FROM {TABLE_FORECAST} WHERE ts >= %s", engine, params=(df_save['ts'].min(),) )
     df_save = df_save[~df_save['ts'].isin(existing['ts'])]
+    
     if not df_save.empty:
         df_save.to_sql(TABLE_FORECAST, engine, if_exists='append', index=False)
         print(f"✅ Forecast saved ({len(df_save)} rows)")
