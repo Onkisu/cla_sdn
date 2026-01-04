@@ -74,29 +74,33 @@ X_base = df_feat[FEATURES]
 
 predictions = []
 
-print("🚀 training + direct forecasting")
+
+print("🚀 training + direct forecasting (NON-RECURSIVE, CLEAN)")
 
 base = df_feat.copy()
-
-X = base[FEATURES]
-ts_last = base.index.max()
-X_last = X.iloc[-1:]
+X_all = base[FEATURES]
+X_last = X_all.iloc[-1:]
+ts_last = base.index[-1]
 
 predictions = []
 
 for h in range(1, FORECAST_SEC + 1):
     y = base[TARGET].shift(-h)
 
-    data = pd.concat([X, y.rename("y")], axis=1).dropna()
+    dataset = pd.concat(
+        [X_all, y.rename("y")],
+        axis=1
+    ).dropna()
 
-    X_train = data[FEATURES]
-    y_train = data["y"]
+    X_train = dataset[FEATURES]
+    y_train = dataset["y"]
 
     model = xgb.XGBRegressor(
-        n_estimators=300,
+        n_estimators=4000,              # ⬅ jangan 10k (overkill)
         learning_rate=0.05,
         max_depth=3,
         min_child_weight=5,
+        gamma=0.5,
         subsample=0.8,
         colsample_bytree=0.8,
         objective="reg:squarederror",
@@ -113,30 +117,6 @@ for h in range(1, FORECAST_SEC + 1):
         "y_pred": y_pred
     })
 
-
-for h in range(1, FORECAST_SEC + 1):
-    y = data[f"y_t+{h}"]
-
-    model = xgb.XGBRegressor(
-        n_estimators=10000,
-        learning_rate=0.01,
-        max_depth=3,
-        min_child_weight=5,
-        gamma=0.5,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        objective="reg:squarederror",
-        random_state=42
-    )
-
-    model.fit(X, y, verbose=False)
-
-    y_pred = model.predict(X_base.iloc[-1:])[0]
-
-    predictions.append({
-        "ts": ts_last + timedelta(seconds=h),
-        "y_pred": y_pred
-    })
 
 # =====================
 # SAVE FORECAST
