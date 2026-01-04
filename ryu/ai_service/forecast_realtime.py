@@ -18,8 +18,8 @@ FEATURES = (
 )
 
 BUFFER_SIZE = 50
+MIN_HISTORY = max(LAGS) + 5   # 15
 POLL_SEC    = 1
-MIN_HISTORY = max(LAGS) + 5   # safety for lag + rolling
 
 # =========================
 # LOAD MODEL
@@ -34,15 +34,15 @@ print("✅ Model loaded")
 engine = create_engine(DB_URI)
 
 # =========================
-# FETCH DATA
+# FETCH RAW DATA
 # =========================
-def fetch_latest(n=50):
+def fetch_latest(n):
     query = f"""
         WITH x AS (
             SELECT
                 date_trunc('second', timestamp) AS ts,
                 dpid,
-                max(bytes_tx) AS total_bytes
+                MAX(bytes_tx) AS total_bytes
             FROM traffic.flow_stats_
             GROUP BY ts, dpid
         )
@@ -57,14 +57,13 @@ def fetch_latest(n=50):
     """
     df = pd.read_sql(query, engine)
     df["ts"] = pd.to_datetime(df["ts"])
-    df = df.set_index("ts").sort_index()
-    return df
+    return df.set_index("ts").sort_index()
 
 # =========================
-# FEATURE BUILDER
+# FEATURE BUILDER (NO STATE)
 # =========================
-def build_features(df):
-    df = df.copy()
+def build_features(df_raw):
+    df = df_raw.copy()
 
     df["second"] = df.index.second
 
@@ -82,33 +81,28 @@ def build_features(df):
 # =========================
 # 1-STEP FORECAST
 # =========================
-def one_step_forecast(model, df_hist):
-    if len(df_hist) < MIN_HISTORY:
-        return None, None
-
-    ts_next = df_hist.index.max() + pd.Timedelta(seconds=1)
+def one_step_forecast(model, df_feat):
+    ts_next = df_feat.index.max() + pd.Timedelta(seconds=1)
     row = pd.DataFrame(index=[ts_next])
 
     row["second"] = ts_next.second
 
     for lag in LAGS:
-        row[f"lag_{lag}"] = df_hist[TARGET].iloc[-lag]
+        row[f"lag_{lag}"] = df_feat[TARGET].iloc[-lag]
 
-    row["roll_mean_5"] = df_hist[TARGET].iloc[-5:].mean()
-    row["roll_std_5"]  = df_hist[TARGET].iloc[-5:].std()
+    row["roll_mean_5"] = df_feat[TARGET].iloc[-5:].mean()
+    row["roll_std_5"]  = df_feat[TARGET].iloc[-5:].std()
 
-    row["delta_1"] = df_hist[TARGET].iloc[-1] - df_hist[TARGET].iloc[-2]
+    row["delta_1"] = df_feat[TARGET].iloc[-1] - df_feat[TARGET].iloc[-2]
     row["abs_delta_1"] = abs(row["delta_1"])
 
     y_pred = model.predict(row[FEATURES])[0]
     return ts_next, y_pred
 
 # =========================
-# INIT BUFFER
+# INIT RAW BUFFER
 # =========================
-df_rt = fetch_latest(BUFFER_SIZE)
-df_rt = build_features(df_rt)
-
+df_raw = fetch_latest(BUFFER_SIZE)
 print("🚀 Realtime forecasting started")
 
 # =========================
@@ -118,28 +112,27 @@ while True:
     try:
         new = fetch_latest(1)
 
-        if not new.empty and new.index.max() > df_rt.index.max():
-            df_rt = pd.concat([df_rt, new])
-            df_rt = df_rt.iloc[-BUFFER_SIZE:]
-            df_rt = build_features(df_rt)
+        if new.index.max() > df_raw.index.max():
+            # update RAW buffer
+            df_raw = pd.concat([df_raw, new]).iloc[-BUFFER_SIZE:]
 
-            if len(df_rt) < MIN_HISTORY:
+            # build features ON THE FLY
+            df_feat = build_features(df_raw)
+
+            if len(df_feat) < MIN_HISTORY:
                 print("⏳ waiting buffer...")
                 time.sleep(POLL_SEC)
                 continue
 
-            ts_pred, y_pred = one_step_forecast(reg, df_rt)
-            if ts_pred is None:
-                continue
-
-            last_real = df_rt[TARGET].iloc[-1]
+            ts_pred, y_pred = one_step_forecast(reg, df_feat)
+            last_real = df_feat[TARGET].iloc[-1]
 
             print(
-                f"[REAL {df_rt.index.max()}] {last_real:.0f} | "
+                f"[REAL {df_feat.index.max()}] {last_real:.0f} | "
                 f"[PRED {ts_pred}] {y_pred:.0f}"
             )
 
-            # OPTIONAL: reroute logic
+            # ===== OPTIONAL REROUTE LOGIC =====
             if y_pred > last_real * 1.05:
                 print("⚠️  POTENTIAL CONGESTION → PREPARE REROUTE")
 
