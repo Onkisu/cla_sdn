@@ -36,7 +36,7 @@ def get_forecast(ts):
         WHERE ts = %s
         LIMIT 1
     """
-    df = pd.read_sql(q, engine, params=[ts])
+    df = pd.read_sql(q, engine, params=(ts,))
     if df.empty:
         return None
     return df.iloc[0]["y_pred"]
