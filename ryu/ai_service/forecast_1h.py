@@ -8,12 +8,12 @@ from datetime import datetime, timedelta
 # =========================
 # CONFIG
 # =========================
-DB_URI = "postgresql://dev_one:hijack332.@127.0.0.1:5432/development"
-TABLE = "traffic.flow_stats_"         # ganti sesuai table asli
-TABLE_FORECAST = "forecast_1h"        # tabel untuk simpan prediksi
+DB_URI = "postgresql://dev_one:hijack332.@103.181.142.165:5432/development"
+TABLE = "traffic.flow_stats_"        # ganti sesuai table asli
+TABLE_FORECAST = "forecast_1h"       # tabel untuk simpan prediksi
 TARGET = "throughput_bps"
-LAGS = [1, 2, 3, 5, 10]           # lag fitur
-ROLL_WINDOWS = [3, 5]            # rolling window
+LAGS = [1, 2, 3, 5, 10]              # lag fitur
+ROLL_WINDOWS = [3, 5, 10]            # rolling window lebih sensitif untuk spike
 
 engine = create_engine(DB_URI)
 
@@ -24,9 +24,9 @@ def get_latest_data(hours=24):
     """Ambil 24 jam terakhir dari DB"""
     q = f"""
         WITH x AS (
-            SELECT 
-                date_trunc('second', timestamp) AS ts, 
-                dpid, 
+            SELECT
+                date_trunc('second', timestamp) AS ts,
+                dpid,
                 max(bytes_tx) AS total_bytes
             FROM {TABLE}
             GROUP BY ts, dpid
@@ -47,16 +47,14 @@ def get_latest_data(hours=24):
     return df
 
 def create_features(df):
-    """Buat fitur lag, delta, rolling, time features"""
+    """Buat fitur lag, delta, rolling, micro-change, time features"""
     df = df.copy()
 
     # Time features
     df['hour']   = df.index.hour
     df['minute'] = df.index.minute
     df['second'] = df.index.second
-    df['diff_1'] = df[TARGET] - df[TARGET].shift(1)
-    df['pct_1']  = df[TARGET].pct_change(1)
-
+    df['day']    = df.index.day
 
     # Lag & delta features
     for lag in LAGS:
@@ -68,10 +66,13 @@ def create_features(df):
     for w in ROLL_WINDOWS:
         df[f'roll_mean_{w}'] = df[TARGET].rolling(w).mean()
         df[f'roll_std_{w}']  = df[TARGET].rolling(w).std()
-        df['roll_max_3'] = df[TARGET].rolling(3).max()
-df['roll_min_3'] = df[TARGET].rolling(3).min()
-df['roll_range_3'] = df['roll_max_3'] - df['roll_min_3']
+        df[f'roll_max_{w}']  = df[TARGET].rolling(w).max()
+        df[f'roll_min_{w}']  = df[TARGET].rolling(w).min()
+        df[f'roll_range_{w}'] = df[f'roll_max_{w}'] - df[f'roll_min_{w}']
 
+    # Micro-change features
+    df['diff_1'] = df[TARGET] - df[TARGET].shift(1)
+    df['pct_1']  = df[TARGET].pct_change(1)
 
     # Buang NaN akibat lag / rolling
     df = df.dropna()
@@ -82,7 +83,11 @@ df['roll_range_3'] = df['roll_max_3'] - df['roll_min_3']
         sum([[f'delta_{l}', f'abs_delta_{l}'] for l in LAGS], []) +
         [f'roll_mean_{w}' for w in ROLL_WINDOWS] +
         [f'roll_std_{w}' for w in ROLL_WINDOWS] +
-        ['hour', 'minute', 'second']
+        [f'roll_max_{w}' for w in ROLL_WINDOWS] +
+        [f'roll_min_{w}' for w in ROLL_WINDOWS] +
+        [f'roll_range_{w}' for w in ROLL_WINDOWS] +
+        ['diff_1', 'pct_1'] +
+        ['hour', 'minute', 'second','day']
     )
     return df, FEATURES
 
@@ -108,43 +113,33 @@ def train_model(X_train, y_train):
     return reg
 
 def forecast_next_hour(df_feat, reg, FEATURES):
-    """Forecast 1 jam ke depan NON-RECURSIVE"""
-    # Ambil data terakhir 1 jam untuk forecast
-    freq = df_feat.index.inferred_freq or 's'
+    """Forecast 1 jam ke depan NON-RECURSIVE (spike-aware)"""
     last_ts = df_feat.index[-1]
+    freq = df_feat.index.inferred_freq or 's'
     next_timestamps = pd.date_range(
         last_ts + pd.Timedelta(seconds=1),
         last_ts + pd.Timedelta(hours=1),
         freq=freq
     )
 
-    # Ambil fitur dari data asli
-    # Kita pakai semua lag/rolling dari 24 jam terakhir
+    # Ambil subset terakhir sebagai test set untuk forecast
     df_pred = df_feat.copy()
-    preds = []
-
-    # Ambil subset untuk 1 jam ke depan sebagai "test set"
-    test_index = next_timestamps
-    X_test = df_pred[FEATURES].iloc[-len(test_index):]  # ambil 3600 baris terakhir
-
-    # Forecast langsung
+    X_test = df_pred[FEATURES].iloc[-len(next_timestamps):]  # gunakan data asli
     y_hat = reg.predict(X_test)
-    preds = list(zip(test_index, y_hat))
-
+    preds = list(zip(next_timestamps, y_hat))
     return preds
 
 def save_forecast(preds):
     """Simpan hasil forecast ke DB, avoid duplicate"""
     df_save = pd.DataFrame(preds, columns=['ts', 'y_pred'])
-    
-    # hapus ts yg sudah ada di DB
+
     existing = pd.read_sql(
         f"SELECT ts FROM {TABLE_FORECAST} WHERE ts >= %s",
         engine,
         params=(df_save['ts'].min(),)
     )
     df_save = df_save[~df_save['ts'].isin(existing['ts'])]
-    
+
     if not df_save.empty:
         df_save.to_sql(TABLE_FORECAST, engine, if_exists='append', index=False)
         print(f"✅ Forecast saved ({len(df_save)} rows)")
@@ -166,7 +161,7 @@ if __name__ == "__main__":
         print(f"🕒 Training model on last 24 hours ({len(X_train)} samples)...")
         reg = train_model(X_train, y_train)
 
-        print("📈 Forecasting next 1 hour...")
+        print("📈 Forecasting next 1 hour (spike-aware)...")
         preds = forecast_next_hour(df_feat, reg, FEATURES)
 
         save_forecast(preds)
