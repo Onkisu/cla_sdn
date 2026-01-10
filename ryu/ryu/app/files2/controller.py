@@ -3,6 +3,7 @@
 PURE MONITORING CONTROLLER (SMART DROPS EDITION)
 - Fix: Menghitung Drops berdasarkan saturasi Link.
 - Logic: Jika Throughput > 10 Mbps, selisihnya dianggap sebagai Packet Loss.
+- Fix Update: Insert Delta Bytes/Packets ke DB agar tidak akumulatif selamanya.
 """
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -154,20 +155,20 @@ class RealTrafficMonitor(app_manager.RyuApp):
                 # --- LOGIC BARU: HITUNG DROPS ---
                 calculated_drops = 0
                 
-                # Jika throughput melebihi kapasitas kabel (10Mbps), sisanya adalah Drops
-                # Kita gunakan threshold 9.5Mbps untuk menangkap saturasi awal
                 if throughput_bps > SAFE_THRESHOLD_BPS:
                     excess_bps = throughput_bps - LINK_CAPACITY_BPS
                     if excess_bps > 0:
-                        # Estimasi jumlah paket drop: Excess Bits / Ukuran Rata-rata Paket
-                        # Menghindari pembagian nol
                         avg_pkt_size_bits = (delta_bytes * 8) / delta_pkts if delta_pkts > 0 else 8000
                         calculated_drops = int(excess_bps / avg_pkt_size_bits)
                         
                         self.logger.warning(f"⚠️ CONGESTION DPID {dpid}: {throughput_bps/1e6:.1f} Mbps | Est. Drops: {calculated_drops}")
 
                 if throughput_bps > 1000:
-                    self.insert_stats(dpid, throughput_bps, pps, byte_count, packet_count, drops=calculated_drops)
+                    # PERBAIKAN DI SINI:
+                    # Masukkan delta_bytes dan delta_pkts, BUKAN byte_count/packet_count kumulatif.
+                    # Ini akan membuat angka di DB merepresentasikan volume per detik (atau per interval polling),
+                    # sehingga tidak terus bertambah selamanya.
+                    self.insert_stats(dpid, throughput_bps, pps, delta_bytes, delta_pkts, drops=calculated_drops)
             
             self.prev_stats[prev_key] = (byte_count, packet_count, now)
 
@@ -194,18 +195,19 @@ class RealTrafficMonitor(app_manager.RyuApp):
             
             self.prev_port_stats[key] = (current_drops, now)
 
-    def insert_stats(self, dpid, bps, pps, bytes_total, pkts_total, drops=0):
+    def insert_stats(self, dpid, bps, pps, bytes_curr, pkts_curr, drops=0):
         if not self.conn: return
         try:
             # Cegah insert drops negatif
             drops = max(0, drops)
             
+            # bytes_curr dan pkts_curr sekarang berisi nilai Delta (volume saat ini), bukan total kumulatif.
             query = """
             INSERT INTO traffic.flow_stats_real 
             (timestamp, dpid, throughput_bps, packet_rate_pps, byte_count, packet_count, dropped_count)
             VALUES (NOW(), %s, %s, %s, %s, %s, %s) 
             """
-            self.cur.execute(query, (str(dpid), bps, pps, bytes_total, pkts_total, drops))
+            self.cur.execute(query, (str(dpid), bps, pps, bytes_curr, pkts_curr, drops))
             self.conn.commit()
         except Exception as e:
             self.logger.error(f"DB Insert Error: {e}")
