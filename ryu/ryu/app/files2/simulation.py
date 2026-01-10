@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# file: sim_smart.py
+# file: sim_smart.py (VERSI: HARDCORE CONGESTION)
 
 from mininet.net import Mininet
 from mininet.node import RemoteController, OVSKernelSwitch
@@ -40,10 +40,10 @@ def traffic_logic():
     time.sleep(5)
     
     while True:
-        # Probabilitas Serangan diperbesar
+        # Kita naikkan peluang serangan biar cepat dapat data macet
         mode = random.choices(
             ['IDLE', 'NORMAL', 'ATTACK_PATTERN'], 
-            weights=[0.2, 0.4, 0.4] 
+            weights=[0.1, 0.3, 0.6] 
         )[0]
         
         info(f"\n[TRAFFIC] Mode: {mode}\n")
@@ -52,30 +52,30 @@ def traffic_logic():
             time.sleep(2)
 
         elif mode == 'NORMAL':
-            # Normal Download (Paket Besar 1400B, Rate Rendah 200pps)
-            # Bandwidth 1Mbps cukup untuk ini
-            run_itg_burst("h1", DST_IP, 1400, 50, 4000)
-            time.sleep(4)
+            # Bandwidth 0.5Mbps = 62.5 KB/s
+            # Paket 1000 Bytes x 50 pps = 50 KB/s (Hampir penuh, tapi aman)
+            run_itg_burst("h1", DST_IP, 1000, 40, 3000)
+            time.sleep(3)
 
         elif mode == 'ATTACK_PATTERN':
             # === FASE RAMP-UP (PREDIKSI) ===
-            info("   >>> ⚠️ PRE-ATTACK (Ramp Up)...\n")
-            # Naikkan perlahan agar ML sempat deteksi akselerasi
-            run_itg_burst("h3", DST_IP, 64, 200, 1000) # 200 pps
-            time.sleep(0.5)
-            run_itg_burst("h3", DST_IP, 64, 800, 1000) # 800 pps
-            time.sleep(0.5)
-            run_itg_burst("h3", DST_IP, 64, 1500, 1000) # 1500 pps
-            time.sleep(1.0)
+            info("   >>> ⚠️ PRE-ATTACK (Ramp Up)... ML Should Detect This!\n")
             
-            # === FASE CONGESTION (DROP) ===
-            info("   >>> 💥 BOOM! Congestion Hit.\n")
-            # Hajar dengan 20.000 PPS.
-            # Link 1Mbps + Queue 50 pasti JEBOL (Drops terjadi)
-            for _ in range(5):
-                run_itg_burst("h1", DST_IP, 64, 20000, 500)
-                run_itg_burst("h3", DST_IP, 64, 20000, 500)
-                time.sleep(0.4)
+            # Pola Naik Cepat
+            run_itg_burst("h3", DST_IP, 64, 200, 800)
+            time.sleep(0.5)
+            run_itg_burst("h3", DST_IP, 64, 800, 800)
+            time.sleep(0.5)
+            
+            # === FASE CONGESTION (PASTI DROP) ===
+            info("   >>> 💥 BOOM! Congestion Hit (Hardcore Mode).\n")
+            
+            # Kita serang dengan 15.000 PPS
+            # Link 0.5 Mbps + Queue 10 Packet -> PASTI JEBOL DALAM 0.1 DETIK
+            for _ in range(6):
+                run_itg_burst("h1", DST_IP, 64, 15000, 600)
+                run_itg_burst("h3", DST_IP, 64, 15000, 600)
+                time.sleep(0.5)
             
             time.sleep(2)
         
@@ -95,10 +95,10 @@ def main():
     h2 = net.addHost('h2', ip='10.0.0.2')
     h3 = net.addHost('h3', ip='10.0.0.3')
 
-    # === BAGIAN PENTING YANG DIUBAH ===
-    # Bandwidth diturunkan ke 1 Mbps (Sangat kecil)
-    # Queue Size diturunkan ke 50 paket (Cepat penuh)
-    link_opts = {'bw': 1, 'delay': '1ms', 'max_queue_size': 50}
+    # === SETTING "SEKARAT" ===
+    # Bandwidth: 0.5 Mbps (Sangat Sempit)
+    # Queue: 10 Paket (Sangat Sedikit -> Cepat Tumpah/Drop)
+    link_opts = {'bw': 0.5, 'delay': '1ms', 'max_queue_size': 10}
     
     net.addLink(s1, l1, **link_opts)
     net.addLink(s1, l2, **link_opts)
@@ -107,6 +107,8 @@ def main():
     net.addLink(h3, l1, **link_opts)
 
     net.start()
+    
+    # Receiver dinyalakan
     h2.cmd("ITGRecv > /dev/null 2>&1 &")
     
     t = threading.Thread(target=traffic_logic, daemon=True)
