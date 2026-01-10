@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-RYU CONTROLLER - SPINE LEAF MONITOR
-- Connects to DB automatically.
-- Monitors ALL switches (Spines & Leaves).
-- Captures Dropped Packets from Port Stats.
+RYU CONTROLLER - LEARNING SWITCH + MONITOR
+- Fixes Broadcast Storm using MAC Learning
+- Auto Reconnect DB
+- Captures Real Drops
 """
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub
+from ryu.lib.packet import packet, ethernet, ether_types
 import psycopg2
 import time
 
-# DB CONFIG
 DB_CONFIG = {
     'host': '103.181.142.165',
     'database': 'development',
@@ -28,6 +28,7 @@ class SpineLeafMonitor(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(SpineLeafMonitor, self).__init__(*args, **kwargs)
         self.datapaths = {}
+        self.mac_to_port = {} # TABLE MAC ADDRESS
         self.prev_stats = {} 
         self.latest_drops = {}
         self.conn = None
@@ -70,8 +71,42 @@ class SpineLeafMonitor(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
 
-        actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-        data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
+        pkt = packet.Packet(msg.data)
+        eth = pkt.get_protocols(ethernet.ethernet)[0]
+        
+        if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
+
+        dst = eth.dst
+        src = eth.src
+        dpid = datapath.id
+
+        self.mac_to_port.setdefault(dpid, {})
+        
+        # 1. BELAJAR MAC ADDRESS (Learn)
+        # "Oh, MAC sekian ada di port sekian"
+        self.mac_to_port[dpid][src] = in_port
+
+        # 2. CARI JALAN (Forwarding)
+        if dst in self.mac_to_port[dpid]:
+            out_port = self.mac_to_port[dpid][dst]
+        else:
+            out_port = ofproto.OFPP_FLOOD
+
+        actions = [parser.OFPActionOutput(out_port)]
+
+        # 3. INSTALL FLOW (Supaya packet berikutnya gak tanya controller lagi)
+        if out_port != ofproto.OFPP_FLOOD:
+            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+            # Timeout penting biar switch bisa adaptasi kalau topologi berubah
+            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+            mod = parser.OFPFlowMod(datapath=datapath, priority=1, match=match, 
+                                    idle_timeout=10, instructions=inst)
+            datapath.send_msg(mod)
+
+        # 4. KIRIM PACKET OUT
+        data = None
+        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+            data = msg.data
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
                                   in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
@@ -87,32 +122,26 @@ class SpineLeafMonitor(app_manager.RyuApp):
         datapath.send_msg(parser.OFPPortStatsRequest(datapath))
         datapath.send_msg(parser.OFPFlowStatsRequest(datapath))
 
-    # --- PORT STATS (Untuk DROP Packet) ---
+    # --- HANDLE STATS (Sama seperti sebelumnya) ---
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
         dpid = ev.msg.datapath.id
-        # Sum semua drops di semua port pada switch ini
         total_drops = sum(stat.tx_dropped for stat in ev.msg.body)
         self.latest_drops[dpid] = total_drops
 
-    # --- FLOW STATS (Untuk Throughput) ---
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
         body = ev.msg.body
         dpid = ev.msg.datapath.id
         now = time.time()
-        
         current_drops = self.latest_drops.get(dpid, 0)
 
         for stat in body:
             if stat.priority == 0: continue
-
             key = (dpid, str(stat.match))
             if key in self.prev_stats:
                 last_b, last_p, last_t, last_d = self.prev_stats[key]
                 dt = now - last_t
-                
-                # Filter noise interval
                 if dt >= 0.9: 
                     d_bytes = stat.byte_count - last_b
                     d_pkts = stat.packet_count - last_p
@@ -124,8 +153,6 @@ class SpineLeafMonitor(app_manager.RyuApp):
                     bps = int((d_bytes * 8) / dt)
                     pps = int(d_pkts / dt)
                     
-                    # LOGIC SIMPAN:
-                    # Simpan jika ada traffic signigikan ATAU ada drop
                     if bps > 1000 or d_drop > 0:
                         self.save_data(dpid, bps, pps, d_bytes, d_pkts, d_drop)
 
@@ -135,7 +162,6 @@ class SpineLeafMonitor(app_manager.RyuApp):
         if not self.conn or self.conn.closed:
             self.connect_db()
             if not self.conn: return
-
         try:
             sql = """
                 INSERT INTO traffic.flow_stats_real 
@@ -144,12 +170,7 @@ class SpineLeafMonitor(app_manager.RyuApp):
             """
             self.cur.execute(sql, (str(dpid), bps, pps, bytes_d, pkts_d, drops))
             self.conn.commit()
-            
-            if drops > 0:
-                self.logger.warning(f"🔥 SW:{dpid} CONGESTION! Drops: {drops}")
-            elif bps > 500000:
-                self.logger.info(f"💾 SW:{dpid} Saved: {bps/1e6:.2f} Mbps")
-                
+            if drops > 0: self.logger.warning(f"🔥 SW:{dpid} DROPS: {drops}")
         except Exception as e:
             self.logger.error(f"DB Insert Failed: {e}")
             self.conn.rollback()
