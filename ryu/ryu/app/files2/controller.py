@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """
-RYU REAL-TIME MONITOR FOR ML (THE TRUTH TELLER)
-Fitur:
-1. Mengambil Port Stats (Fisik) -> Wajib untuk deteksi Congestion/Drop.
-2. Mengambil Flow Stats (Logic) -> Opsional, untuk melihat siapa pelakunya.
-3. TIDAK ADA MANIPULASI SINE WAVE. Data murni apa adanya.
+RYU REAL-TIME MONITOR FOR ML (THE TRUTH TELLER) - FIXED VERSION
+Fixes:
+1. Added missing imports (CONFIG_DISPATCHER, packet, ethernet).
+2. Records REAL Port Stats for ML.
+3. Simple L2 Forwarding (Learning Switch) to keep network alive.
 """
 
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER
+# FIX 1: Tambahkan CONFIG_DISPATCHER disini
+from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub
+
+# FIX 2: Tambahkan library packet untuk forwarding logic
+from ryu.lib.packet import packet, ethernet, ether_types
+
 import psycopg2
 from datetime import datetime
 
@@ -51,7 +56,7 @@ class MLDataCollector(app_manager.RyuApp):
     def _request_stats(self, datapath):
         parser = datapath.ofproto_parser
         
-        # 1. Request Port Stats (Untuk Target Prediksi: Drops & Throughput Fisik)
+        # Request Port Stats (Target ML: Drops & Throughput Fisik)
         req = parser.OFPPortStatsRequest(datapath, 0, ofproto_v1_3.OFPP_ANY)
         datapath.send_msg(req)
 
@@ -99,6 +104,7 @@ class MLDataCollector(app_manager.RyuApp):
 
     # --- BAGIAN PACKET FORWARDING SEDERHANA ---
     # Agar ping/traffic tetap jalan (Pengganti logic switch l2/l3 simple)
+    
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
@@ -128,8 +134,8 @@ class MLDataCollector(app_manager.RyuApp):
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
 
-        # Simple Learning Switch Logic
-        # (Cukup untuk topologi spine-leaf sederhana tanpa routing kompleks)
+        # Simple Learning Switch Logic (Flood all)
+        # Cukup untuk topologi spine-leaf sederhana
         actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=msg.data)
         datapath.send_msg(out)
