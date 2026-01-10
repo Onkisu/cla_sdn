@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-PURE MONITORING CONTROLLER (DELTA STATS EDITION)
-- Byte Count & Packet Count sekarang adalah DELTA (per detik), bukan kumulatif.
-- Fix: Menghindari 'Stopping H2' dengan Safety Check Time Delta.
+PURE MONITORING CONTROLLER (ANTI-CRASH EDITION)
+- Fitur: Delta Calculation (Real-time).
+- Fix: WRAP ALL LOGIC in Try-Except agar controller tidak pernah mati (Crash Proof).
+- Fix: Integer Overflow Protection untuk Database.
 """
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -12,6 +13,7 @@ from ryu.lib import hub
 from ryu.lib.packet import packet, ethernet, ether_types
 import psycopg2
 import time
+import traceback # Penting untuk melihat error tanpa mematikan program
 
 # Credentials
 DB_CONFIG = {
@@ -22,7 +24,7 @@ DB_CONFIG = {
     'port': 5432
 }
 
-# Kapasitas Link Fisik
+# Kapasitas Link
 LINK_CAPACITY_BPS = 10000000 
 SAFE_THRESHOLD_BPS = 9500000
 
@@ -45,7 +47,7 @@ class RealTrafficMonitor(app_manager.RyuApp):
             self.cur = self.conn.cursor()
             self.logger.info("✅ Database Connected")
         except Exception as e:
-            self.logger.error(f"❌ DB Error: {e}")
+            self.logger.error(f"❌ DB Error saat Connect: {e}")
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -103,7 +105,8 @@ class RealTrafficMonitor(app_manager.RyuApp):
 
     def _monitor(self):
         while True:
-            for dp in self.datapaths.values():
+            # Gunakan list() agar thread safe saat iterasi
+            for dp in list(self.datapaths.values()):
                 self._request_stats(dp)
             hub.sleep(1) 
 
@@ -111,7 +114,7 @@ class RealTrafficMonitor(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         req = parser.OFPFlowStatsRequest(datapath)
         datapath.send_msg(req)
-        # Port stats tetap diminta untuk verifikasi drop hardware
+        # Port stats
         req_port = parser.OFPPortStatsRequest(datapath)
         datapath.send_msg(req_port)
 
@@ -124,7 +127,7 @@ class RealTrafficMonitor(app_manager.RyuApp):
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
 
-    # --- HANDLER: FLOW STATS (DELTA CALCULATION) ---
+    # --- HANDLER: FLOW STATS (ANTI-CRASH WRAPPER) ---
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
         body = ev.msg.body
@@ -132,66 +135,72 @@ class RealTrafficMonitor(app_manager.RyuApp):
         now = time.time()
         
         for stat in body:
-            # Skip flow default/LLDP agar DB tidak penuh sampah
-            if stat.priority == 0: continue 
-            
-            # Kunci unik berdasarkan switch dan match
-            match_str = str(stat.match)
-            prev_key = (dpid, match_str)
-            
-            # Data kumulatif dari switch
-            current_byte_cum = stat.byte_count
-            current_pkt_cum = stat.packet_count
-            
-            if prev_key in self.prev_stats:
-                last_bytes, last_pkts, last_time = self.prev_stats[prev_key]
-                time_delta = now - last_time
+            # TRY-EXCEPT BLOCK: Menangkap semua error agar Controller TIDAK MATI
+            try:
+                if stat.priority == 0: continue 
                 
-                # [SAFETY] Cegah Crash 'Stopping h2' akibat Time Delta terlalu kecil (Division by Zero)
-                if time_delta < 0.001: 
-                    continue
+                match_str = str(stat.match)
+                prev_key = (dpid, match_str)
                 
-                # HITUNG DELTA (Yang terjadi detik ini saja)
-                delta_bytes = current_byte_cum - last_bytes
-                delta_pkts = current_pkt_cum - last_pkts
+                current_byte_cum = stat.byte_count
+                current_pkt_cum = stat.packet_count
                 
-                # Jika delta negatif (counter reset), skip frame ini
-                if delta_bytes < 0 or delta_pkts < 0:
-                    self.prev_stats[prev_key] = (current_byte_cum, current_pkt_cum, now)
-                    continue
+                if prev_key in self.prev_stats:
+                    last_bytes, last_pkts, last_time = self.prev_stats[prev_key]
+                    time_delta = now - last_time
+                    
+                    # 1. PENGAMAN WAKTU
+                    if time_delta < 0.001: 
+                        # Update waktu saja, jangan hitung delta
+                        continue
+                    
+                    delta_bytes = current_byte_cum - last_bytes
+                    delta_pkts = current_pkt_cum - last_pkts
+                    
+                    # 2. PENGAMAN NEGATIF (Counter Reset)
+                    if delta_bytes < 0 or delta_pkts < 0:
+                        self.prev_stats[prev_key] = (current_byte_cum, current_pkt_cum, now)
+                        continue
 
-                # Hitung Throughput
-                throughput_bps = int((delta_bytes * 8) / time_delta)
-                pps = int(delta_pkts / time_delta)
-                
-                # Hitung Drops (Sama seperti logika sebelumnya)
-                calculated_drops = 0
-                if throughput_bps > SAFE_THRESHOLD_BPS:
-                    excess_bps = throughput_bps - LINK_CAPACITY_BPS
-                    if excess_bps > 0:
-                        avg_pkt_size_bits = (delta_bytes * 8) / delta_pkts if delta_pkts > 0 else 8000
-                        calculated_drops = int(excess_bps / avg_pkt_size_bits)
+                    # 3. HITUNG BANDWIDTH
+                    throughput_bps = int((delta_bytes * 8) / time_delta)
+                    pps = int(delta_pkts / time_delta)
+                    
+                    # 4. HITUNG DROPS
+                    calculated_drops = 0
+                    if throughput_bps > SAFE_THRESHOLD_BPS:
+                        excess_bps = throughput_bps - LINK_CAPACITY_BPS
+                        if excess_bps > 0:
+                            avg_pkt_size_bits = (delta_bytes * 8) / delta_pkts if delta_pkts > 0 else 8000
+                            calculated_drops = int(excess_bps / avg_pkt_size_bits)
+                            
+                            self.logger.warning(f"⚠️ DPID {dpid}: {throughput_bps/1e6:.1f} Mbps | Drops: {calculated_drops}")
+
+                    if throughput_bps > 1000:
+                        # 5. PENGAMAN INTEGER OVERFLOW (Penting buat Database!)
+                        # Postgres Integer max 2.14 Milyar. Kalau error math bikin angka triliunan, database crash.
+                        if throughput_bps > 2000000000: 
+                             throughput_bps = 2000000000 # Cap di 2Gbps biar ga crash DB
                         
-                        self.logger.warning(f"⚠️ CONGESTION DPID {dpid}: {throughput_bps/1e6:.1f} Mbps | Est. Drops: {calculated_drops}")
+                        self.insert_stats(
+                            dpid, 
+                            throughput_bps, 
+                            pps, 
+                            delta_bytes, 
+                            delta_pkts, 
+                            drops=calculated_drops
+                        )
+                
+                # Update state
+                self.prev_stats[prev_key] = (current_byte_cum, current_pkt_cum, now)
 
-                # Hanya simpan ke DB jika ada traffic signifikan
-                if throughput_bps > 1000:
-                    # [PERUBAHAN UTAMA]
-                    # Disini kita kirim 'delta_bytes' dan 'delta_pkts' ke Database
-                    # BUKAN 'current_byte_cum' dan 'current_pkt_cum'
-                    self.insert_stats(
-                        dpid, 
-                        throughput_bps, 
-                        pps, 
-                        delta_bytes,   # <--- Pake Delta
-                        delta_pkts,    # <--- Pake Delta
-                        drops=calculated_drops
-                    )
-            
-            # Simpan state untuk perbandingan berikutnya
-            self.prev_stats[prev_key] = (current_byte_cum, current_pkt_cum, now)
+            except Exception as e:
+                # INI KUNCINYA: Kalau ada error, PRINT saja, JANGAN CRASH
+                print(f"!!! CAUGHT EXCEPTION in Switch {dpid}: {e}")
+                # traceback.print_exc() # Uncomment kalau mau lihat detail error codingan
+                continue # Lanjut ke flow berikutnya
 
-    # --- HANDLER: PORT STATS ---
+    # --- HANDLER: PORT STATS (ANTI-CRASH) ---
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
         body = ev.msg.body
@@ -199,28 +208,34 @@ class RealTrafficMonitor(app_manager.RyuApp):
         now = time.time()
         
         for stat in body:
-            port_no = stat.port_no
-            # Port stats drop sifatnya kumulatif, kita hitung deltanya
-            current_drops = stat.tx_dropped + stat.rx_dropped
-            key = (dpid, port_no)
-            
-            if key in self.prev_port_stats:
-                last_drops, last_time = self.prev_port_stats[key]
-                delta_drops = current_drops - last_drops
+            try:
+                port_no = stat.port_no
+                current_drops = stat.tx_dropped + stat.rx_dropped
+                key = (dpid, port_no)
                 
-                if delta_drops > 0:
-                    self.logger.warning(f"HARDWARE DROP on Switch {dpid}: {delta_drops} pkts")
-                    # Insert hanya drops, throughput 0 karena sudah dihandle flow stats
-                    self.insert_stats(dpid, 0, 0, 0, 0, drops=delta_drops)
-            
-            self.prev_port_stats[key] = (current_drops, now)
+                if key in self.prev_port_stats:
+                    last_drops, last_time = self.prev_port_stats[key]
+                    delta_drops = current_drops - last_drops
+                    
+                    if delta_drops > 0:
+                        self.logger.warning(f"HARDWARE DROP on Switch {dpid}: {delta_drops} pkts")
+                        self.insert_stats(dpid, 0, 0, 0, 0, drops=delta_drops)
+                
+                self.prev_port_stats[key] = (current_drops, now)
+            except Exception as e:
+                print(f"!!! Error in Port Stats: {e}")
 
     def insert_stats(self, dpid, bps, pps, bytes_delta, pkts_delta, drops=0):
-        if not self.conn: return
+        # Cek koneksi DB sebelum eksekusi
+        if not self.conn or not self.cur: 
+            # Coba reconnect silent
+            try:
+                self.connect_db()
+            except:
+                return
+
         try:
             drops = max(0, drops)
-            
-            # Query tetap sama, tapi data yang masuk sekarang adalah Delta
             query = """
             INSERT INTO traffic.flow_stats_real 
             (timestamp, dpid, throughput_bps, packet_rate_pps, byte_count, packet_count, dropped_count)
@@ -229,11 +244,6 @@ class RealTrafficMonitor(app_manager.RyuApp):
             self.cur.execute(query, (str(dpid), bps, pps, bytes_delta, pkts_delta, drops))
             self.conn.commit()
         except Exception as e:
-            # Jika koneksi putus, coba reconnect sekali
-            self.logger.error(f"DB Insert Error: {e}")
+            # Print error DB tapi jangan crash controller
+            print(f"!!! DB Insert Failed: {e}")
             self.conn.rollback()
-            try:
-                self.conn = psycopg2.connect(**DB_CONFIG)
-                self.cur = self.conn.cursor()
-            except:
-                pass
