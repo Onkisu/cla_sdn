@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-CHAOS TOPOLOGY & TRAFFIC GEN - STATE MACHINE EDITION
-- Logic: Finite State Machine (Markov Chain-like)
-- Flow: NORMAL <-> RAMP_UP -> CONGESTION -> RECOVERY -> NORMAL
-- Purpose: Create learnable patterns for AI Forecasting
+VOIP SPECIALIZED TOPOLOGY
+- Scenario: Small Office VoIP Trunk (h1) vs UDP Flood (h3)
+- VoIP Spec: G.711 Codec (64kbps + overhead ~ 87kbps), 50 pps/call.
+- Link: 10 Mbps (Bottleneck).
 """
 from mininet.net import Mininet
 from mininet.node import OVSSwitch, RemoteController
@@ -14,12 +14,17 @@ import time
 import random
 import threading
 
-LINK_BW_MBPS = 10 
+# KONFIGURASI LINK
+LINK_BW_MBPS = 10
+# VoIP Buffer harus KECIL. 
+# Jika buffer besar, suara jadi delay/robot. Jika kecil, suara putus-putus.
+# Kita set 20 paket (sangat ketat) agar simulasi drop lebih cepat terjadi.
+QUEUE_SIZE = 20 
 
 def traffic_generator(net):
-    h1 = net.get('h1') 
-    h2 = net.get('h2') 
-    h3 = net.get('h3') # Attacker
+    h1 = net.get('h1') # VOIP TRUNK (Korban)
+    h2 = net.get('h2') # VOIP SERVER (Tujuan)
+    h3 = net.get('h3') # ATTACKER
     
     dst_ip = h2.IP()
     
@@ -28,65 +33,69 @@ def traffic_generator(net):
     h2.cmd('ITGRecv -l /dev/null &') 
     time.sleep(2)
     
-    info("*** Starting Continuous VoIP from h1 (Normal User)...\n")
-    h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 3600000 &')
+    # --- 1. SETTING VOIP NORMAL (h1) ---
+    # Simulasi: 20 Concurrent Calls (Kantor sedang sibuk)
+    # Spec G.711: 50 pps/call x 20 calls = 1000 pps
+    # Size: 172 bytes (160 payload + 12 RTP header)
+    info("*** Starting VoIP Trunk (20 Active Calls) from h1...\n")
+    h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 172 -C 1000 -t 3600000 &')
 
-    info("*** Starting SMART CHAOS Generator on h3...\n")
+    info("*** Starting SMART ATTACK Generator on h3...\n")
     
-    # INITIAL STATE
     current_state = "NORMAL"
     
     while True:
-        # --- STATE MACHINE LOGIC ---
-        # Logika transisi bertahap agar AI bisa melihat 'Acceleration'
-        
-        next_state = current_state # Default tetap
+        next_state = current_state
         prob = random.random()
         
+        # --- STATE MACHINE KHUSUS VOIP ---
+        # VoIP sangat sensitif. Gangguan sedikit saja (Ramp Up) sudah menurunkan MOS (Mean Opinion Score).
+        
         if current_state == "NORMAL":
-            # 80% Stay Normal, 20% go to RAMP_UP
+            # 80% Aman, 20% mulai ada gangguan
             if prob > 0.8: next_state = "RAMP_UP"
             
-            pps = random.randint(500, 2000) # ~1 Mbps
+            # Trafik Background (Browsing biasa, paket besar, rate rendah)
+            pkt_size = 1000 
+            pps = random.randint(100, 300) 
             duration = random.randint(10, 20)
             
         elif current_state == "RAMP_UP":
-            # 50% Back to Normal (False Alarm), 50% Attack (Congestion)
-            if prob > 0.5: 
-                next_state = "CONGESTION_SPIKE"
-            else:
-                next_state = "NORMAL"
+            # Fase ini mensimulasikan "Video Streaming" masuk ke jaringan
+            if prob > 0.6: next_state = "CONGESTION_SPIKE"
+            else: next_state = "NORMAL"
             
-            # Rate naik signifikan (Pattern Recognition Opportunity)
-            pps = random.randint(4000, 7000) # ~4-5 Mbps
-            duration = random.randint(5, 10) # Singkat, fase transisi
+            pkt_size = 1400 # Paket Video (Besar)
+            pps = random.randint(500, 800) # ~6-8 Mbps
+            duration = random.randint(5, 10)
             
         elif current_state == "CONGESTION_SPIKE":
-            # Harus Cooling Down setelah Spike
+            # ATTACK: UDP FLOOD (Small Packets)
+            # Ini musuh alami VoIP. Paket kecil membanjiri antrian switch (PPS tinggi).
             next_state = "COOLING_DOWN"
             
-            # Rate Meledak (> Link Capacity)
-            pps = random.randint(9000, 13000) # ~8-10 Mbps (Packet Loss Area)
-            duration = random.randint(5, 8) 
+            pkt_size = 64 # Minimum packet size (Sangat jahat untuk CPU switch)
+            # Link 10Mbps / 64 bytes ~= 19.000 PPS Max Theoretical
+            # Kita hajar di 15.000 PPS agar switch 'choke'
+            pps = random.randint(12000, 15000) 
+            duration = random.randint(4, 7) 
             
         elif current_state == "COOLING_DOWN":
             next_state = "NORMAL"
-            pps = random.randint(1000, 3000)
+            pkt_size = 500
+            pps = random.randint(200, 500)
             duration = random.randint(5, 10)
 
-        info(f"[SMART GEN] State: {current_state} -> {next_state} | Rate: {pps} pps | Dur: {duration}s\n")
+        info(f"[VOIP GEN] State: {current_state} | PktSize: {pkt_size}B | Rate: {pps} pps | Dur: {duration}s\n")
         
-        # Eksekusi Traffic
-        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 100 -C {pps} -t {duration*1000} -l /dev/null')
+        # Eksekusi Attack
+        # -l /dev/null agar log tidak memenuhi disk
+        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c {pkt_size} -C {pps} -t {duration*1000} -l /dev/null')
         
-        # Update State untuk putaran berikutnya
         current_state = next_state
-        
-        # Jeda minimal agar DB bisa mencatat row per detik
-        time.sleep(1)
+        time.sleep(0.5)
 
 def run():
-    # ... (Bagian Topology Tetap Sama seperti file asli Anda) ...
     net = Mininet(controller=RemoteController, switch=OVSSwitch, link=TCLink)
     
     info("*** Adding Controller\n")
@@ -94,22 +103,24 @@ def run():
 
     info("*** Adding Switches\n")
     s1 = net.addSwitch('s1', dpid='1')
-    l1 = net.addSwitch('l1', dpid='2') # Connects to h1, h2
-    l2 = net.addSwitch('l2', dpid='3') # Connects to h3
+    l1 = net.addSwitch('l1', dpid='2') 
+    l2 = net.addSwitch('l2', dpid='3') 
 
     info("*** Adding Hosts\n")
     h1 = net.addHost('h1', ip='10.0.0.1')
     h2 = net.addHost('h2', ip='10.0.0.2')
     h3 = net.addHost('h3', ip='10.0.0.3')
 
-    info("*** Creating Links\n")
+    info("*** Creating Links (VoIP Optimized)\n")
     net.addLink(s1, l1, bw=100)
     net.addLink(s1, l2, bw=100)
     
-    # Bottleneck links
-    net.addLink(h1, l1, bw=LINK_BW_MBPS, max_queue_size=100) 
-    net.addLink(h2, l1, bw=LINK_BW_MBPS, max_queue_size=100) 
-    net.addLink(h3, l2, bw=LINK_BW_MBPS, max_queue_size=100)
+    # Bottleneck Links
+    # max_queue_size diperkecil ke 20 untuk simulasi realitas VoIP:
+    # "Lebih baik drop paket daripada delay lama (bufferbloat)"
+    net.addLink(h1, l1, bw=LINK_BW_MBPS, max_queue_size=QUEUE_SIZE) 
+    net.addLink(h2, l1, bw=LINK_BW_MBPS, max_queue_size=QUEUE_SIZE) 
+    net.addLink(h3, l2, bw=LINK_BW_MBPS, max_queue_size=QUEUE_SIZE)
 
     info("*** Starting Network\n")
     net.start()
