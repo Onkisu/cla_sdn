@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""
-DEBUG CONTROLLER - VERBOSE MODE
-- Mencetak SEMUA Error ke terminal.
-- Test Koneksi DB saat start.
-- Test Baca File Kernel saat start.
-"""
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISPATCHER, set_ev_cls
@@ -14,9 +8,8 @@ import psycopg2
 import time
 import os
 import sys
-import traceback
 
-# --- CONFIG ---
+# CONFIG
 DB_CONFIG = {
     'host': '103.181.142.165',
     'database': 'development',
@@ -25,78 +18,49 @@ DB_CONFIG = {
     'port': 5432
 }
 
-# Mapping sesuai 'ip link' yang lu kirim
-INTERFACE_MAP = {
-    2: { 2: 'l1-eth2', 3: 'l1-eth3' }, # l1-eth3 adalah target victim
-    3: { 2: 'l2-eth2' }
-}
+# HARDCODED INTERFACE TARGET
+# Kita cuma peduli sama link yang macet: l1-eth3
+TARGET_INTERFACE = "l1-eth3" 
+TARGET_DPID = 2
 
-class DebugController(app_manager.RyuApp):
+class FixedController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
-        super(DebugController, self).__init__(*args, **kwargs)
+        super(FixedController, self).__init__(*args, **kwargs)
         self.datapaths = {}
         self.prev_stats = {}      
-        self.prev_kernel_drops = {} 
+        self.prev_kernel_drops = 0
         self.monitor_thread = hub.spawn(self._monitor)
         self.conn = None
         self.cur = None
         
-        # 1. TEST KONEKSI DB LANGSUNG SAAT START
-        print("\n--- [STARTUP CHECK] DIAGNOSIS MULAI ---")
-        self.connect_db(verbose=True)
-        
-        # 2. TEST BACA FILE SYSTEM
-        print(f"--- [SYSTEM CHECK] Cek akses file kernel (Harus run as ROOT/SUDO) ---")
+        print("\n🚀 CONTROLLER STARTED. INITIATING SYSTEMS...")
+        self.connect_db()
         self.check_file_access()
-        print("--- [STARTUP CHECK] SELESAI ---\n")
 
-    def connect_db(self, verbose=False):
+    def connect_db(self):
         try:
             self.conn = psycopg2.connect(**DB_CONFIG)
             self.cur = self.conn.cursor()
-            if verbose:
-                print("✅ DB CONNECT: SUKSES!")
-                # Coba insert dummy row sebentar terus rollback buat ngecek permission table
-                try:
-                    self.cur.execute("SELECT 1")
-                    print("✅ DB QUERY TEST: SUKSES (SELECT 1)")
-                except Exception as e:
-                    print(f"❌ DB QUERY ERROR: {e}")
+            print("✅ DATABASE: CONNECTED")
         except Exception as e:
-            print(f"❌ DB CONNECT ERROR: {e}")
-            print("!!! PASTIKAN IP, PASSWORD, DAN USERNAME BENAR !!!")
-            # Jangan exit, biar ryu tetap jalan, tapi log error
-            
+            print(f"❌ DATABASE: FAILED ({e})")
+
     def check_file_access(self):
-        # Cek salah satu interface target
-        target = "/sys/class/net/l1-eth3/statistics/tx_dropped"
-        if os.path.exists(target):
-            try:
-                with open(target, 'r') as f:
-                    val = f.read().strip()
-                print(f"✅ FILE ACCESS: SUKSES baca {target}. Nilai saat ini: {val}")
-            except PermissionError:
-                print(f"❌ FILE ACCESS: PERMISSION DENIED! Jalankan ryu-manager pakai SUDO!")
-            except Exception as e:
-                print(f"❌ FILE ACCESS ERROR: {e}")
-        else:
-            print(f"⚠️ WARNING: File {target} tidak ditemukan. (Mungkin Mininet belum start?)")
-            print("   -> Ini normal jika Mininet belum jalan. Nanti controller akan retry otomatis.")
+        path = f"/sys/class/net/{TARGET_INTERFACE}/statistics/tx_dropped"
+        # Kita tunggu file ini muncul (karena Mininet mungkin baru start belakangan)
+        print(f"🔍 Waiting for interface {TARGET_INTERFACE}...")
 
-    def get_linux_drops(self, interface_name):
-        path = f"/sys/class/net/{interface_name}/statistics/tx_dropped"
+    def get_real_drops(self):
+        # BACA LANGSUNG DARI FILE KERNEL
+        path = f"/sys/class/net/{TARGET_INTERFACE}/statistics/tx_dropped"
         try:
-            if os.path.exists(path):
-                with open(path, 'r') as f:
-                    return int(f.read().strip())
-        except Exception as e:
-            # Print error cuma sekali biar log gak banjir
-            pass
-        return 0
+            with open(path, 'r') as f:
+                return int(f.read().strip())
+        except:
+            return 0 # Kalau file belum ada (mininet belum start), return 0
 
-    # --- RYU EVENT HANDLERS ---
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
@@ -104,13 +68,10 @@ class DebugController(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
-        self.add_flow(datapath, 0, match, actions)
-
-    def add_flow(self, datapath, priority, match, actions):
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+        
+        # Install Table-Miss Flow
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-        mod = parser.OFPFlowMod(datapath=datapath, priority=priority, match=match, instructions=inst)
+        mod = parser.OFPFlowMod(datapath=datapath, priority=0, match=match, instructions=inst)
         datapath.send_msg(mod)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -147,16 +108,15 @@ class DebugController(app_manager.RyuApp):
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
 
-    # --- STATS REPLY DENGAN PRINT ERROR ---
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
         body = ev.msg.body
         dpid = ev.msg.datapath.id
         now = time.time()
-
+        
+        # AGGREGATE THROUGHPUT
         total_bytes = 0
         total_pkts = 0
-        
         for stat in body:
             if stat.priority == 0: continue
             total_bytes += stat.byte_count
@@ -167,67 +127,47 @@ class DebugController(app_manager.RyuApp):
             last_bytes, last_pkts, last_time = self.prev_stats[key]
             time_delta = now - last_time
             
-            if time_delta >= 0.5: 
+            if time_delta >= 0.5:
+                # HITUNG SPEED
                 delta_bytes = total_bytes - last_bytes
                 delta_pkts = total_pkts - last_pkts
-                
-                throughput_bps = int((delta_bytes * 8) / time_delta)
+                bps = int((delta_bytes * 8) / time_delta)
                 pps = int(delta_pkts / time_delta)
-                if throughput_bps > 2000000000: throughput_bps = 2000000000
+                if bps > 2000000000: bps = 2000000000 # Sanity check
 
-                # === CEK DROP KERNEL ===
-                real_drops = 0
-                if dpid in INTERFACE_MAP:
-                    for port_no, iface_name in INTERFACE_MAP[dpid].items():
-                        current_kernel_drop = self.get_linux_drops(iface_name)
-                        
-                        drop_key = (dpid, iface_name)
-                        if drop_key in self.prev_kernel_drops:
-                            last_k_drop = self.prev_kernel_drops[drop_key]
-                            diff = current_kernel_drop - last_k_drop
-                            
-                            if diff > 0:
-                                real_drops += diff
-                                print(f"🔥 [KERNEL] DROP on {iface_name}: {diff} pkts")
-                        
-                        self.prev_kernel_drops[drop_key] = current_kernel_drop
-                
-                # INSERT KE DB
-                if throughput_bps > 1000 or real_drops > 0:
-                    self.insert_stats(dpid, throughput_bps, pps, delta_bytes, delta_pkts, drops=real_drops)
-                
+                # HITUNG DROPS (KHUSUS SWITCH 2 / l1)
+                delta_drop = 0
+                if dpid == TARGET_DPID:
+                    curr_drop = self.get_real_drops()
+                    delta_drop = curr_drop - self.prev_kernel_drops
+                    
+                    if delta_drop > 0:
+                        print(f"🔥 KERNEL DROP DETECTED: {delta_drop} packets!")
+                    
+                    self.prev_kernel_drops = curr_drop
+
+                # INSERT DB
+                if bps > 1000 or delta_drop > 0:
+                    self.insert_db(dpid, bps, pps, delta_bytes, delta_pkts, delta_drop)
+
                 self.prev_stats[key] = (total_bytes, total_pkts, now)
         else:
             self.prev_stats[key] = (total_bytes, total_pkts, now)
-            if dpid in INTERFACE_MAP:
-                for port_no, iface_name in INTERFACE_MAP[dpid].items():
-                    drop_key = (dpid, iface_name)
-                    self.prev_kernel_drops[drop_key] = self.get_linux_drops(iface_name)
+            if dpid == TARGET_DPID:
+                self.prev_kernel_drops = self.get_real_drops()
 
-    def insert_stats(self, dpid, bps, pps, bytes_delta, pkts_delta, drops=0):
-        # Kalau DB mati, coba connect lagi (VERBOSE)
+    def insert_db(self, dpid, bps, pps, b_delta, p_delta, drops):
         if not self.conn or self.conn.closed:
-            print(f"⚠️ DB Koneksi putus, mencoba reconnect...")
-            self.connect_db(verbose=True)
-            if not self.conn or self.conn.closed:
-                print("❌ Gagal Reconnect DB.")
-                return
-
+            self.connect_db()
         try:
             drops = max(0, drops)
-            query = """
-            INSERT INTO traffic.flow_stats_real
-            (timestamp, dpid, throughput_bps, packet_rate_pps, byte_count, packet_count, dropped_count)
-            VALUES (NOW(), %s, %s, %s, %s, %s, %s)
-            """
-            self.cur.execute(query, (str(dpid), bps, pps, bytes_delta, pkts_delta, drops))
+            query = """INSERT INTO traffic.flow_stats_real 
+            (timestamp, dpid, throughput_bps, packet_rate_pps, byte_count, packet_count, dropped_count) 
+            VALUES (NOW(), %s, %s, %s, %s, %s, %s)"""
+            self.cur.execute(query, (str(dpid), bps, pps, b_delta, p_delta, drops))
             self.conn.commit()
-            
-            # --- DEBUG SUKSES INSERT ---
-            # Print dot (.) setiap berhasil insert biar gak nyepam, tapi tau script jalan
-            print(".", end="", flush=True) 
-            
-        except Exception as e:
+            # Feedback visual biar lu tau dia kerja
+            sys.stdout.write(".")
+            sys.stdout.flush()
+        except Exception:
             if self.conn: self.conn.rollback()
-            print(f"\n❌ ERROR INSERT DB: {e}")
-            # print(traceback.format_exc()) # Uncomment kalau mau detail banget
