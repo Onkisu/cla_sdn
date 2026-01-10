@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-PURE HARDWARE CONTROLLER (STABLE)
-- Source: Hardware Counters (tx_dropped)
-- Safety: Integer Overflow Protection (> 2 Miliar BPS capped)
+THE KERNEL BYPASS CONTROLLER (CONFIGURED FOR YOUR PC)
+- Throughput: Dari OpenFlow (OVS)
+- Drops: BACA LANGSUNG DARI FILE LINUX (/sys/class/net/...)
+- Target: Interface l1-eth3 (Victim Link)
 """
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -12,8 +13,9 @@ from ryu.lib import hub
 from ryu.lib.packet import packet, ethernet, ether_types
 import psycopg2
 import time
+import os
 
-# Credentials
+# CONFIG DATABASE
 DB_CONFIG = {
     'host': '103.181.142.165',
     'database': 'development',
@@ -22,15 +24,27 @@ DB_CONFIG = {
     'port': 5432
 }
 
-class RealTrafficMonitor(app_manager.RyuApp):
+# --- MAPPING REAL DARI IP LINK ANDA ---
+INTERFACE_MAP = {
+    # DPID 2 = Switch l1
+    2: { 
+        2: 'l1-eth2',  # Port 2 -> Ke h1 (VoIP User)
+        3: 'l1-eth3'   # Port 3 -> Ke h2 (VICTIM) -> SUMBER DROP
+    },
+    # DPID 3 = Switch l2
+    3: {
+        2: 'l2-eth2'   # Port 2 -> Ke h3 (Attacker)
+    }
+}
+
+class KernelMonitor(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
-        super(RealTrafficMonitor, self).__init__(*args, **kwargs)
+        super(KernelMonitor, self).__init__(*args, **kwargs)
         self.datapaths = {}
-        self.mac_to_port = {}
-        self.prev_stats = {}
-        self.prev_port_stats = {}
+        self.prev_stats = {}      
+        self.prev_kernel_drops = {} 
         self.monitor_thread = hub.spawn(self._monitor)
         self.conn = None
         self.cur = None
@@ -44,6 +58,19 @@ class RealTrafficMonitor(app_manager.RyuApp):
         except Exception as e:
             self.logger.error(f"❌ DB Error: {e}")
 
+    # --- FUNGSI BACA KERNEL (THE MAGIC) ---
+    def get_linux_drops(self, interface_name):
+        """Baca langsung file system Linux."""
+        try:
+            path = f"/sys/class/net/{interface_name}/statistics/tx_dropped"
+            if os.path.exists(path):
+                with open(path, 'r') as f:
+                    return int(f.read().strip())
+        except Exception:
+            return 0
+        return 0
+
+    # --- STANDARD OPENFLOW SETUP ---
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
@@ -67,30 +94,18 @@ class RealTrafficMonitor(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
-        
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
         if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
         
-        dpid = datapath.id
-        self.mac_to_port.setdefault(dpid, {})
-        self.mac_to_port[dpid][eth.src] = in_port
-        
-        if eth.dst in self.mac_to_port[dpid]:
-            out_port = self.mac_to_port[dpid][eth.dst]
-        else:
-            out_port = ofproto.OFPP_FLOOD
-            
-        actions = [parser.OFPActionOutput(out_port)]
-        if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=eth.dst, eth_src=eth.src)
-            self.add_flow(datapath, 1, match, actions)
-            
+        # Simple L2 Switch
+        actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER: data = msg.data
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
 
+    # --- MONITOR LOOP ---
     def _monitor(self):
         while True:
             for dp in list(self.datapaths.values()):
@@ -101,8 +116,6 @@ class RealTrafficMonitor(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         req = parser.OFPFlowStatsRequest(datapath)
         datapath.send_msg(req)
-        req_port = parser.OFPPortStatsRequest(datapath)
-        datapath.send_msg(req_port)
 
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def _state_change_handler(self, ev):
@@ -113,75 +126,68 @@ class RealTrafficMonitor(app_manager.RyuApp):
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
 
-    # --- 1. FLOW STATS (ANTI CRASH ENABLED) ---
+    # --- MAIN LOGIC ---
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
         body = ev.msg.body
         dpid = ev.msg.datapath.id
         now = time.time()
 
+        total_bytes = 0
+        total_pkts = 0
+        
         for stat in body:
-            try:
-                if stat.priority == 0: continue
-                match_str = str(stat.match)
-                prev_key = (dpid, match_str)
+            if stat.priority == 0: continue
+            total_bytes += stat.byte_count
+            total_pkts += stat.packet_count
+
+        key = dpid
+        if key in self.prev_stats:
+            last_bytes, last_pkts, last_time = self.prev_stats[key]
+            time_delta = now - last_time
+            
+            if time_delta >= 0.5: 
+                delta_bytes = total_bytes - last_bytes
+                delta_pkts = total_pkts - last_pkts
                 
-                current_byte_cum = stat.byte_count
-                current_pkt_cum = stat.packet_count
+                # Hitung Throughput
+                throughput_bps = int((delta_bytes * 8) / time_delta)
+                pps = int(delta_pkts / time_delta)
+                if throughput_bps > 2000000000: throughput_bps = 2000000000
 
-                if prev_key in self.prev_stats:
-                    last_bytes, last_pkts, last_time = self.prev_stats[prev_key]
-                    time_delta = now - last_time
-
-                    if time_delta < 0.001: continue
-
-                    delta_bytes = current_byte_cum - last_bytes
-                    delta_pkts = current_pkt_cum - last_pkts
-
-                    if delta_bytes < 0 or delta_pkts < 0:
-                        self.prev_stats[prev_key] = (current_byte_cum, current_pkt_cum, now)
-                        continue
-
-                    throughput_bps = int((delta_bytes * 8) / time_delta)
-                    pps = int(delta_pkts / time_delta)
-                    
-                    # === PROTEKSI ANTI CRASH ===
-                    # Mencegah Integer Overflow ke Postgres
-                    if throughput_bps > 2000000000: throughput_bps = 2000000000
-
-                    if throughput_bps > 1000:
-                        # Drops = 0 disini, karena Flow Stats tidak bisa lihat drops
-                        self.insert_stats(dpid, throughput_bps, pps, delta_bytes, delta_pkts, drops=0)
-
-                self.prev_stats[prev_key] = (current_byte_cum, current_pkt_cum, now)
-            except Exception:
-                continue
-
-    # --- 2. PORT STATS (REAL HARDWARE DROPS) ---
-    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
-    def _port_stats_reply_handler(self, ev):
-        body = ev.msg.body
-        dpid = ev.msg.datapath.id
-        now = time.time()
-
-        for stat in body:
-            try:
-                port_no = stat.port_no
-                # tx_dropped: Paket dibuang karena antrian penuh
-                current_drops = stat.tx_dropped + stat.tx_errors 
-                key = (dpid, port_no)
-
-                if key in self.prev_port_stats:
-                    last_drops, last_time = self.prev_port_stats[key]
-                    delta_drops = current_drops - last_drops
-
-                    if delta_drops > 0:
-                        self.logger.warning(f"❌ REAL DROP on Switch {dpid}: {delta_drops} pkts")
-                        self.insert_stats(dpid, 0, 0, 0, 0, drops=delta_drops)
-
-                self.prev_port_stats[key] = (current_drops, now)
-            except Exception:
-                pass
+                # === KERNEL DROP CHECKER ===
+                real_drops = 0
+                
+                if dpid in INTERFACE_MAP:
+                    for port_no, iface_name in INTERFACE_MAP[dpid].items():
+                        
+                        # 1. BACA DROP DARI LINUX
+                        current_kernel_drop = self.get_linux_drops(iface_name)
+                        
+                        # 2. HITUNG DELTA
+                        drop_key = (dpid, iface_name)
+                        if drop_key in self.prev_kernel_drops:
+                            last_k_drop = self.prev_kernel_drops[drop_key]
+                            diff = current_kernel_drop - last_k_drop
+                            
+                            if diff > 0:
+                                real_drops += diff
+                                self.logger.info(f"🔥 DROP on {iface_name}: {diff} pkts (Load: {throughput_bps/1e6:.1f} Mbps)")
+                        
+                        self.prev_kernel_drops[drop_key] = current_kernel_drop
+                
+                # INSERT KE DB
+                if throughput_bps > 1000 or real_drops > 0:
+                    self.insert_stats(dpid, throughput_bps, pps, delta_bytes, delta_pkts, drops=real_drops)
+                
+                self.prev_stats[key] = (total_bytes, total_pkts, now)
+        else:
+            self.prev_stats[key] = (total_bytes, total_pkts, now)
+            # Init Kernel Drops juga saat pertama kali
+            if dpid in INTERFACE_MAP:
+                for port_no, iface_name in INTERFACE_MAP[dpid].items():
+                    drop_key = (dpid, iface_name)
+                    self.prev_kernel_drops[drop_key] = self.get_linux_drops(iface_name)
 
     def insert_stats(self, dpid, bps, pps, bytes_delta, pkts_delta, drops=0):
         if not self.conn or self.conn.closed:
