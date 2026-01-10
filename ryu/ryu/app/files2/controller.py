@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-PURE MONITORING CONTROLLER (REALISTIC DROPS EDITION)
-- Fix: Logic Drop dihitung saat saturasi (>90% usage).
-- Fitur: Menangkap Port Stats (Hardware Drop) lebih agresif.
+PURE HARDWARE CONTROLLER (STABLE)
+- Source: Hardware Counters (tx_dropped)
+- Safety: Integer Overflow Protection (> 2 Miliar BPS capped)
 """
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -12,7 +12,6 @@ from ryu.lib import hub
 from ryu.lib.packet import packet, ethernet, ether_types
 import psycopg2
 import time
-import random # Ditambahkan untuk jitter/simulasi drop jika hardware silent
 
 # Credentials
 DB_CONFIG = {
@@ -22,10 +21,6 @@ DB_CONFIG = {
     'password': 'hijack332.',
     'port': 5432
 }
-
-# Kapasitas Link
-LINK_CAPACITY_BPS = 10000000 # 10 Mbps
-SATURATION_THRESHOLD = LINK_CAPACITY_BPS * 0.75 # 7.5 Mbps
 
 class RealTrafficMonitor(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -47,7 +42,7 @@ class RealTrafficMonitor(app_manager.RyuApp):
             self.cur = self.conn.cursor()
             self.logger.info("✅ Database Connected")
         except Exception as e:
-            self.logger.error(f"❌ DB Error saat Connect: {e}")
+            self.logger.error(f"❌ DB Error: {e}")
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -72,35 +67,28 @@ class RealTrafficMonitor(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
-        dpid = datapath.id
-
+        
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
-
         if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
-
-        dst = eth.dst
-        src = eth.src
-
+        
+        dpid = datapath.id
         self.mac_to_port.setdefault(dpid, {})
-        self.mac_to_port[dpid][src] = in_port
-
-        if dst in self.mac_to_port[dpid]:
-            out_port = self.mac_to_port[dpid][dst]
+        self.mac_to_port[dpid][eth.src] = in_port
+        
+        if eth.dst in self.mac_to_port[dpid]:
+            out_port = self.mac_to_port[dpid][eth.dst]
         else:
             out_port = ofproto.OFPP_FLOOD
-
+            
         actions = [parser.OFPActionOutput(out_port)]
-
         if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+            match = parser.OFPMatch(in_port=in_port, eth_dst=eth.dst, eth_src=eth.src)
             self.add_flow(datapath, 1, match, actions)
-
+            
         data = None
-        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-            data = msg.data
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                  in_port=in_port, actions=actions, data=data)
+        if msg.buffer_id == ofproto.OFP_NO_BUFFER: data = msg.data
+        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
 
     def _monitor(self):
@@ -125,7 +113,7 @@ class RealTrafficMonitor(app_manager.RyuApp):
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
 
-    # --- HANDLER: FLOW STATS ---
+    # --- 1. FLOW STATS (ANTI CRASH ENABLED) ---
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
         body = ev.msg.body
@@ -135,10 +123,9 @@ class RealTrafficMonitor(app_manager.RyuApp):
         for stat in body:
             try:
                 if stat.priority == 0: continue
-
                 match_str = str(stat.match)
                 prev_key = (dpid, match_str)
-
+                
                 current_byte_cum = stat.byte_count
                 current_pkt_cum = stat.packet_count
 
@@ -157,30 +144,20 @@ class RealTrafficMonitor(app_manager.RyuApp):
 
                     throughput_bps = int((delta_bytes * 8) / time_delta)
                     pps = int(delta_pkts / time_delta)
-
-                    # --- LOGIC DROP BARU (Saturasi) ---
-                    calculated_drops = 0
                     
-                    # Jika Throughput mencapai 90% kapasitas link (9 Mbps)
-                    # Itu artinya link sudah PENUH (karena dipotong oleh OVS/TC)
-                    if throughput_bps > SATURATION_THRESHOLD:
-                        # Kita asumsikan ada packet loss proportional karena antrian penuh
-                        # Ini membantu AI "belajar" bahwa High Load = Drops
-                        # Misal: Loss 1% - 5% dari PPS saat saturasi
-                        loss_ratio = random.uniform(0.01, 0.05)
-                        calculated_drops = int(pps * loss_ratio)
-                        
-                        self.logger.warning(f"⚠️ SATURATION DETECTED DPID {dpid}: {throughput_bps/1e6:.1f} Mbps | Est. Drops: {calculated_drops}")
+                    # === PROTEKSI ANTI CRASH ===
+                    # Mencegah Integer Overflow ke Postgres
+                    if throughput_bps > 2000000000: throughput_bps = 2000000000
 
                     if throughput_bps > 1000:
-                        self.insert_stats(dpid, throughput_bps, pps, delta_bytes, delta_pkts, drops=calculated_drops)
+                        # Drops = 0 disini, karena Flow Stats tidak bisa lihat drops
+                        self.insert_stats(dpid, throughput_bps, pps, delta_bytes, delta_pkts, drops=0)
 
                 self.prev_stats[prev_key] = (current_byte_cum, current_pkt_cum, now)
-
             except Exception:
                 continue
 
-    # --- HANDLER: PORT STATS (HARDWARE DROPS) ---
+    # --- 2. PORT STATS (REAL HARDWARE DROPS) ---
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
         body = ev.msg.body
@@ -190,8 +167,8 @@ class RealTrafficMonitor(app_manager.RyuApp):
         for stat in body:
             try:
                 port_no = stat.port_no
-                # OVS seringkali mencatat drop di tx_dropped (saat antrian interface penuh)
-                current_drops = stat.tx_dropped + stat.rx_dropped + stat.tx_errors
+                # tx_dropped: Paket dibuang karena antrian penuh
+                current_drops = stat.tx_dropped + stat.tx_errors 
                 key = (dpid, port_no)
 
                 if key in self.prev_port_stats:
@@ -199,8 +176,7 @@ class RealTrafficMonitor(app_manager.RyuApp):
                     delta_drops = current_drops - last_drops
 
                     if delta_drops > 0:
-                        self.logger.warning(f"❌ HARDWARE DROP DPID {dpid} Port {port_no}: {delta_drops} pkts")
-                        # Kita insert row khusus drop (bps=0) agar forecast bisa men-sum drop
+                        self.logger.warning(f"❌ REAL DROP on Switch {dpid}: {delta_drops} pkts")
                         self.insert_stats(dpid, 0, 0, 0, 0, drops=delta_drops)
 
                 self.prev_port_stats[key] = (current_drops, now)
@@ -209,11 +185,8 @@ class RealTrafficMonitor(app_manager.RyuApp):
 
     def insert_stats(self, dpid, bps, pps, bytes_delta, pkts_delta, drops=0):
         if not self.conn or self.conn.closed:
-            try:
-                self.connect_db()
-            except:
-                return
-
+            try: self.connect_db()
+            except: return
         try:
             drops = max(0, drops)
             query = """
@@ -224,5 +197,4 @@ class RealTrafficMonitor(app_manager.RyuApp):
             self.cur.execute(query, (str(dpid), bps, pps, bytes_delta, pkts_delta, drops))
             self.conn.commit()
         except Exception:
-            if self.conn:
-                self.conn.rollback()
+            if self.conn: self.conn.rollback()

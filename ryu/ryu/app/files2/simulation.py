@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-VOIP SPECIALIZED TOPOLOGY
-- Scenario: Small Office VoIP Trunk (h1) vs UDP Flood (h3)
-- VoIP Spec: G.711 Codec (64kbps + overhead ~ 87kbps), 50 pps/call.
-- Link: 10 Mbps (Bottleneck).
+FINAL STABLE SIMULATION
+- Queue: 10 Packets (Strict dropping for VoIP realism)
+- Safety: Background execution (nohup style) to prevent blocking/crashing
+- Scenario: VoIP Trunk (h1) vs UDP Flood (h3)
 """
 from mininet.net import Mininet
 from mininet.node import OVSSwitch, RemoteController
@@ -14,12 +14,10 @@ import time
 import random
 import threading
 
-# KONFIGURASI LINK
+# KONFIGURASI
 LINK_BW_MBPS = 10
-# VoIP Buffer harus KECIL. 
-# Jika buffer besar, suara jadi delay/robot. Jika kecil, suara putus-putus.
-# Kita set 20 paket (sangat ketat) agar simulasi drop lebih cepat terjadi.
-QUEUE_SIZE = 20 
+QUEUE_SIZE = 10 # Buffer sangat kecil -> Paksa Hardware Drop saat macet
+
 def traffic_generator(net):
     h1 = net.get('h1') 
     h2 = net.get('h2') 
@@ -27,30 +25,30 @@ def traffic_generator(net):
     
     dst_ip = h2.IP()
     
-    # --- FIX: SAFE LAUNCH RECEIVER ---
     info("*** Starting Receiver on h2 (Safe Mode)...\n")
-    # 1. Kill paksa tapi jangan crash kalau tidak ada process (|| true)
+    # Kill process lama dengan aman (|| true biar gak error exit code)
     h2.cmd('killall -9 ITGRecv || true') 
     time.sleep(1)
     
-    # 2. Jalankan Receiver dengan log dibuang ke null supaya tidak blocking IO
-    # Tambahkan '&' di akhir wajib hukumnya!
+    # Jalankan Receiver di background, buang log ke null
     h2.cmd('ITGRecv -l /dev/null > /dev/null 2>&1 &') 
     time.sleep(2)
     
-    info("*** Starting Continuous VoIP from h1 (Normal User)...\n")
-    h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 172 -C 50 -t 3600000 > /dev/null 2>&1 &')
+    info("*** Starting VoIP Trunk (Normal User)...\n")
+    # 20 concurrent calls simulasi
+    h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 172 -C 1000 -t 3600000 > /dev/null 2>&1 &')
 
     info("*** Starting SMART ATTACK Generator on h3...\n")
     
     current_state = "NORMAL"
     
-    while True:
-        try:
+    # Bungkus Loop utama dengan Try-Except biar Thread gak mati diam-diam
+    try:
+        while True:
             next_state = current_state
             prob = random.random()
             
-            # --- LOGIC STATE MACHINE (Sama seperti sebelumnya) ---
+            # --- STATE MACHINE ---
             if current_state == "NORMAL":
                 if prob > 0.8: next_state = "RAMP_UP"
                 pkt_size = 1000 
@@ -66,6 +64,7 @@ def traffic_generator(net):
                 
             elif current_state == "CONGESTION_SPIKE":
                 next_state = "COOLING_DOWN"
+                # UDP Flood Packet Kecil (Musuh VoIP)
                 pkt_size = 64 
                 pps = random.randint(12000, 15000) 
                 duration = random.randint(4, 7) 
@@ -76,17 +75,18 @@ def traffic_generator(net):
                 pps = random.randint(200, 500)
                 duration = random.randint(5, 10)
 
-            info(f"[VOIP GEN] State: {current_state} | PktSize: {pkt_size}B | Rate: {pps} pps | Dur: {duration}s\n")
+            info(f"[GEN] State: {current_state} | Rate: {pps} pps | Dur: {duration}s\n")
             
-            # Eksekusi Attack dengan safe execution
+            # Eksekusi Attack
             h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c {pkt_size} -C {pps} -t {duration*1000} -l /dev/null > /dev/null 2>&1')
             
             current_state = next_state
+            
+            # Sleep aman
             time.sleep(0.5)
             
-        except Exception as e:
-            info(f"!!! Error in Traffic Gen: {e}\n")
-            break
+    except Exception as e:
+        info(f"!!! Traffic Generator Error: {e}\n")
 
 def run():
     net = Mininet(controller=RemoteController, switch=OVSSwitch, link=TCLink)
@@ -104,19 +104,22 @@ def run():
     h2 = net.addHost('h2', ip='10.0.0.2')
     h3 = net.addHost('h3', ip='10.0.0.3')
 
-    info("*** Creating Links (VoIP Optimized)\n")
+    info("*** Creating Links (VoIP Tuning)\n")
     net.addLink(s1, l1, bw=100)
     net.addLink(s1, l2, bw=100)
     
-    # Bottleneck Links
-    # max_queue_size diperkecil ke 20 untuk simulasi realitas VoIP:
-    # "Lebih baik drop paket daripada delay lama (bufferbloat)"
+    # Bottleneck Links dengan Queue Sangat Kecil (10)
+    # Ini kuncinya biar "Hardware Drop" ke-detect Controller
     net.addLink(h1, l1, bw=LINK_BW_MBPS, max_queue_size=QUEUE_SIZE) 
     net.addLink(h2, l1, bw=LINK_BW_MBPS, max_queue_size=QUEUE_SIZE) 
     net.addLink(h3, l2, bw=LINK_BW_MBPS, max_queue_size=QUEUE_SIZE)
 
     info("*** Starting Network\n")
     net.start()
+    
+    # Tunggu switch connect ke controller sebelum gen traffic
+    info("*** Waiting for controller connection...\n")
+    net.waitConnected()
     
     t = threading.Thread(target=traffic_generator, args=(net,))
     t.daemon = True
