@@ -39,27 +39,28 @@ def get_recent_data(seconds=300):
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').resample('1s').sum().fillna(0)
     return df
-
+    
 def create_features(df):
-    """
-    Buat fitur yang menangkap POLA pergerakan trafik.
-    - Lag: Nilai masa lalu.
-    - Velocity: Perubahan kecepatan (t - t-1).
-    - Acceleration: Perubahan percepatan.
-    """
     df = df.copy()
     
-    # Lag Features
-    for i in [1, 2, 3, 5]:
+    # 1. Basic Lags
+    for i in [1, 2, 3]:
         df[f'lag_{i}'] = df['throughput'].shift(i)
     
-    # Derivative Features (Kunci untuk deteksi dini)
+    # 2. Pola Perubahan (Derivative)
+    # Velocity: Seberapa cepat trafik naik saat ini
     df['velocity'] = df['throughput'] - df['lag_1']
+    
+    # Acceleration: Apakah kenaikannya makin curam? (Ciri khas RAMP_UP ke CONGESTION)
     df['acceleration'] = df['velocity'] - (df['lag_1'] - df['lag_2'])
     
-    # Rolling stats
-    df['rolling_mean_5'] = df['throughput'].rolling(window=5).mean()
-    df['rolling_std_5'] = df['throughput'].rolling(window=5).std()
+    # 3. Rolling Statistics (Trend jangka pendek)
+    # Rata-rata 3 detik terakhir
+    df['rolling_mean_3'] = df['throughput'].rolling(window=3).mean()
+    
+    # Rasio kenaikan: Value sekarang vs Rata-rata 5 detik lalu
+    # Jika > 1.2 berarti sedang naik signifikan
+    df['trend_ratio'] = df['throughput'] / (df['throughput'].rolling(window=10).mean() + 1)
     
     return df.dropna()
 

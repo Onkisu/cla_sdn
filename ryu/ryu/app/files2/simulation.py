@@ -18,62 +18,58 @@ import subprocess
 LINK_BW_MBPS = 10 
 # Normal Traffic: 2-4 Mbps
 # Congestion Traffic: > 8 Mbps
-
 def traffic_generator(net):
-    h1 = net.get('h1') # User Biasa (VoIP)
-    h2 = net.get('h2') # Victim / Server
-    h3 = net.get('h3') # Interfering Traffic / Attacker
-    
+    h1 = net.get('h1')
+    h2 = net.get('h2')
+    h3 = net.get('h3')
     dst_ip = h2.IP()
     
-    info("*** Starting Receiver on h2...\n")
+    info("*** Starting Receiver & VoIP...\n")
     h2.cmd('killall ITGRecv')
-    h2.cmd('ITGRecv -l /dev/null &') # Log lokal dimatikan supaya disk hemat
-    time.sleep(2)
-    
-    info("*** Starting Continuous VoIP from h1 (Normal User)...\n")
-    # H1 mengirim stabil ~100kbps (VoIP standard)
-    h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 3600000 &')
+    h2.cmd('ITGRecv -l /dev/null &')
+    time.sleep(1)
+    h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 3600000 &') # Stabil ~64kbps
 
-    info("*** Starting CHAOS Generator on h3...\n")
+    # STATE MACHINE VARIABLES
+    current_state = "NORMAL"
     
     while True:
-        # 1. Tentukan State: Normal, Warning, atau Critical (Congestion)
-        # Probabilitas acak untuk mensimulasikan ketidakpastian
-        state_prob = random.random()
+        # Logika Transisi State (Pola untuk dipelajari AI)
+        # NORMAL -> Bisa ke RAMP_UP (20%) atau tetap NORMAL (80%)
+        # RAMP_UP -> Bisa ke CONGESTION (70%) atau kembali NORMAL (30%)
+        # CONGESTION -> Pasti ke COOLING_DOWN
         
-        if state_prob < 0.5:
-            # STATE: NORMAL (Idle / Browsing)
-            # Rate rendah: 500 Kbps - 2 Mbps
-            pps = random.randint(500, 2000)
-            duration = random.randint(10, 30)
-            mode = "NORMAL"
-            
-        elif state_prob < 0.8:
-            # STATE: RAMP UP (Tanda-tanda bahaya)
-            # Rate menengah: 3 Mbps - 6 Mbps
-            # Ini pola yang harus dipelajari AI sebagai "Pre-Congestion"
-            pps = random.randint(3000, 6000)
-            duration = random.randint(5, 15)
-            mode = "RAMP_UP"
-            
-        else:
-            # STATE: CONGESTION (Burst/Spike)
-            # Rate tinggi: 8 Mbps - 12 Mbps (Melibihi link 10Mbps)
-            pps = random.randint(8000, 12000) 
-            duration = random.randint(3, 10) # Burst biasanya singkat tapi fatal
-            mode = "CONGESTION_SPIKE"
+        if current_state == "NORMAL":
+            if random.random() < 0.3: # 30% chance naik ke warning
+                current_state = "RAMP_UP"
+                pps = random.randint(4000, 6000) # ~3-5 Mbps (Pre-congestion)
+                duration = random.randint(5, 10)
+            else:
+                current_state = "NORMAL"
+                pps = random.randint(500, 2000)  # ~0.5-1.5 Mbps
+                duration = random.randint(10, 20)
 
-        info(f"[CHAOS GEN] Mode: {mode} | Rate: {pps} pps | Dur: {duration}s\n")
+        elif current_state == "RAMP_UP":
+            if random.random() < 0.7: # 70% chance jadi Congestion beneran
+                current_state = "CONGESTION"
+                pps = random.randint(9000, 12000) # ~7-9 Mbps (High Load)
+                duration = random.randint(5, 8)   # Spike durasi pendek
+            else:
+                current_state = "NORMAL" # False alarm, balik normal
+                pps = random.randint(1000, 3000)
+                duration = random.randint(5, 10)
+
+        elif current_state == "CONGESTION":
+            current_state = "NORMAL" # Setelah spike, pasti cooling down
+            pps = random.randint(100, 1000)
+            duration = random.randint(8, 15)
+
+        info(f"[CHAOS GEN] State: {current_state} | Rate: {pps} pps | Dur: {duration}s\n")
         
-        # Jalankan D-ITG blocking (tunggu sampai durasi selesai)
-        # Packet size 100 bytes. 10.000 pps * 100 bytes * 8 = 8 Mbps
+        # Eksekusi Traffic
         h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 100 -C {pps} -t {duration*1000} -l /dev/null')
+        time.sleep(random.uniform(0.1, 1.0))
         
-        # Jeda acak antar flow (inter-arrival time variation)
-        sleep_time = random.uniform(0.5, 3.0)
-        time.sleep(sleep_time)
-
 def run():
     net = Mininet(controller=RemoteController, switch=OVSSwitch, link=TCLink)
     
