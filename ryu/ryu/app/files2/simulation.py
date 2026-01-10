@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-UPDATED SIMULATION
-- Link 10Mbps, Queue 50 packets (Strict Buffer)
-- Packet Size 1000 Bytes (Supaya cepat penuh)
+SPINE-LEAF FINAL CHAOS
+- Topology: 3 Spines, 3 Leaves, 3 Hosts (Asli sesuai permintaan)
+- Modifikasi: Link Host dibatasi 10Mbps (Strict Queue) agar bisa congestion.
+- Traffic: Pareto Chaos (Non-deterministic)
 """
 from mininet.net import Mininet
 from mininet.node import OVSSwitch, RemoteController
+from mininet.cli import CLI
 from mininet.log import setLogLevel, info
 from mininet.link import TCLink
 import time
@@ -13,90 +15,117 @@ import random
 import threading
 
 def traffic_generator(net):
-    h2 = net.get('h2')
-    h3 = net.get('h3')
+    # Setup Host
+    h1 = net.get('h1') # User Biasa
+    h2 = net.get('h2') # VICTIM
+    h3 = net.get('h3') # Attacker
     dst_ip = h2.IP()
     
+    info("*** Starting Receiver on h2 (Victim)...\n")
     h2.cmd('killall ITGRecv')
     h2.cmd('ITGRecv -l /dev/null &')
-    time.sleep(1)
+    time.sleep(2)
+    
+    # Background Traffic (VoIP like) dari h1
+    info("*** Starting Background Traffic from h1...\n")
+    h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 3600000 &')
 
-    # PACKET SIZE BESAR = 1000 Bytes
-    # Bandwidth 10 Mbps = 1250 packets/sec (jika 1000 bytes)
-    # Jadi kita main di angka packet rate yang relevan:
-    # Normal: 100-300 pps (0.8 - 2.4 Mbps)
-    # Ramp Up: 800 pps (6.4 Mbps)
-    # Congestion: 1500 pps (12 Mbps -> Pasti Drop)
-
-    current_state = "NORMAL"
+    info("*** Starting CHAOS Traffic from h3...\n")
+    
+    # Variables for Random Walk
+    current_pps = 500
+    trend = 1.0 
     
     while True:
-        if current_state == "NORMAL":
-            if random.random() < 0.3:
-                current_state = "RAMP_UP"
-                pps = random.randint(700, 900) 
-                duration = random.randint(5, 8)
-            else:
-                current_state = "NORMAL"
-                pps = random.randint(100, 300) 
-                duration = random.randint(10, 15)
-
-        elif current_state == "RAMP_UP":
-            if random.random() < 0.8: # High chance to fail
-                current_state = "CONGESTION"
-                pps = random.randint(1300, 1800) # > 10Mbps
-                duration = random.randint(4, 7)
-            else:
-                current_state = "NORMAL"
-                pps = random.randint(200, 400)
-                duration = random.randint(5, 10)
-
-        elif current_state == "CONGESTION":
-            current_state = "NORMAL"
-            pps = random.randint(50, 200)
-            duration = random.randint(10, 20)
-
-        info(f"[GEN] {current_state} | {pps} pps (sz 1000) | {duration}s\n")
+        # --- PARETO CHAOS LOGIC ---
+        # 1. Trend Perubahan (Naik/Turun pelan)
+        change = random.uniform(0.9, 1.15) 
+        trend = trend * change
         
-        # -c 1000 : Constant packet size 1000 bytes
-        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 1000 -C {pps} -t {duration*1000} -l /dev/null')
-        time.sleep(0.5)
+        if trend > 2.0: trend = 1.8
+        if trend < 0.5: trend = 0.6
+        
+        target_pps = int(current_pps * trend)
+        
+        # 2. Burst / Flash Crowd (Tiba-tiba spike)
+        # Probabilitas 15% kejadian Burst
+        if random.random() < 0.15:
+            spike_factor = random.uniform(1.5, 3.0)
+            real_pps = int(target_pps * spike_factor)
+            duration = random.uniform(1.0, 3.0) # Burst cepat
+            mode = "BURST"
+        else:
+            real_pps = target_pps
+            duration = random.uniform(2.0, 4.0)
+            mode = "FLOW"
+            
+        # Hard Limits (Fisika Link 10Mbps ~ 900-1500 pps tergantung size)
+        if real_pps > 12000: real_pps = 12000 
+        if real_pps < 100: real_pps = 100
+
+        # Ukuran Paket Bervariasi (Membuat Jitter)
+        # 1400 bytes -> Cepat penuh bandwidthnya
+        # 100 bytes -> Lambat penuh, tapi PPS tinggi
+        packet_size = random.choice([200, 500, 1000, 1400])
+        
+        # Kalkulasi Mbps Estimasi
+        mbps = (real_pps * packet_size * 8) / 1_000_000
+        
+        info(f"[GEN] {mode} | {real_pps} pps | Sz:{packet_size} | {mbps:.2f} Mbps\n")
+        
+        # Kirim D-ITG
+        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c {packet_size} -C {real_pps} -t {int(duration*1000)} -l /dev/null')
+        
+        current_pps = real_pps if mode == "FLOW" else target_pps
+        time.sleep(0.1)
 
 def run():
+    # Gunakan TCLink untuk fitur bandwidth limit
     net = Mininet(controller=RemoteController, switch=OVSSwitch, link=TCLink)
+    
+    info("*** Adding Controller\n")
     net.addController('c0', ip='127.0.0.1', port=6653)
 
-    s1 = net.addSwitch('s1', dpid='1')
-    l1 = net.addSwitch('l1', dpid='2') # Victim Switch
-    l2 = net.addSwitch('l2', dpid='3')
+    info("*** Adding Switches (Spine-Leaf 3x3)\n")
+    spines = []
+    leaves = []
+    
+    # DPID Hex 1-3
+    for i in range(1, 4):
+        spines.append(net.addSwitch(f's{i}', dpid=f'{i:016x}', protocols='OpenFlow13'))
+    
+    # DPID Hex 4-6
+    for i in range(1, 4):
+        leaves.append(net.addSwitch(f'l{i}', dpid=f'{i+3:016x}', protocols='OpenFlow13'))
 
+    info("*** Creating Inter-Switch Links (Backbone 1Gbps)\n")
+    for l in leaves:
+        for s in spines:
+            net.addLink(l, s, bw=1000, delay='1ms')
+
+    info("*** Adding Hosts\n")
     h1 = net.addHost('h1', ip='10.0.0.1')
     h2 = net.addHost('h2', ip='10.0.0.2')
     h3 = net.addHost('h3', ip='10.0.0.3')
 
-    # Backbone
-    net.addLink(s1, l1, bw=100)
-    net.addLink(s1, l2, bw=100)
-    
-    # --- BOTTLENECK LINK ---
-    # BW=10 Mbps, Queue=50 packets
-    # Dengan paket 1000 bytes, 50 paket = 50KB buffer. Cepat penuh jika overload.
-    net.addLink(h1, l1, bw=10, max_queue_size=50, delay='1ms') 
-    net.addLink(h2, l1, bw=10, max_queue_size=50, delay='1ms') 
-    net.addLink(h3, l2, bw=10, max_queue_size=50, delay='1ms')
+    info("*** Creating Host Links (BOTTLENECK 10Mbps)\n")
+    # Disini kita ubah spek kabelnya saja, topologi tetap sama.
+    # Queue=20 -> Strict, cepat drop kalau penuh.
+    net.addLink(h1, leaves[0], bw=10, max_queue_size=20, delay='1ms') 
+    net.addLink(h2, leaves[1], bw=10, max_queue_size=20, delay='1ms') # Target (l2)
+    net.addLink(h3, leaves[2], bw=10, max_queue_size=20, delay='1ms')
 
+    info("*** Starting Network\n")
     net.start()
-    
+    net.pingAll()
+
+    # Jalankan Generator
     t = threading.Thread(target=traffic_generator, args=(net,))
     t.daemon = True
     t.start()
-    
-    # Jalankan background traffic kecil dari h1
-    h1.cmd('ITGSend -T UDP -a 10.0.0.2 -c 500 -C 50 -t 3600000 &')
 
-    # Simpan network tetap jalan
-    while True:
-        time.sleep(10)
+    CLI(net)
+    net.stop()
 
 if __name__ == '__main__':
     setLogLevel('info')
