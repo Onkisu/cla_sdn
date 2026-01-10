@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-SPINE-LEAF WITH STP
-- Enabled STP to prevent loops/broadcast storms.
-- Link Host 10Mbps (Bottleneck).
-- Traffic Chaos Pareto.
+CHAOS TOPOLOGY & TRAFFIC GEN
+- Bandwidth Limited to 10Mbps to create easily reachable congestion thresholds.
+- Non-deterministic traffic generation logic.
 """
 from mininet.net import Mininet
 from mininet.node import OVSSwitch, RemoteController
@@ -13,54 +12,67 @@ from mininet.link import TCLink
 import time
 import random
 import threading
+import subprocess
+
+# Target Congestion: Link Capacity is 10 Mbps
+LINK_BW_MBPS = 10 
+# Normal Traffic: 2-4 Mbps
+# Congestion Traffic: > 8 Mbps
 
 def traffic_generator(net):
-    h1 = net.get('h1')
-    h2 = net.get('h2') 
-    h3 = net.get('h3') 
+    h1 = net.get('h1') # User Biasa (VoIP)
+    h2 = net.get('h2') # Victim / Server
+    h3 = net.get('h3') # Interfering Traffic / Attacker
+    
     dst_ip = h2.IP()
     
     info("*** Starting Receiver on h2...\n")
     h2.cmd('killall ITGRecv')
-    h2.cmd('ITGRecv -l /dev/null &')
+    h2.cmd('ITGRecv -l /dev/null &') # Log lokal dimatikan supaya disk hemat
     time.sleep(2)
     
-    info("*** Starting Background Traffic h1 -> h2...\n")
+    info("*** Starting Continuous VoIP from h1 (Normal User)...\n")
+    # H1 mengirim stabil ~100kbps (VoIP standard)
     h1.cmd(f'ITGSend -T UDP -a {dst_ip} -c 160 -C 50 -t 3600000 &')
 
     info("*** Starting CHAOS Generator on h3...\n")
-    current_pps = 500
-    trend = 1.0 
     
     while True:
-        # Pareto Chaos Logic
-        change = random.uniform(0.9, 1.15) 
-        trend = trend * change
-        if trend > 2.0: trend = 1.8
-        if trend < 0.5: trend = 0.6
-        target_pps = int(current_pps * trend)
+        # 1. Tentukan State: Normal, Warning, atau Critical (Congestion)
+        # Probabilitas acak untuk mensimulasikan ketidakpastian
+        state_prob = random.random()
         
-        if random.random() < 0.15: # Burst
-            real_pps = int(target_pps * random.uniform(1.5, 3.0))
-            duration = random.uniform(1.0, 3.0)
-            mode = "BURST"
-        else:
-            real_pps = target_pps
-            duration = random.uniform(2.0, 4.0)
-            mode = "FLOW"
+        if state_prob < 0.5:
+            # STATE: NORMAL (Idle / Browsing)
+            # Rate rendah: 500 Kbps - 2 Mbps
+            pps = random.randint(500, 2000)
+            duration = random.randint(10, 30)
+            mode = "NORMAL"
             
-        if real_pps > 12000: real_pps = 12000
-        if real_pps < 100: real_pps = 100
-        packet_size = random.choice([200, 500, 1000, 1400])
+        elif state_prob < 0.8:
+            # STATE: RAMP UP (Tanda-tanda bahaya)
+            # Rate menengah: 3 Mbps - 6 Mbps
+            # Ini pola yang harus dipelajari AI sebagai "Pre-Congestion"
+            pps = random.randint(3000, 6000)
+            duration = random.randint(5, 15)
+            mode = "RAMP_UP"
+            
+        else:
+            # STATE: CONGESTION (Burst/Spike)
+            # Rate tinggi: 8 Mbps - 12 Mbps (Melibihi link 10Mbps)
+            pps = random.randint(8000, 12000) 
+            duration = random.randint(3, 10) # Burst biasanya singkat tapi fatal
+            mode = "CONGESTION_SPIKE"
+
+        info(f"[CHAOS GEN] Mode: {mode} | Rate: {pps} pps | Dur: {duration}s\n")
         
-        # Kirim Traffic
-        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c {packet_size} -C {real_pps} -t {int(duration*1000)} -l /dev/null')
-        current_pps = real_pps if mode == "FLOW" else target_pps
+        # Jalankan D-ITG blocking (tunggu sampai durasi selesai)
+        # Packet size 100 bytes. 10.000 pps * 100 bytes * 8 = 8 Mbps
+        h3.cmd(f'ITGSend -T UDP -a {dst_ip} -c 100 -C {pps} -t {duration*1000} -l /dev/null')
         
-        # Log status
-        mbps = (real_pps * packet_size * 8) / 1e6
-        info(f"[GEN] {mode} | {real_pps} pps | {mbps:.2f} Mbps\n")
-        time.sleep(0.1)
+        # Jeda acak antar flow (inter-arrival time variation)
+        sleep_time = random.uniform(0.5, 3.0)
+        time.sleep(sleep_time)
 
 def run():
     net = Mininet(controller=RemoteController, switch=OVSSwitch, link=TCLink)
@@ -68,41 +80,33 @@ def run():
     info("*** Adding Controller\n")
     net.addController('c0', ip='127.0.0.1', port=6653)
 
-    info("*** Adding Switches (Enabled STP)\n")
-    spines = []
-    leaves = []
-    
-    # KUNCI UTAMA: stp=True agar tidak terjadi Loop
-    for i in range(1, 4):
-        spines.append(net.addSwitch(f's{i}', dpid=f'{i:016x}', stp=True))
-    
-    for i in range(1, 4):
-        leaves.append(net.addSwitch(f'l{i}', dpid=f'{i+3:016x}', stp=True))
+    info("*** Adding Switches\n")
+    # Topology Spine Leaf Sederhana
+    s1 = net.addSwitch('s1', dpid='1') # Spine
+    l1 = net.addSwitch('l1', dpid='2') # Leaf 1
+    l2 = net.addSwitch('l2', dpid='3') # Leaf 2
 
-    info("*** Creating Links\n")
-    # Backbone
-    for l in leaves:
-        for s in spines:
-            net.addLink(l, s, bw=1000)
-
-    # Hosts (Bottleneck 10Mbps)
+    info("*** Adding Hosts\n")
     h1 = net.addHost('h1', ip='10.0.0.1')
     h2 = net.addHost('h2', ip='10.0.0.2')
     h3 = net.addHost('h3', ip='10.0.0.3')
 
-    net.addLink(h1, leaves[0], bw=10, max_queue_size=20, delay='1ms')
-    net.addLink(h2, leaves[1], bw=10, max_queue_size=20, delay='1ms')
-    net.addLink(h3, leaves[2], bw=10, max_queue_size=20, delay='1ms')
+    info("*** Creating Links (With Bottleneck)\n")
+    # Spine - Leaf (Backbone kuat, 100Mbps)
+    net.addLink(s1, l1, bw=100)
+    net.addLink(s1, l2, bw=100)
+    
+    # Leaf - Host (BOTTLENECK 10 Mbps)
+    # Max Queue Size dibatasi agar packet drop terjadi saat congestion
+    net.addLink(h1, l1, bw=LINK_BW_MBPS, max_queue_size=100, delay='1ms') 
+    net.addLink(h2, l1, bw=LINK_BW_MBPS, max_queue_size=100, delay='1ms') # Target Link
+    net.addLink(h3, l2, bw=LINK_BW_MBPS, max_queue_size=100, delay='1ms')
 
     info("*** Starting Network\n")
     net.start()
-    
-    info("⏳ WAITING 45 SECONDS FOR STP CONVERGENCE (DO NOT INTERRUPT)...\n")
-    time.sleep(45) # Wajib tunggu STP
-    
-    info("*** Pinging All to verify connectivity...\n")
-    net.pingAll() # Sekarang harusnya aman
+    net.pingAll()
 
+    # Jalankan Traffic Generator di Thread terpisah
     t = threading.Thread(target=traffic_generator, args=(net,))
     t.daemon = True
     t.start()
