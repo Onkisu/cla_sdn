@@ -1,148 +1,163 @@
 #!/usr/bin/env python3
-# file: brain_ml.py
-
+"""
+PROACTIVE AI FORECASTER
+- Retrains every 1 hour.
+- Predicts t+1 to t+5 seconds.
+- Uses Velocity and Acceleration features to detect congestion ONSET.
+"""
 import pandas as pd
+import numpy as np
 import xgboost as xgb
 from sqlalchemy import create_engine
 import time
-import joblib
-import os
+import datetime
 import warnings
+
 warnings.filterwarnings('ignore')
 
-# === CONFIG ===
+# CONFIG
 DB_URI = "postgresql://dev_one:hijack332.@103.181.142.165:5432/development"
-MODEL_FILE = "congestion_predictor.pkl"
-RETRAIN_INTERVAL = 3600  # 1 Jam
-RETRY_FAST = 10          # 10 Detik (Coba cepat saat awal)
+TABLE_READ = "traffic.flow_stats_real"
+TABLE_ALERT = "traffic.congestion_alerts"
+RETRAIN_INTERVAL = 3600 # 1 Jam
+PREDICTION_THRESHOLD = 8000000 # 8 Mbps (80% dari link 10Mbps)
 
 engine = create_engine(DB_URI)
+model = None
 
-def get_raw_data(minutes=60):
-    """Mengambil raw data dari DB"""
+def get_recent_data(seconds=300):
+    """Ambil data N detik terakhir untuk input prediksi"""
     query = f"""
-        SELECT timestamp, tx_packets, tx_bytes, tx_dropped
-        FROM traffic.port_stats_real
-        WHERE timestamp >= NOW() - INTERVAL '{minutes} minutes'
+        SELECT timestamp, sum(throughput_bps) as throughput
+        FROM {TABLE_READ}
+        WHERE timestamp >= NOW() - INTERVAL '{seconds} seconds'
+        GROUP BY timestamp
         ORDER BY timestamp ASC
     """
-    try:
-        return pd.read_sql(query, engine)
-    except:
-        return pd.DataFrame()
+    df = pd.read_sql(query, engine)
+    if not df.empty:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df.set_index('timestamp').resample('1s').sum().fillna(0)
+    return df
 
-def feature_engineering(df):
+def create_features(df):
     """
-    MENGUBAH DATA MENTAH MENJADI PENGETAHUAN
-    Disini kita hitung 'Akselerasi' dan 'Rasio'.
+    Buat fitur yang menangkap POLA pergerakan trafik.
+    - Lag: Nilai masa lalu.
+    - Velocity: Perubahan kecepatan (t - t-1).
+    - Acceleration: Perubahan percepatan.
     """
-    if df.empty: return None, None
+    df = df.copy()
     
+    # Lag Features
+    for i in [1, 2, 3, 5]:
+        df[f'lag_{i}'] = df['throughput'].shift(i)
+    
+    # Derivative Features (Kunci untuk deteksi dini)
+    df['velocity'] = df['throughput'] - df['lag_1']
+    df['acceleration'] = df['velocity'] - (df['lag_1'] - df['lag_2'])
+    
+    # Rolling stats
+    df['rolling_mean_5'] = df['throughput'].rolling(window=5).mean()
+    df['rolling_std_5'] = df['throughput'].rolling(window=5).std()
+    
+    return df.dropna()
+
+def train_model():
+    print(f"[{datetime.datetime.now()}] 🔄 Retraining Model with last 1 hour data...")
+    # Ambil data 1 jam terakhir
+    query = f"""
+        SELECT timestamp, sum(throughput_bps) as throughput
+        FROM {TABLE_READ}
+        WHERE timestamp >= NOW() - INTERVAL '1 hour'
+        GROUP BY timestamp
+        ORDER BY timestamp ASC
+    """
+    df = pd.read_sql(query, engine)
+    
+    if len(df) < 100:
+        print("⚠️ Not enough data to train yet.")
+        return None
+
     df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df.set_index('timestamp').resample('1s').sum()
+    df = df.set_index('timestamp').resample('1s').sum().fillna(0)
     
-    # 1. Hitung Delta (Perubahan per detik)
-    df['pps'] = df['tx_packets'].diff().fillna(0)
-    df['bps'] = df['tx_bytes'].diff().fillna(0)
-    df['drops'] = df['tx_dropped'].diff().fillna(0)
+    # Siapkan Supervised Learning Data
+    # Target: Throughput 5 detik ke depan (Max value in next 5s)
+    # Kita ingin memprediksi 'peak' yang akan datang
+    df_feat = create_features(df)
+    df_feat['target_future_max'] = df_feat['throughput'].rolling(window=5).max().shift(-5)
+    df_feat = df_feat.dropna()
     
-    # Filter noise
-    df = df[df['bps'] >= 0]
+    features = [c for c in df_feat.columns if c not in ['target_future_max']]
+    X = df_feat[features]
+    y = df_feat['target_future_max']
     
-    # --- FITUR KUNCI PREDIKSI ---
-    # Akselerasi: Seberapa cepat trafik naik?
-    df['accel_pps'] = df['pps'].diff()
+    reg = xgb.XGBRegressor(n_estimators=100, max_depth=5, learning_rate=0.1)
+    reg.fit(X, y)
     
-    # Rasio Paket: Membedakan Download Normal vs Serangan
-    # (Serangan = PPS Tinggi, BPS Kecil -> Rasio Kecil)
-    df['pkt_ratio'] = df['bps'] / (df['pps'] + 1)
-    
-    # Jitter Proxy: Kestabilan trafik
-    df['jitter'] = df['pps'].rolling(3).std()
-    
-    # --- TARGET LABEL (MASA DEPAN) ---
-    # Apakah ada drop dalam 3 detik ke depan?
-    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=3)
-    df['future_drops'] = df['drops'].rolling(window=indexer).sum()
-    
-    # Label: 1 jika macet, 0 jika aman
-    df['target'] = (df['future_drops'] > 5).astype(int)
-    
-    df_clean = df.dropna()
-    features = ['pps', 'bps', 'accel_pps', 'pkt_ratio', 'jitter']
-    
-    return df_clean, features
+    print("✅ Model Retrained Successfully.")
+    return reg, features
 
-def train_job():
-    print("\n🔄 [TRAIN] Melatih Model...")
-    df = get_raw_data(minutes=120) # Data 2 jam terakhir
+def main_loop():
+    global model
+    features_col = []
+    last_train_time = 0
     
-    # Butuh minimal 3 menit data
-    if len(df) < 180: 
-        print(f"⚠️ Data belum cukup ({len(df)} baris). Menunggu Traffic Generator...")
-        return None, None
-        
-    data, cols = feature_engineering(df)
-    
-    # Cek apakah pernah ada macet?
-    if data['target'].sum() == 0:
-        print("⚠️ Belum ada sejarah kemacetan. ML belum bisa belajar.")
-        print("👉 Tunggu sampai simulasi menjalankan mode 'ATTACK'.")
-        return None, None
-
-    # Train XGBoost
-    model = xgb.XGBClassifier(n_estimators=100, max_depth=5, eval_metric='logloss')
-    model.fit(data[cols], data['target'])
-    
-    joblib.dump((model, cols), MODEL_FILE)
-    print("✅ Model BERHASIL dibuat & disimpan!")
-    return model, cols
-
-def run():
-    model = None
-    cols = None
-    last_train = 0
-    
-    # Load jika ada
-    if os.path.exists(MODEL_FILE):
-        try: model, cols = joblib.load(MODEL_FILE); print("📂 Model loaded.")
-        except: pass
-        
-    print("🚀 PREDICTION ENGINE STARTED...")
+    print("🚀 AI Forecaster Started...")
     
     while True:
         now = time.time()
         
-        # Logika Retrain
-        interval = RETRAIN_INTERVAL if model else RETRY_FAST
-        if now - last_train > interval:
-            res = train_job()
-            if res[0]: model, cols = res
-            last_train = now
-            
-        # Logika Prediksi Real-time
-        if model:
-            # Ambil data sedikit saja (10 detik)
-            df_recent = get_raw_data(minutes=0.5)
-            data, _ = feature_engineering(df_recent)
-            
-            if data is not None and not data.empty:
-                last_row = data.iloc[[-1]][cols]
-                prob = model.predict_proba(last_row)[0][1]
+        # 1. Cek Jadwal Retrain
+        if now - last_train_time > RETRAIN_INTERVAL or model is None:
+            res = train_model()
+            if res:
+                model, features_col = res
+                last_train_time = now
+            else:
+                time.sleep(10)
+                continue
+
+        # 2. Real-time Prediction
+        try:
+            # Ambil potongan data kecil untuk feature engineering
+            df_recent = get_recent_data(seconds=20) 
+            if len(df_recent) < 10:
+                time.sleep(1)
+                continue
                 
-                pps = last_row['pps'].values[0]
-                accel = last_row['accel_pps'].values[0]
+            df_feat = create_features(df_recent)
+            if df_feat.empty: continue
+            
+            # Ambil baris data terakhir (kondisi saat ini)
+            current_state = df_feat.iloc[[-1]][features_col]
+            current_throughput = df_feat.iloc[-1]['throughput']
+            
+            # Predict
+            pred_bps = model.predict(current_state)[0]
+            
+            # 3. Logika Warning Proaktif
+            status = "OK"
+            if pred_bps > PREDICTION_THRESHOLD:
+                status = "⚠️ WARNING: CONGESTION IMMINENT"
                 
-                if prob > 0.7:
-                    print(f"🔴 BAHAYA! Congestion Diprediksi! (Prob: {prob:.0%} | Accel: {accel:.0f})")
-                elif prob > 0.4:
-                    print(f"🟡 WARNING: Traffic Mencurigakan (Prob: {prob:.0%})")
+                # Cek apakah saat ini SUDAH congestion?
+                if current_throughput > PREDICTION_THRESHOLD:
+                    msg = "CONGESTION ACTIVE"
                 else:
-                    print(f"🟢 Aman (PPS: {pps:.0f})", end='\r')
-        else:
-            print("⏳ Menunggu data training...", end='\r')
+                    msg = f"PREDICTED CONGESTION ({int(pred_bps/1000000)} Mbps) IN < 5 SEC"
+                
+                # Simpan Alert ke DB
+                print(f"🚨 {msg}")
+                engine.execute(f"INSERT INTO {TABLE_ALERT} VALUES (NOW(), {pred_bps}, '{msg}')")
             
+            print(f"\r[{datetime.datetime.now().time()}] Curr: {current_throughput/1e6:.2f} Mbps | Pred (t+5): {pred_bps/1e6:.2f} Mbps | {status}", end="")
+            
+        except Exception as e:
+            print(f"\n❌ Error in loop: {e}")
+        
         time.sleep(1)
 
 if __name__ == "__main__":
-    run()
+    main_loop()
