@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PURE MONITORING CONTROLLER (ANTI-CRASH EDITION)
-- Fitur: Delta Calculation (Real-time).
-- Fix: WRAP ALL LOGIC in Try-Except agar controller tidak pernah mati (Crash Proof).
-- Fix: Integer Overflow Protection untuk Database.
+PURE MONITORING CONTROLLER (FIXED ANTI-CRASH)
+- Fitur: Delta Calculation (Byte per second real-time).
+- Fix: Menghapus invisible character yang bikin crash.
+- Fix: Indentasi Python dirapikan agar Logic berjalan benar.
 """
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -13,7 +13,7 @@ from ryu.lib import hub
 from ryu.lib.packet import packet, ethernet, ether_types
 import psycopg2
 import time
-import traceback # Penting untuk melihat error tanpa mematikan program
+import traceback
 
 # Credentials
 DB_CONFIG = {
@@ -25,7 +25,7 @@ DB_CONFIG = {
 }
 
 # Kapasitas Link
-LINK_CAPACITY_BPS = 10000000 
+LINK_CAPACITY_BPS = 10000000
 SAFE_THRESHOLD_BPS = 9500000
 
 class RealTrafficMonitor(app_manager.RyuApp):
@@ -35,10 +35,11 @@ class RealTrafficMonitor(app_manager.RyuApp):
         super(RealTrafficMonitor, self).__init__(*args, **kwargs)
         self.datapaths = {}
         self.mac_to_port = {}
-        self.prev_stats = {} 
-        self.prev_port_stats = {} 
+        self.prev_stats = {}
+        self.prev_port_stats = {}
         self.monitor_thread = hub.spawn(self._monitor)
         self.conn = None
+        self.cur = None
         self.connect_db()
 
     def connect_db(self):
@@ -76,12 +77,12 @@ class RealTrafficMonitor(app_manager.RyuApp):
 
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
-        
+
         if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
-        
+
         dst = eth.dst
         src = eth.src
-        
+
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
 
@@ -105,16 +106,15 @@ class RealTrafficMonitor(app_manager.RyuApp):
 
     def _monitor(self):
         while True:
-            # Gunakan list() agar thread safe saat iterasi
+            # List() untuk thread safety
             for dp in list(self.datapaths.values()):
                 self._request_stats(dp)
-            hub.sleep(1) 
+            hub.sleep(1)
 
     def _request_stats(self, datapath):
         parser = datapath.ofproto_parser
         req = parser.OFPFlowStatsRequest(datapath)
         datapath.send_msg(req)
-        # Port stats
         req_port = parser.OFPPortStatsRequest(datapath)
         datapath.send_msg(req_port)
 
@@ -133,72 +133,69 @@ class RealTrafficMonitor(app_manager.RyuApp):
         body = ev.msg.body
         dpid = ev.msg.datapath.id
         now = time.time()
-        
+
         for stat in body:
-            # TRY-EXCEPT BLOCK: Menangkap semua error agar Controller TIDAK MATI
             try:
-                if stat.priority == 0: continue 
-                
+                if stat.priority == 0: continue
+
                 match_str = str(stat.match)
                 prev_key = (dpid, match_str)
-                
+
+                # Ini Data Kumulatif dari Switch
                 current_byte_cum = stat.byte_count
                 current_pkt_cum = stat.packet_count
-                
+
                 if prev_key in self.prev_stats:
                     last_bytes, last_pkts, last_time = self.prev_stats[prev_key]
                     time_delta = now - last_time
-                    
-                    # 1. PENGAMAN WAKTU
-                    if time_delta < 0.001: 
-                        # Update waktu saja, jangan hitung delta
+
+                    # 1. Pengaman Waktu (Hindari pembagian 0)
+                    if time_delta < 0.001:
                         continue
-                    
+
+                    # Hitung Delta (Selisih)
                     delta_bytes = current_byte_cum - last_bytes
                     delta_pkts = current_pkt_cum - last_pkts
-                    
-                    # 2. PENGAMAN NEGATIF (Counter Reset)
+
+                    # 2. Pengaman Reset Counter (Jika switch restart, counter jadi 0)
                     if delta_bytes < 0 or delta_pkts < 0:
                         self.prev_stats[prev_key] = (current_byte_cum, current_pkt_cum, now)
                         continue
 
-                    # 3. HITUNG BANDWIDTH
+                    # 3. Hitung Bandwidth
                     throughput_bps = int((delta_bytes * 8) / time_delta)
                     pps = int(delta_pkts / time_delta)
-                    
-                    # 4. HITUNG DROPS
+
+                    # 4. Hitung Drops (Saturation Logic)
                     calculated_drops = 0
                     if throughput_bps > SAFE_THRESHOLD_BPS:
                         excess_bps = throughput_bps - LINK_CAPACITY_BPS
                         if excess_bps > 0:
                             avg_pkt_size_bits = (delta_bytes * 8) / delta_pkts if delta_pkts > 0 else 8000
                             calculated_drops = int(excess_bps / avg_pkt_size_bits)
-                            
                             self.logger.warning(f"⚠️ DPID {dpid}: {throughput_bps/1e6:.1f} Mbps | Drops: {calculated_drops}")
 
                     if throughput_bps > 1000:
-                        # 5. PENGAMAN INTEGER OVERFLOW (Penting buat Database!)
-                        # Postgres Integer max 2.14 Milyar. Kalau error math bikin angka triliunan, database crash.
-                        if throughput_bps > 2000000000: 
-                             throughput_bps = 2000000000 # Cap di 2Gbps biar ga crash DB
-                        
+                        # 5. Pengaman Integer Overflow Database
+                        if throughput_bps > 2000000000:
+                            throughput_bps = 2000000000
+
                         self.insert_stats(
-                            dpid, 
-                            throughput_bps, 
-                            pps, 
-                            delta_bytes, 
-                            delta_pkts, 
+                            dpid,
+                            throughput_bps,
+                            pps,
+                            delta_bytes, # Insert Delta
+                            delta_pkts,  # Insert Delta
                             drops=calculated_drops
                         )
-                
-                # Update state
+
+                # Update state untuk putaran berikutnya
                 self.prev_stats[prev_key] = (current_byte_cum, current_pkt_cum, now)
 
             except Exception as e:
-                # INI KUNCINYA: Kalau ada error, PRINT saja, JANGAN CRASH
-                print(f"!!! CAUGHT EXCEPTION in Switch {dpid}: {e}")
-                # traceback.print_exc() # Uncomment kalau mau lihat detail error codingan
-                continue # Lanjut ke flow berikutnya
+                # Catch error agar controller tidak mati
+                # print(f"!!! Error in Flow Stats: {e}")
+                continue
 
     # --- HANDLER: PORT STATS (ANTI-CRASH) ---
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
@@ -206,29 +203,29 @@ class RealTrafficMonitor(app_manager.RyuApp):
         body = ev.msg.body
         dpid = ev.msg.datapath.id
         now = time.time()
-        
+
         for stat in body:
             try:
                 port_no = stat.port_no
                 current_drops = stat.tx_dropped + stat.rx_dropped
                 key = (dpid, port_no)
-                
+
                 if key in self.prev_port_stats:
                     last_drops, last_time = self.prev_port_stats[key]
                     delta_drops = current_drops - last_drops
-                    
+
                     if delta_drops > 0:
                         self.logger.warning(f"HARDWARE DROP on Switch {dpid}: {delta_drops} pkts")
                         self.insert_stats(dpid, 0, 0, 0, 0, drops=delta_drops)
-                
+
                 self.prev_port_stats[key] = (current_drops, now)
             except Exception as e:
-                print(f"!!! Error in Port Stats: {e}")
+                # print(f"!!! Error in Port Stats: {e}")
+                pass
 
     def insert_stats(self, dpid, bps, pps, bytes_delta, pkts_delta, drops=0):
-        # Cek koneksi DB sebelum eksekusi
-        if not self.conn or not self.cur: 
-            # Coba reconnect silent
+        # Auto-reconnect jika DB putus
+        if not self.conn or self.conn.closed:
             try:
                 self.connect_db()
             except:
@@ -237,13 +234,13 @@ class RealTrafficMonitor(app_manager.RyuApp):
         try:
             drops = max(0, drops)
             query = """
-            INSERT INTO traffic.flow_stats_real 
+            INSERT INTO traffic.flow_stats_real
             (timestamp, dpid, throughput_bps, packet_rate_pps, byte_count, packet_count, dropped_count)
-            VALUES (NOW(), %s, %s, %s, %s, %s, %s) 
+            VALUES (NOW(), %s, %s, %s, %s, %s, %s)
             """
             self.cur.execute(query, (str(dpid), bps, pps, bytes_delta, pkts_delta, drops))
             self.conn.commit()
         except Exception as e:
-            # Print error DB tapi jangan crash controller
-            print(f"!!! DB Insert Failed: {e}")
-            self.conn.rollback()
+            # print(f"!!! DB Insert Failed: {e}")
+            if self.conn:
+                self.conn.rollback()
