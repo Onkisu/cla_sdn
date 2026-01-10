@@ -1,27 +1,17 @@
 #!/usr/bin/env python3
-"""
-RYU REAL-TIME MONITOR FOR ML (THE TRUTH TELLER) - FIXED VERSION
-Fixes:
-1. Added missing imports (CONFIG_DISPATCHER, packet, ethernet).
-2. Records REAL Port Stats for ML.
-3. Simple L2 Forwarding (Learning Switch) to keep network alive.
-"""
+# file: controller_real.py
 
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-# FIX 1: Tambahkan CONFIG_DISPATCHER disini
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub
-
-# FIX 2: Tambahkan library packet untuk forwarding logic
 from ryu.lib.packet import packet, ethernet, ether_types
-
 import psycopg2
 from datetime import datetime
 
-# DB CONFIG
+# --- CONFIG DB (JANGAN DIGANTI KALAU SUDAH BENAR) ---
 DB_CONFIG = {
     'host': '103.181.142.165',
     'database': 'development',
@@ -30,12 +20,13 @@ DB_CONFIG = {
     'port': 5432
 }
 
-class MLDataCollector(app_manager.RyuApp):
+class RealTimeCollector(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
-        super(MLDataCollector, self).__init__(*args, **kwargs)
+        super(RealTimeCollector, self).__init__(*args, **kwargs)
         self.datapaths = {}
+        # Polling setiap 1 detik agar resolusi data tinggi untuk ML
         self.monitor_thread = hub.spawn(self._monitor)
         self.conn = None
         self.connect_db()
@@ -43,23 +34,23 @@ class MLDataCollector(app_manager.RyuApp):
     def connect_db(self):
         try:
             self.conn = psycopg2.connect(**DB_CONFIG)
-            self.logger.info("✅ [ML-MONITOR] Database Connected - Ready to record TRUTH.")
+            self.logger.info("✅ DATABASE TERHUBUNG (Ready to collect REAL metrics)")
         except Exception as e:
-            self.logger.error(f"❌ DB Error: {e}")
+            self.logger.error(f"❌ DATABASE ERROR: {e}")
 
     def _monitor(self):
         while True:
             for dp in self.datapaths.values():
                 self._request_stats(dp)
-            hub.sleep(1.0) # Polling tiap 1 detik
+            hub.sleep(1.0) # INTERVAL 1 DETIK
 
     def _request_stats(self, datapath):
         parser = datapath.ofproto_parser
-        
-        # Request Port Stats (Target ML: Drops & Throughput Fisik)
+        # Request Port Stats (Physical Interface) -> Wajib untuk deteksi Drop
         req = parser.OFPPortStatsRequest(datapath, 0, ofproto_v1_3.OFPP_ANY)
         datapath.send_msg(req)
 
+    # --- HANDLING KONEKSI SWITCH ---
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def _state_change_handler(self, ev):
         datapath = ev.datapath
@@ -70,6 +61,7 @@ class MLDataCollector(app_manager.RyuApp):
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
 
+    # --- MENERIMA DATA STATISTIK DARI SWITCH ---
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
         body = ev.msg.body
@@ -81,10 +73,10 @@ class MLDataCollector(app_manager.RyuApp):
         try:
             cur = self.conn.cursor()
             for stat in body:
-                # Filter Port > 1000 (Port internal OVS, abaikan)
+                # Filter port internal OVS (>1000) agar DB tidak penuh sampah
                 if stat.port_no > 1000: continue
 
-                # INSERT DATA MURNI (TANPA SCALING/SINE WAVE)
+                # INSERT DATA MURNI APA ADANYA
                 cur.execute("""
                     INSERT INTO traffic.port_stats_real
                     (timestamp, dpid, port_no, rx_packets, tx_packets, 
@@ -102,9 +94,7 @@ class MLDataCollector(app_manager.RyuApp):
             self.logger.error(f"Save Error: {e}")
             self.conn.rollback()
 
-    # --- BAGIAN PACKET FORWARDING SEDERHANA ---
-    # Agar ping/traffic tetap jalan (Pengganti logic switch l2/l3 simple)
-    
+    # --- PACKET FORWARDING SEDERHANA (Agar Ping/Traffic Jalan) ---
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
@@ -134,8 +124,7 @@ class MLDataCollector(app_manager.RyuApp):
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
 
-        # Simple Learning Switch Logic (Flood all)
-        # Cukup untuk topologi spine-leaf sederhana
+        # Flood Action (Simple L2 Switch)
         actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=msg.data)
         datapath.send_msg(out)
