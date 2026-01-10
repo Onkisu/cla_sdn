@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-PURE MONITORING CONTROLLER (FIXED)
-- Fix: Menangani Port Stats untuk mendeteksi Packet Drops.
-- Fix: Menghitung delta drops (karena counter OVS bersifat kumulatif).
+PURE MONITORING CONTROLLER (SMART DROPS EDITION)
+- Fix: Menghitung Drops berdasarkan saturasi Link.
+- Logic: Jika Throughput > 10 Mbps, selisihnya dianggap sebagai Packet Loss.
 """
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -22,6 +22,11 @@ DB_CONFIG = {
     'port': 5432
 }
 
+# Kapasitas Link Fisik (Sesuai simulation.py = 10 Mbps)
+# Kita set warning di 9.5 Mbps untuk mulai menghitung drop
+LINK_CAPACITY_BPS = 10000000 
+SAFE_THRESHOLD_BPS = 9500000
+
 class RealTrafficMonitor(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
@@ -29,14 +34,8 @@ class RealTrafficMonitor(app_manager.RyuApp):
         super(RealTrafficMonitor, self).__init__(*args, **kwargs)
         self.datapaths = {}
         self.mac_to_port = {}
-        
-        # Dictionary untuk flow stats (Throughput)
         self.prev_stats = {} 
-        
-        # Dictionary BARU untuk port stats (Drops)
-        # Key: (dpid, port_no) -> Value: (dropped_count, timestamp)
         self.prev_port_stats = {} 
-        
         self.monitor_thread = hub.spawn(self._monitor)
         self.connect_db()
 
@@ -112,8 +111,7 @@ class RealTrafficMonitor(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         req = parser.OFPFlowStatsRequest(datapath)
         datapath.send_msg(req)
-        
-        # Request Port Stats (penting untuk drops)
+        # Port stats tetap diminta untuk verifikasi
         req_port = parser.OFPPortStatsRequest(datapath)
         datapath.send_msg(req_port)
 
@@ -126,7 +124,7 @@ class RealTrafficMonitor(app_manager.RyuApp):
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
 
-    # --- HANDLER 1: FLOW STATS (Untuk Throughput) ---
+    # --- HANDLER: FLOW STATS (Smart Calculation) ---
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
         body = ev.msg.body
@@ -153,13 +151,27 @@ class RealTrafficMonitor(app_manager.RyuApp):
                 throughput_bps = int((delta_bytes * 8) / time_delta)
                 pps = int(delta_pkts / time_delta)
                 
+                # --- LOGIC BARU: HITUNG DROPS ---
+                calculated_drops = 0
+                
+                # Jika throughput melebihi kapasitas kabel (10Mbps), sisanya adalah Drops
+                # Kita gunakan threshold 9.5Mbps untuk menangkap saturasi awal
+                if throughput_bps > SAFE_THRESHOLD_BPS:
+                    excess_bps = throughput_bps - LINK_CAPACITY_BPS
+                    if excess_bps > 0:
+                        # Estimasi jumlah paket drop: Excess Bits / Ukuran Rata-rata Paket
+                        # Menghindari pembagian nol
+                        avg_pkt_size_bits = (delta_bytes * 8) / delta_pkts if delta_pkts > 0 else 8000
+                        calculated_drops = int(excess_bps / avg_pkt_size_bits)
+                        
+                        self.logger.warning(f"⚠️ CONGESTION DPID {dpid}: {throughput_bps/1e6:.1f} Mbps | Est. Drops: {calculated_drops}")
+
                 if throughput_bps > 1000:
-                    # Insert Throughput (Drops = 0 disini karena Flow Stats tidak mencatat drop fisik)
-                    self.insert_stats(dpid, throughput_bps, pps, byte_count, packet_count, drops=0)
+                    self.insert_stats(dpid, throughput_bps, pps, byte_count, packet_count, drops=calculated_drops)
             
             self.prev_stats[prev_key] = (byte_count, packet_count, now)
 
-    # --- HANDLER 2: PORT STATS (Untuk Drops) ---
+    # --- HANDLER: PORT STATS (Backup Real Drops) ---
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
         body = ev.msg.body
@@ -168,36 +180,31 @@ class RealTrafficMonitor(app_manager.RyuApp):
         
         for stat in body:
             port_no = stat.port_no
-            # OVS Drop Counter adalah kumulatif
-            # tx_dropped biasanya terjadi saat buffer switch penuh (Congestion)
             current_drops = stat.tx_dropped + stat.rx_dropped
-            
             key = (dpid, port_no)
             
             if key in self.prev_port_stats:
                 last_drops, last_time = self.prev_port_stats[key]
-                
-                # Hitung Delta (kenaikan drops sejak detik lalu)
                 delta_drops = current_drops - last_drops
                 
+                # Jika hardware/OVS melaporkan drop, kita masukkan juga
                 if delta_drops > 0:
-                    self.logger.warning(f"⚠️ DROP DETECTED on Switch {dpid} Port {port_no}: {delta_drops} pkts")
-                    # Insert Drop Log
-                    # throughput/pps di-set 0 agar tidak double count di forecast.py
+                    self.logger.warning(f"HARDWARE DROP on Switch {dpid}: {delta_drops} pkts")
                     self.insert_stats(dpid, 0, 0, 0, 0, drops=delta_drops)
             
-            # Update state
             self.prev_port_stats[key] = (current_drops, now)
 
     def insert_stats(self, dpid, bps, pps, bytes_total, pkts_total, drops=0):
         if not self.conn: return
         try:
+            # Cegah insert drops negatif
+            drops = max(0, drops)
+            
             query = """
             INSERT INTO traffic.flow_stats_real 
             (timestamp, dpid, throughput_bps, packet_rate_pps, byte_count, packet_count, dropped_count)
             VALUES (NOW(), %s, %s, %s, %s, %s, %s) 
             """
-            # Menggunakan variabel 'drops' (bukan hardcode 0)
             self.cur.execute(query, (str(dpid), bps, pps, bytes_total, pkts_total, drops))
             self.conn.commit()
         except Exception as e:
