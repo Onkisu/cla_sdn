@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-PURE MONITORING CONTROLLER (SMART DROPS EDITION)
-- Fix: Menghitung Drops berdasarkan saturasi Link.
-- Logic: Jika Throughput > 10 Mbps, selisihnya dianggap sebagai Packet Loss.
+PURE MONITORING CONTROLLER (FINAL)
+- Fix 1: Menghitung Drops berdasarkan saturasi Link (Inferred Drops).
+- Fix 2: Menyimpan Byte/Packet Count sebagai DELTA (per detik), bukan kumulatif.
 """
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -22,8 +22,7 @@ DB_CONFIG = {
     'port': 5432
 }
 
-# Kapasitas Link Fisik (Sesuai simulation.py = 10 Mbps)
-# Kita set warning di 9.5 Mbps untuk mulai menghitung drop
+# Kapasitas Link Fisik
 LINK_CAPACITY_BPS = 10000000 
 SAFE_THRESHOLD_BPS = 9500000
 
@@ -111,7 +110,6 @@ class RealTrafficMonitor(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         req = parser.OFPFlowStatsRequest(datapath)
         datapath.send_msg(req)
-        # Port stats tetap diminta untuk verifikasi
         req_port = parser.OFPPortStatsRequest(datapath)
         datapath.send_msg(req_port)
 
@@ -137,39 +135,37 @@ class RealTrafficMonitor(app_manager.RyuApp):
             match_str = str(stat.match)
             prev_key = (dpid, match_str)
             
-            byte_count = stat.byte_count
-            packet_count = stat.packet_count
+            # Ini data KUMULATIF dari switch (tidak kita insert ke DB, hanya untuk hitung delta)
+            raw_byte_count = stat.byte_count
+            raw_packet_count = stat.packet_count
             
             if prev_key in self.prev_stats:
                 last_bytes, last_pkts, last_time = self.prev_stats[prev_key]
                 time_delta = now - last_time
                 if time_delta <= 0: continue
                 
-                delta_bytes = byte_count - last_bytes
-                delta_pkts = packet_count - last_pkts
+                # --- INI DATA YANG KITA INSERT (DELTA) ---
+                delta_bytes = raw_byte_count - last_bytes
+                delta_pkts = raw_packet_count - last_pkts
                 
                 throughput_bps = int((delta_bytes * 8) / time_delta)
                 pps = int(delta_pkts / time_delta)
                 
                 # --- LOGIC BARU: HITUNG DROPS ---
                 calculated_drops = 0
-                
-                # Jika throughput melebihi kapasitas kabel (10Mbps), sisanya adalah Drops
-                # Kita gunakan threshold 9.5Mbps untuk menangkap saturasi awal
                 if throughput_bps > SAFE_THRESHOLD_BPS:
                     excess_bps = throughput_bps - LINK_CAPACITY_BPS
                     if excess_bps > 0:
-                        # Estimasi jumlah paket drop: Excess Bits / Ukuran Rata-rata Paket
-                        # Menghindari pembagian nol
                         avg_pkt_size_bits = (delta_bytes * 8) / delta_pkts if delta_pkts > 0 else 8000
                         calculated_drops = int(excess_bps / avg_pkt_size_bits)
-                        
                         self.logger.warning(f"⚠️ CONGESTION DPID {dpid}: {throughput_bps/1e6:.1f} Mbps | Est. Drops: {calculated_drops}")
 
                 if throughput_bps > 1000:
-                    self.insert_stats(dpid, throughput_bps, pps, byte_count, packet_count, drops=calculated_drops)
+                    # FIX: Insert delta_bytes dan delta_pkts, bukan raw_byte_count
+                    self.insert_stats(dpid, throughput_bps, pps, delta_bytes, delta_pkts, drops=calculated_drops)
             
-            self.prev_stats[prev_key] = (byte_count, packet_count, now)
+            # Update state (simpan yang kumulatif untuk perhitungan delta berikutnya)
+            self.prev_stats[prev_key] = (raw_byte_count, raw_packet_count, now)
 
     # --- HANDLER: PORT STATS (Backup Real Drops) ---
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
@@ -187,17 +183,15 @@ class RealTrafficMonitor(app_manager.RyuApp):
                 last_drops, last_time = self.prev_port_stats[key]
                 delta_drops = current_drops - last_drops
                 
-                # Jika hardware/OVS melaporkan drop, kita masukkan juga
                 if delta_drops > 0:
                     self.logger.warning(f"HARDWARE DROP on Switch {dpid}: {delta_drops} pkts")
                     self.insert_stats(dpid, 0, 0, 0, 0, drops=delta_drops)
             
             self.prev_port_stats[key] = (current_drops, now)
 
-    def insert_stats(self, dpid, bps, pps, bytes_total, pkts_total, drops=0):
+    def insert_stats(self, dpid, bps, pps, bytes_delta, pkts_delta, drops=0):
         if not self.conn: return
         try:
-            # Cegah insert drops negatif
             drops = max(0, drops)
             
             query = """
@@ -205,7 +199,8 @@ class RealTrafficMonitor(app_manager.RyuApp):
             (timestamp, dpid, throughput_bps, packet_rate_pps, byte_count, packet_count, dropped_count)
             VALUES (NOW(), %s, %s, %s, %s, %s, %s) 
             """
-            self.cur.execute(query, (str(dpid), bps, pps, bytes_total, pkts_total, drops))
+            # Sekarang bytes_delta & pkts_delta yang masuk
+            self.cur.execute(query, (str(dpid), bps, pps, bytes_delta, pkts_delta, drops))
             self.conn.commit()
         except Exception as e:
             self.logger.error(f"DB Insert Error: {e}")
