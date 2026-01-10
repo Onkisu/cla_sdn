@@ -75,7 +75,7 @@ echo "       Controller will listen on port 6653"
 # Run Ryu in subshell with venv activated
 (
     source $RYU_VENV/bin/activate
-    ryu-manager --observe-links controller.py > /tmp/controller.log 2>&1 &
+    sudo ryu-manager --observe-links controller.py > /tmp/controller.log 2>&1 &
     echo $! > /tmp/ryu_pid.txt
 )
 
