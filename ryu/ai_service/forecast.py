@@ -199,6 +199,7 @@ def train_and_forecast(df):
 # =========================
 # 4. OPTIMIZED MAIN LOOP
 # =========================
+
 def main():
     print("🚀 Starting Optimized Forecast Monitor...")
     
@@ -262,8 +263,9 @@ def main():
             ts_pred = current_time + timedelta(seconds=PREDICTION_HORIZON_SEC)
             try:
                 pd.DataFrame({'ts': [ts_pred], 'y_pred': [pred_bps]}).to_sql(
-                    TABLE_FORECAST, engine, if_exists='append', index=False
+                TABLE_FORECAST, engine, if_exists='append', index=False
                 )
+
             except:
                 pass
 
