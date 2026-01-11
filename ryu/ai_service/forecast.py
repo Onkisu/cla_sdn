@@ -51,7 +51,7 @@ def get_training_data(hours=6):
         )
         select detik as ts, total_bytes * 8 as throughput_bps from x where dpid = 5
         and (total_bytes * 8 ) > 100000 
-        and timestamp >= NOW() - INTERVAL '{hours} hour'
+        and detik >= NOW() - INTERVAL '{hours} hour'
         order by 1 asc
     """
 
