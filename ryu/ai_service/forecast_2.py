@@ -37,8 +37,6 @@ def get_data(hours=1):
     - hours=6 untuk Training (agar pola siklus 30 menit terlihat)
     - hours=1.5 untuk Prediction (agar query super cepat)
     """
-    # NOTE: Filter '> 100000' SAYA HAPUS. 
-    # Kita butuh data trafik kecil/sepi agar bisa menghitung durasi 'steady state'.
     query = f"""
         with x as (
             SELECT 
@@ -69,7 +67,6 @@ def get_data(hours=1):
     df = df.set_index('ts')
 
     # Resample ke 1 detik, isi bolong dengan nilai sebelumnya (ffill)
-    # Ini penting agar data continuous
     df = df.resample('1s').max().ffill().fillna(0)
     
     return df
@@ -83,11 +80,9 @@ def create_features(df, for_training=False):
     # 1. Labeli State: 0 = Normal/Sepi, 1 = Burst
     data['is_burst'] = (data[TARGET] > BURST_THRESHOLD_BPS).astype(int)
 
-    # 2. Hitung "Consecutive Steady Seconds" (Fitur KUNCI DETEKSI TIMER)
-    # Menghitung sudah berapa detik trafik berada di bawah threshold
+    # 2. Hitung "Consecutive Steady Seconds" (Fitur KUNCI)
     group_id = data['is_burst'].cumsum()
     data['consecutive_steady_sec'] = data.groupby(group_id).cumcount()
-    # Jika sedang burst, reset counter ke 0
     data.loc[data['is_burst'] == 1, 'consecutive_steady_sec'] = 0
 
     # 3. Rolling Statistics
@@ -98,12 +93,11 @@ def create_features(df, for_training=False):
     for l in [1, 5, 10]:
         data[f'lag_{l}'] = data[TARGET].shift(l)
 
-    # 5. Target Variable (Hanya untuk Training)
+    # 5. Target Variable
     if for_training:
         data['target_future'] = data[TARGET].shift(-PREDICTION_HORIZON_SEC)
         data = data.dropna()
     else:
-        # Untuk prediksi live, kita butuh baris terakhir walau target_future nya NaN
         data = data.dropna(subset=['roll_mean_30s', 'lag_10'])
 
     return data
@@ -117,7 +111,7 @@ def train_model():
     print("\n🧠 Starting Model Training (Wait)...")
     start_t = time.time()
     
-    # Ambil data 6 jam untuk training
+    # Ambil data 6 jam
     df = get_data(hours=6)
     if df is None or len(df) < 1000:
         print("⚠️ Not enough data to train.")
@@ -144,7 +138,6 @@ def train_model():
     )
     model.fit(X, y)
     
-    # Simpan ke Global Variable
     TRAINED_MODEL = model
     LAST_TRAIN_TIME = time.time()
     
@@ -159,7 +152,7 @@ def run_prediction():
     
     if TRAINED_MODEL is None: return 
 
-    # Ambil data pendek (1.5 jam) biar cepat
+    # Ambil data pendek (1.5 jam)
     df = get_data(hours=1.5) 
     if df is None: return
 
@@ -168,7 +161,6 @@ def run_prediction():
     
     # Ambil data DETIK INI (Baris Terakhir)
     last_row = df_feat.iloc[[-1]]
-    current_ts = df_feat.index[-1]
     
     features = [
         'consecutive_steady_sec', 
@@ -181,25 +173,26 @@ def run_prediction():
     # Prediksi
     pred_val = TRAINED_MODEL.predict(last_row[features])[0]
     
-    # Hitung Timestamp Masa Depan (Waktu Sekarang + 10 Detik)
-    ts_now = pd.Timestamp.now()
-    ts_future = ts_now + timedelta(seconds=PREDICTION_HORIZON_SEC)
+    # --- UPDATE LOGIC DISINI ---
+    ts_now = pd.Timestamp.now() # Waktu Dibuat (Created At)
+    ts_future = ts_now + timedelta(seconds=PREDICTION_HORIZON_SEC) # Waktu Prediksi (Target Time)
     
     # Log ke Layar
     steady_sec = last_row['consecutive_steady_sec'].values[0]
     status = "⚠️ DANGER" if pred_val > BURST_THRESHOLD_BPS else "SAFE"
     
-    # Print overwrite line (biar rapi)
     print(f"[{ts_now.strftime('%H:%M:%S')}] Steady: {steady_sec:.0f}s | Pred (+10s): {pred_val:,.0f} bps [{status}]", end='\r')
 
-    # Simpan ke Database
+    # Simpan ke Database dengan 2 timestamp
     try:
         res_df = pd.DataFrame([{
-            'ts': ts_future, 
+            'ts_created': ts_now,   # <--- Kolom Baru: Kapan prediksi dibuat
+            'ts': ts_future,        # <--- Kolom Lama: Untuk jam berapa prediksi ini
             'y_pred': pred_val
         }])
         res_df.to_sql(TABLE_FORECAST, engine, if_exists='append', index=False)
-    except Exception:
+    except Exception as e:
+        # Pass jika error minor, print jika perlu debug
         pass 
 
 # =========================
@@ -212,14 +205,14 @@ if __name__ == "__main__":
         while True:
             loop_start = time.time()
             
-            # 1. Cek apakah waktunya Training Ulang (30 menit sekali)
+            # 1. Cek apakah waktunya Training Ulang
             if TRAINED_MODEL is None or (time.time() - LAST_TRAIN_TIME > TRAIN_INTERVAL_SEC):
                 train_model()
             
-            # 2. Jalankan Prediksi (Setiap Loop)
+            # 2. Jalankan Prediksi
             run_prediction()
             
-            # 3. Sleep Cerdas (Menjaga loop tetap 5 detik)
+            # 3. Sleep Cerdas
             elapsed = time.time() - loop_start
             sleep_time = max(0, 5.0 - elapsed)
             time.sleep(sleep_time)
