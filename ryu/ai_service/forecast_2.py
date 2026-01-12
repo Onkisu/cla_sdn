@@ -51,7 +51,8 @@ def get_data(hours=1):
             detik as ts, 
             total_bytes * 8 as throughput_bps 
         FROM x 
-        WHERE dpid = 5
+        WHERE dpid = 5 
+        and (total_bytes * 8 ) > 100000
         ORDER BY ts ASC
     """
 
