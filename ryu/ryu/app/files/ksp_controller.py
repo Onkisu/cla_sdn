@@ -45,7 +45,7 @@ class VoIPSmartController(app_manager.RyuApp):
         self.ip_to_mac = {}     
         self.datapaths = {}
         self.net = nx.DiGraph() # NetworkX Graph
-        self.db_conn = None
+        # self.db_conn = None
         self.last_bytes = {}
         self.start_time = time.time()
         
@@ -72,6 +72,14 @@ class VoIPSmartController(app_manager.RyuApp):
         except Exception as e:
             self.logger.warning(f"DB Error: {e}. Running without DB storage.")
             self.db_conn = None
+    
+    def get_db_conn(self):
+        try:
+            return psycopg2.connect(**DB_CONFIG, connect_timeout=3)
+        except Exception as e:
+            self.logger.error(f"DB Connect Error: {e}")
+            return None
+
 
     # =================================================================
     # 1. TOPOLOGY DISCOVERY (NETWORKX) - NEW
@@ -97,32 +105,42 @@ class VoIPSmartController(app_manager.RyuApp):
     # 2. FORECAST MONITORING & KSP LOGIC - NEW
     # =================================================================
     def _monitor_forecast(self):
-        """Mengecek tabel forecast dan memicu rerouting"""
         while True:
             hub.sleep(2)
-            if self.db_conn:
-                try:
-                    cursor = self.db_conn.cursor()
-                    query = "SELECT y_pred FROM forecast_1h ORDER BY ts_created DESC LIMIT 1"
-                    cursor.execute(query)
-                    result = cursor.fetchone()
-                    cursor.close()
+            conn = self.get_db_conn()
+            if not conn:
+                continue
+            try:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT y_pred 
+                    FROM forecast_1h 
+                    ORDER BY ts_created DESC 
+                    LIMIT 1
+                """)
+                result = cur.fetchone()
+                cur.close()
+                conn.close()
 
-                    if result:
-                        pred_bps = result[0]
-                        
-                        if pred_bps > BURST_THRESHOLD_BPS and not self.congestion_active:
-                            self.logger.warning(f"\n⚠️  PREDICTION: CONGESTION ({pred_bps:,.0f} bps) DETECTED")
-                            self.apply_ksp_reroute(k=2, trigger_val=pred_bps)
-                            self.congestion_active = True
-                            
-                        elif pred_bps < BURST_THRESHOLD_BPS and self.congestion_active:
-                            self.logger.info(f"\n✅ PREDICTION: NORMAL ({pred_bps:,.0f} bps). Recovering...")
-                            self.revert_routing(k=2, trigger_val=pred_bps)
-                            self.congestion_active = False
-                except Exception as e:
-                    self.logger.error(f"Forecast Monitor Error: {e}")
-                    self.connect_database()
+                if not result:
+                    continue
+
+                pred_bps = result[0]
+
+                if pred_bps > BURST_THRESHOLD_BPS and not self.congestion_active:
+                    self.logger.warning(f"⚠️ CONGESTION PREDICTED: {pred_bps}")
+                    self.apply_ksp_reroute(k=2, trigger_val=pred_bps)
+                    self.congestion_active = True
+
+                elif pred_bps < BURST_THRESHOLD_BPS and self.congestion_active:
+                    self.logger.info(f"✅ NORMAL TRAFFIC: {pred_bps}")
+                    self.revert_routing()
+                    self.congestion_active = False
+
+            except Exception as e:
+                self.logger.error(f"Forecast Monitor Error: {e}")
+                conn.close()
+
 
     def get_k_shortest_paths(self, src_dpid, dst_dpid, k=2):
         try:
@@ -199,24 +217,24 @@ class VoIPSmartController(app_manager.RyuApp):
         # ================================
 
     def insert_event_log(self, event_type, description, trigger_value=0):
-        """Mencatat event Reroute/Revert ke Database"""
-        if not self.db_conn: return
+        conn = self.get_db_conn()
+        if not conn:
+            return
         try:
-            cursor = self.db_conn.cursor()
-            query = """
-            INSERT INTO traffic.system_events 
-            (timestamp, event_type, description, trigger_value)
-            VALUES (%s, %s, %s, %s)
-            """
-            # Gunakan waktu sekarang
-            now = datetime.now()
-            cursor.execute(query, (now, event_type, description, trigger_value))
-            self.db_conn.commit()
-            cursor.close()
-            self.logger.info(f"DB LOG: [{event_type}] saved.")
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO traffic.system_events
+                (timestamp, event_type, description, trigger_value)
+                VALUES (%s, %s, %s, %s)
+            """, (datetime.now(), event_type, description, trigger_value))
+            conn.commit()
+            cur.close()
+            conn.close()
         except Exception as e:
-            self.logger.error(f"Failed to log event to DB: {e}")
-            self.db_conn.rollback()
+            self.logger.error(f"DB LOG ERROR: {e}")
+            conn.rollback()
+            conn.close()
+
 
     # =================================================================
     # 3. STANDARD HANDLERS (PacketIn, SwitchFeatures) - MIXED
@@ -366,21 +384,25 @@ class VoIPSmartController(app_manager.RyuApp):
         return int(max(min_val, min(max_val, target)))
 
     def insert_flow_data(self, flow_data):
-        if not self.db_conn: return
+        conn = self.get_db_conn()
+        if not conn:
+            return
         try:
-            cursor = self.db_conn.cursor()
-            query = """
-            INSERT INTO traffic.flow_stats_ 
-            (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
-             ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx, pkts_tx, pkts_rx, 
-             duration_sec, traffic_label)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
-            cursor.execute(query, flow_data)
-            self.db_conn.commit()
-            cursor.close()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO traffic.flow_stats_
+                (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac,
+                ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx,
+                pkts_tx, pkts_rx, duration_sec, traffic_label)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, flow_data)
+            conn.commit()
+            cur.close()
+            conn.close()
         except:
-            self.db_conn.rollback()
+            conn.rollback()
+            conn.close()
+
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
