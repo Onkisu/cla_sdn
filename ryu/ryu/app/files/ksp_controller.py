@@ -21,6 +21,8 @@ from datetime import datetime
 import random
 import math
 import time
+import json
+
 
 # PostgreSQL Configuration
 # Saya set ke IP Remote agar sinkron dengan forecast_2.py
@@ -187,15 +189,32 @@ class VoIPSmartController(app_manager.RyuApp):
                     self.add_flow(datapath, self.reroute_priority, match, actions)
         
         # === TAMBAHAN LOG KE DATABASE ===
-        log_desc = f"Switching from default {current_route} to KSP-{k} {new_route}"
-        self.insert_event_log("REROUTE_ACTIVE", log_desc, trigger_val)
+        log_payload = {
+            "current": current_route,
+            "reroute": new_route,
+            "k": k,
+            "trigger": trigger_val
+        }
+
+        self.insert_event_log(
+            event_type="REROUTE_ACTIVE",
+            description=json.dumps(log_payload),
+            trigger_value=trigger_val
+        )
+
+
 
     def revert_routing(self):
         # Info logging
         src_sw = 4; dst_sw = 5
         paths = self.get_k_shortest_paths(src_sw, dst_sw, k=1)
-        if paths:
-            self.logger.info(f" Back to Default Route = {paths[0]}")
+        if not paths:
+            self.logger.warning("No default route found during revert")
+            default_route = []
+        else:
+            default_route = paths[0]
+            self.logger.info(f" Back to Default Route = {default_route}")
+
 
         self.logger.info(" -> Deleting High Priority Rules...")
         for dpid, dp in self.datapaths.items():
@@ -213,7 +232,15 @@ class VoIPSmartController(app_manager.RyuApp):
             )
             dp.send_msg(mod)
         # === TAMBAHAN LOG KE DATABASE ===
-        self.insert_event_log("REROUTE_REVERT", f"Congestion cleared. Reverting to default: {path_str}", trigger_val)
+        log_payload = {
+            "revert": default_route
+        }
+
+        self.insert_event_log(
+            event_type="REROUTE_REVERT",
+            description=json.dumps(log_payload),
+            trigger_value=0
+        )
         # ================================
 
     def insert_event_log(self, event_type, description, trigger_value=0):
