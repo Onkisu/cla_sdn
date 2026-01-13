@@ -456,7 +456,10 @@ class VoIPSmartController(app_manager.RyuApp):
             if not src_ip or not dst_ip or dst_ip.endswith('.255'): continue
             
             # Hitung Delta (Real D-ITG traffic since last sec)
-            flow_key = f"{dpid}-{src_ip}-{dst_ip}-{match.get('udp_src',0)}-{match.get('udp_dst',0)}"
+            
+            # [FIX] Tambahkan in_port ke key untuk mencegah collision saat rerouting
+            in_port = match.get('in_port', 'any')
+            flow_key = f"{dpid}-{src_ip}-{dst_ip}-{match.get('udp_src',0)}-{match.get('udp_dst',0)}-{in_port}"
             byte_count = stat.byte_count
             packet_count = stat.packet_count
             
