@@ -35,7 +35,7 @@ DB_CONFIG = {
 }
 
 # Threshold Congestion (Sesuai forecast_2.py)
-BURST_THRESHOLD_BPS = 250000 
+BURST_THRESHOLD_BPS = 199000 
 
 class VoIPSmartController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -54,6 +54,11 @@ class VoIPSmartController(app_manager.RyuApp):
         # --- STATE CONGESTION ---
         self.congestion_active = False 
         self.reroute_priority = 100 
+
+        # [NEW] Variabel untuk mencegah Flapping
+        self.last_congestion_time = 0
+        self.cooldown_period = 30  # Detik (Wajib stabil dulu sebelum revert)
+        self.LOWER_THRESHOLD_BPS = 150000 # Batas aman untuk kembali (Jauh di bawah 250k)
         
         self.connect_database()
         
@@ -106,6 +111,9 @@ class VoIPSmartController(app_manager.RyuApp):
     # =================================================================
     # 2. FORECAST MONITORING & KSP LOGIC - NEW
     # =================================================================
+    # =================================================================
+    # 2. FORECAST MONITORING & KSP LOGIC - FIXED (HYSTERESIS)
+    # =================================================================
     def _monitor_forecast(self):
         while True:
             hub.sleep(2)
@@ -114,6 +122,7 @@ class VoIPSmartController(app_manager.RyuApp):
                 continue
             try:
                 cur = conn.cursor()
+                # Ambil prediksi terbaru
                 cur.execute("""
                     SELECT y_pred 
                     FROM forecast_1h 
@@ -128,23 +137,46 @@ class VoIPSmartController(app_manager.RyuApp):
                     continue
 
                 pred_bps = result[0]
+                current_time = time.time()
 
+                # --- LOGIKA BARU DENGAN HYSTERESIS ---
+                
+                # CASE 1: Deteksi Congestion (TRIGGER NAIK)
+                # Syarat: Traffic tinggi (> 250k) DAN status sekarang sedang Normal
                 if pred_bps > BURST_THRESHOLD_BPS and not self.congestion_active:
-                    self.logger.warning(f"⚠️ CONGESTION PREDICTED: {pred_bps}")
-                    self.apply_ksp_reroute(k=2, trigger_val=pred_bps)
+                    self.logger.warning(f"⚠️ CONGESTION PREDICTED: {pred_bps:.2f} bps -> REROUTING!")
+                    
+                    # Terapkan Reroute
+                    self.apply_ksp_reroute(k=3, trigger_val=pred_bps)
+                    
+                    # Update status
                     self.congestion_active = True
+                    self.last_congestion_time = current_time # Catat waktu kejadian
 
-                elif pred_bps < BURST_THRESHOLD_BPS and self.congestion_active:
-                    self.logger.info(f"✅ NORMAL TRAFFIC: {pred_bps}")
-                    self.revert_routing()
-                    self.congestion_active = False
+                # CASE 2: Kembali Normal (TRIGGER TURUN)
+                # Syarat:
+                # 1. Traffic harus TURUN JAUH (misal < 150k), bukan cuma < 250k
+                # 2. Harus sudah melewati masa cooldown (30 detik) dari kejadian terakhir
+                elif self.congestion_active:
+                    time_since_last_trigger = current_time - self.last_congestion_time
+                    
+                    if pred_bps < self.LOWER_THRESHOLD_BPS and time_since_last_trigger > self.cooldown_period:
+                        self.logger.info(f"✅ TRAFFIC STABLE ({pred_bps:.2f} bps) for {int(time_since_last_trigger)}s -> REVERTING.")
+                        
+                        # Terapkan Revert
+                        self.revert_routing()
+                        self.congestion_active = False
+                    else:
+                        # Logging opsional untuk debug (bisa dihapus kalau nyepam)
+                        # self.logger.info(f"⏳ Waiting to revert... Current: {pred_bps:.2f}, Time held: {int(time_since_last_trigger)}s")
+                        pass
 
             except Exception as e:
                 self.logger.error(f"Forecast Monitor Error: {e}")
-                conn.close()
+                if conn and not conn.closed: conn.close()
 
 
-    def get_k_shortest_paths(self, src_dpid, dst_dpid, k=2):
+    def get_k_shortest_paths(self, src_dpid, dst_dpid, k=3):
         try:
             return list(nx.shortest_simple_paths(self.net, src_dpid, dst_dpid))[0:k]
         except nx.NetworkXNoPath:
@@ -152,7 +184,7 @@ class VoIPSmartController(app_manager.RyuApp):
         except Exception:
             return []
 
-    def apply_ksp_reroute(self, k=2,trigger_val=0):
+    def apply_ksp_reroute(self, k=3,trigger_val=0):
         src_sw = 4 # Leaf 1
         dst_sw = 5 # Leaf 2
         
