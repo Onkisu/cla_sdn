@@ -14,7 +14,7 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-DB_URI = "postgresql://dev_one:hijack332.@103.181.142.165:5432/development"
+DB_URI = "postgresql://dev_one:hijack332.@127.0.0.1:5432/development"
 engine = create_engine(DB_URI)
 
 # WARNING THRESHOLD

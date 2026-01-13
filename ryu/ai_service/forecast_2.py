@@ -13,7 +13,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # =========================
 # CONFIG
 # =========================
-DB_URI = "postgresql://dev_one:hijack332.@103.181.142.165:5432/development"
+DB_URI = "postgresql://dev_one:hijack332.@127.0.0.1:5432/development"
 TABLE_FORECAST = "forecast_1h"
 
 # Konfigurasi Target

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-FIXED Ryu SDN Controller for VoIP Traffic Monitoring
-- Aggregates ALL flows per DPID to match specific Sine Wave Target
-- Logs Real (D-ITG) vs Scaled values
+Ryu SDN Controller: VoIP KSP Rerouting + Traffic Monitoring (Full Merge)
+- Features: K-Shortest Path Rerouting based on DB Forecast
+- Features: Sine Wave Traffic Generation with Spike Detection
+- Features: Full IP Resolution and Database Logging
 """
 
 from ryu.base import app_manager
@@ -12,6 +13,9 @@ from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub
 from ryu.lib.packet import packet, ethernet, ether_types, ipv4, udp, tcp, arp
+from ryu.topology import event, api
+from ryu.topology.api import get_switch, get_link
+import networkx as nx
 import psycopg2
 from datetime import datetime
 import random
@@ -19,6 +23,7 @@ import math
 import time
 
 # PostgreSQL Configuration
+# Saya set ke IP Remote agar sinkron dengan forecast_2.py
 DB_CONFIG = {
     'host': '127.0.0.1',
     'database': 'development',
@@ -27,21 +32,38 @@ DB_CONFIG = {
     'port': 5432
 }
 
-class VoIPTrafficMonitor(app_manager.RyuApp):
+# Threshold Congestion (Sesuai forecast_2.py)
+BURST_THRESHOLD_BPS = 250000 
+
+class VoIPSmartController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
-        super(VoIPTrafficMonitor, self).__init__(*args, **kwargs)
+        super(VoIPSmartController, self).__init__(*args, **kwargs)
+        # --- INIT DATA STRUCTURES ---
         self.mac_to_port = {}
-        self.ip_to_mac = {}
+        self.ip_to_mac = {}     
         self.datapaths = {}
+        self.net = nx.DiGraph() # NetworkX Graph
         self.db_conn = None
         self.last_bytes = {}
         self.start_time = time.time()
         
+        # --- STATE CONGESTION ---
+        self.congestion_active = False 
+        self.reroute_priority = 100 
+        
         self.connect_database()
-        self.monitor_thread = hub.spawn(self._monitor)
-        self.logger.info("VoIP Traffic Monitor (Total Aggregation Mode) Started")
+        
+        # --- THREADS ---
+        # 1. Monitor Traffic Stats (Original)
+        self.monitor_thread = hub.spawn(self._monitor_traffic)
+        # 2. Monitor Forecast dari DB (New KSP)
+        self.forecast_thread = hub.spawn(self._monitor_forecast)
+        # 3. Discovery Topology (New KSP)
+        self.topology_thread = hub.spawn(self._discover_topology)
+
+        self.logger.info("VoIP Smart Controller (KSP + Full Traffic Monitor) Started")
 
     def connect_database(self):
         try:
@@ -51,45 +73,127 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
             self.logger.warning(f"DB Error: {e}. Running without DB storage.")
             self.db_conn = None
 
-    # --- SINE WAVE LOGIC (PER DPID TOTAL) ---
-    def get_target_total_bytes(self, elapsed_seconds):
-        # Target: 13,000 to 19,800 bytes total per second per DPID
-        min_val = 13000
-        max_val = 19800
-        
-        # Midpoint & Amplitude
-        mid = (max_val + min_val) / 2  # 16400
-        amp = (max_val - min_val) / 2  # 3400
-        
-        # Period = 1 hour (3600 seconds)
-        period = 3600
-        phase = (elapsed_seconds % period) / period * 2 * math.pi
-        
-        sine_value = math.sin(phase)
-        
-        # Add small randomness (jitter) so it's not a perfect smooth line
-        noise = random.uniform(-0.3, 0.3) 
-        
-        target = mid + (amp * sine_value) + (mid * 0.05 * noise)
-        return int(max(min_val, min(max_val, target)))
+    # =================================================================
+    # 1. TOPOLOGY DISCOVERY (NETWORKX) - NEW
+    # =================================================================
+    def _discover_topology(self):
+        """Memetakan Switch dan Link ke NetworkX Graph secara berkala"""
+        while True:
+            hub.sleep(5)
+            self.net.clear()
+            
+            # Get Switches
+            switches = get_switch(self, None)
+            for s in switches:
+                self.net.add_node(s.dp.id)
+            
+            # Get Links
+            links = get_link(self, None)
+            for l in links:
+                self.net.add_edge(l.src.dpid, l.dst.dpid, port=l.src.port_no)
+                self.net.add_edge(l.dst.dpid, l.src.dpid, port=l.dst.port_no)
 
-    def insert_flow_data(self, flow_data):
-        if not self.db_conn: return
+    # =================================================================
+    # 2. FORECAST MONITORING & KSP LOGIC - NEW
+    # =================================================================
+    def _monitor_forecast(self):
+        """Mengecek tabel forecast dan memicu rerouting"""
+        while True:
+            hub.sleep(2)
+            if self.db_conn:
+                try:
+                    cursor = self.db_conn.cursor()
+                    query = "SELECT y_pred FROM forecast_1h ORDER BY ts_created DESC LIMIT 1"
+                    cursor.execute(query)
+                    result = cursor.fetchone()
+                    cursor.close()
+
+                    if result:
+                        pred_bps = result[0]
+                        
+                        if pred_bps > BURST_THRESHOLD_BPS and not self.congestion_active:
+                            self.logger.warning(f"\n⚠️  PREDICTION: CONGESTION ({pred_bps:,.0f} bps) DETECTED")
+                            self.apply_ksp_reroute(k=2)
+                            self.congestion_active = True
+                            
+                        elif pred_bps < BURST_THRESHOLD_BPS and self.congestion_active:
+                            self.logger.info(f"\n✅ PREDICTION: NORMAL ({pred_bps:,.0f} bps). Recovering...")
+                            self.revert_routing()
+                            self.congestion_active = False
+                except Exception as e:
+                    self.logger.error(f"Forecast Monitor Error: {e}")
+                    self.connect_database()
+
+    def get_k_shortest_paths(self, src_dpid, dst_dpid, k=2):
         try:
-            cursor = self.db_conn.cursor()
-            query = """
-            INSERT INTO traffic.flow_stats_ 
-            (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
-             ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx, pkts_tx, pkts_rx, 
-             duration_sec, traffic_label)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
-            cursor.execute(query, flow_data)
-            self.db_conn.commit()
-            cursor.close()
-        except:
-            self.db_conn.rollback()
+            return list(nx.shortest_simple_paths(self.net, src_dpid, dst_dpid))[0:k]
+        except nx.NetworkXNoPath:
+            return []
+        except Exception:
+            return []
 
+    def apply_ksp_reroute(self, k=2):
+        src_sw = 4 # Leaf 1
+        dst_sw = 5 # Leaf 2
+        
+        paths = self.get_k_shortest_paths(src_sw, dst_sw, k=k)
+        
+        if len(paths) < k:
+            self.logger.error("Not enough paths for KSP rerouting")
+            return
+
+        current_route = paths[0]
+        new_route     = paths[k-1]
+        
+        # --- LOGGING VISUAL ---
+        self.logger.info("-" * 50)
+        self.logger.info(f" Current Route = {current_route}")
+        self.logger.info(f" Rerouting     = {new_route}")
+        self.logger.info("-" * 50)
+        # ----------------------
+
+        # Install Rule Reroute (Priority 100)
+        for i in range(len(new_route) - 1):
+            curr_dpid = new_route[i]
+            next_dpid = new_route[i+1]
+            
+            if self.net.has_edge(curr_dpid, next_dpid):
+                out_port = self.net[curr_dpid][next_dpid]['port']
+                datapath = self.datapaths.get(curr_dpid)
+                
+                if datapath:
+                    parser = datapath.ofproto_parser
+                    # Match UDP Traffic only (VoIP)
+                    match = parser.OFPMatch(eth_type=0x0800, ip_proto=17) 
+                    actions = [parser.OFPActionOutput(out_port)]
+                    self.add_flow(datapath, self.reroute_priority, match, actions)
+
+    def revert_routing(self):
+        # Info logging
+        src_sw = 4; dst_sw = 5
+        paths = self.get_k_shortest_paths(src_sw, dst_sw, k=1)
+        if paths:
+            self.logger.info(f" Back to Default Route = {paths[0]}")
+
+        self.logger.info(" -> Deleting High Priority Rules...")
+        for dpid, dp in self.datapaths.items():
+            parser = dp.ofproto_parser
+            ofproto = dp.ofproto
+            # Hapus flow priority 100
+            match = parser.OFPMatch(eth_type=0x0800, ip_proto=17)
+            mod = parser.OFPFlowMod(
+                datapath=dp, 
+                command=ofproto.OFPFC_DELETE, 
+                out_port=ofproto.OFPP_ANY, 
+                out_group=ofproto.OFPG_ANY,
+                priority=self.reroute_priority, 
+                match=match
+            )
+            dp.send_msg(mod)
+
+    # =================================================================
+    # 3. STANDARD HANDLERS (PacketIn, SwitchFeatures) - MIXED
+    # =================================================================
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def _state_change_handler(self, ev):
         datapath = ev.datapath
@@ -140,6 +244,7 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
 
+        # --- ARP HANDLER & IP LEARNING (FROM ORIGINAL) ---
         arp_pkt = pkt.get_protocol(arp.arp)
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         
@@ -182,6 +287,7 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
 
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+            # Priority 1 (Normal) agar kalah dengan Priority 100 (Reroute)
             self.add_flow(datapath, 1, match, actions, msg.buffer_id, idle_timeout=60)
 
         data = None
@@ -191,7 +297,10 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
 
-    def _monitor(self):
+    # =================================================================
+    # 4. SINE WAVE LOGIC & STATS HANDLER (FULL ORIGINAL LOGIC)
+    # =================================================================
+    def _monitor_traffic(self):
         while True:
             for dp in self.datapaths.values():
                 self._request_stats(dp)
@@ -208,15 +317,48 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
             if m == mac: return ip
         return None
 
+    def get_target_total_bytes(self, elapsed_seconds):
+        # Target: 13,000 to 19,800 bytes total per second per DPID
+        min_val = 13000
+        max_val = 19800
+        
+        # Midpoint & Amplitude
+        mid = (max_val + min_val) / 2  # 16400
+        amp = (max_val - min_val) / 2  # 3400
+        
+        # Period = 1 hour (3600 seconds)
+        period = 3600
+        phase = (elapsed_seconds % period) / period * 2 * math.pi
+        
+        sine_value = math.sin(phase)
+        
+        # Add small randomness (jitter)
+        noise = random.uniform(-0.3, 0.3) 
+        
+        target = mid + (amp * sine_value) + (mid * 0.05 * noise)
+        return int(max(min_val, min(max_val, target)))
+
+    def insert_flow_data(self, flow_data):
+        if not self.db_conn: return
+        try:
+            cursor = self.db_conn.cursor()
+            query = """
+            INSERT INTO traffic.flow_stats_ 
+            (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac, 
+             ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx, pkts_tx, pkts_rx, 
+             duration_sec, traffic_label)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(query, flow_data)
+            self.db_conn.commit()
+            cursor.close()
+        except:
+            self.db_conn.rollback()
+
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
         """
-        Modified Handler:
-        1. Collect ALL valid flows.
-        2. Sum their REAL bytes (from D-ITG).
-        3. Calculate Target Bytes based on Sine Wave.
-        4. Calculate Scaling Factor.
-        5. Distribute Target Bytes proportionally to flows.
+        Modified Handler to include Spike Detection Logic (1.4x Target)
         """
         body = ev.msg.body
         datapath = ev.msg.datapath
@@ -271,23 +413,21 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
         # --- LANGKAH 2: Hitung Target (Sine Wave) ---
         target_total_bytes = self.get_target_total_bytes(elapsed_seconds)
         
-    
-        # --- LANGKAH 3: Hitung Scaling Factor (MODIFIED) ---
+        # --- LANGKAH 3: Hitung Scaling Factor (LOGIC ASLI ANDA) ---
         if total_real_bytes_dpid > 0:
             # LOGIKA BARU: Deteksi Burst
-            # Jika traffic asli lebih besar dari 2x Target Sine Wave, anggap itu SERANGAN/BURST.
-            # Biarkan scaling_factor = 1.0 (Traffic asli masuk DB apa adanya)
+            # Jika traffic asli lebih besar dari 1.4x Target Sine Wave, anggap itu SERANGAN/BURST.
             if total_real_bytes_dpid > (target_total_bytes * 1.4):
                 scaling_factor = 1.0
-                self.logger.warning(f"!!! SPIKE DETECTED on {dpid} !!! Passing Real Traffic ({total_real_bytes_dpid} B)")
+                # self.logger.warning(f"!!! SPIKE DETECTED on {dpid} !!! Passing Real Traffic ({total_real_bytes_dpid} B)")
             else:
-                # Jika traffic normal/kecil, paksa ikut bentuk Sine Wave
+                # Jika traffic normal, paksa ikut bentuk Sine Wave
                 scaling_factor = target_total_bytes / total_real_bytes_dpid
         else:
             scaling_factor = 0 
             
-        self.logger.info(f"--- DPID {dpid} Report (Sec: {elapsed_seconds}) ---")
-        self.logger.info(f"    Real (D-ITG): {total_real_bytes_dpid} B | Target (Sine): {target_total_bytes} B | Scale: {scaling_factor:.2f}x")
+        # Log sedikit dikurangi frekuensinya agar tidak menimpa log reroute terlalu cepat
+        # self.logger.info(f"--- DPID {dpid} Report: Real={total_real_bytes_dpid} B | Target={target_total_bytes} B | Scale={scaling_factor:.2f}x")
 
         # --- LANGKAH 4: Distribusi & Insert ---
         flows_count = len(valid_flows)
@@ -297,8 +437,7 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
                 # Proportional Scaling
                 simulated_bytes_tx = int(flow['real_bytes'] * scaling_factor)
             else:
-                # Jika real traffic 0 tapi ada flow entry, bagi rata targetnya
-                # agar grafik tetap jalan walau D-ITG diam sebentar
+                # Jika real traffic 0 tapi ada flow entry, bagi rata
                 simulated_bytes_tx = int(target_total_bytes / flows_count)
 
             # Asumsi ukuran paket VoIP rata-rata ~180-200 bytes
@@ -320,5 +459,3 @@ class VoIPTrafficMonitor(app_manager.RyuApp):
             )
             
             self.insert_flow_data(flow_data)
-            # Log detail per flow (opsional, bisa dikomentari agar tidak spam)
-            # self.logger.info(f"    -> {flow['src_ip']} to {flow['dst_ip']}: {simulated_bytes_tx} B (Real: {flow['real_bytes']})")
