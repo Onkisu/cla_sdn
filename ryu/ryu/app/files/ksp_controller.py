@@ -113,12 +113,12 @@ class VoIPSmartController(app_manager.RyuApp):
                         
                         if pred_bps > BURST_THRESHOLD_BPS and not self.congestion_active:
                             self.logger.warning(f"\n⚠️  PREDICTION: CONGESTION ({pred_bps:,.0f} bps) DETECTED")
-                            self.apply_ksp_reroute(k=2)
+                            self.apply_ksp_reroute(k=2, trigger_val=pred_bps)
                             self.congestion_active = True
                             
                         elif pred_bps < BURST_THRESHOLD_BPS and self.congestion_active:
                             self.logger.info(f"\n✅ PREDICTION: NORMAL ({pred_bps:,.0f} bps). Recovering...")
-                            self.revert_routing()
+                            self.revert_routing(k=2, trigger_val=pred_bps)
                             self.congestion_active = False
                 except Exception as e:
                     self.logger.error(f"Forecast Monitor Error: {e}")
@@ -132,7 +132,7 @@ class VoIPSmartController(app_manager.RyuApp):
         except Exception:
             return []
 
-    def apply_ksp_reroute(self, k=2):
+    def apply_ksp_reroute(self, k=2,trigger_val=0):
         src_sw = 4 # Leaf 1
         dst_sw = 5 # Leaf 2
         
@@ -167,6 +167,10 @@ class VoIPSmartController(app_manager.RyuApp):
                     match = parser.OFPMatch(eth_type=0x0800, ip_proto=17) 
                     actions = [parser.OFPActionOutput(out_port)]
                     self.add_flow(datapath, self.reroute_priority, match, actions)
+        
+        # === TAMBAHAN LOG KE DATABASE ===
+        log_desc = f"Switching from default {current_route} to KSP-{k} {new_route}"
+        self.insert_event_log("REROUTE_ACTIVE", log_desc, trigger_val)
 
     def revert_routing(self):
         # Info logging
@@ -190,6 +194,29 @@ class VoIPSmartController(app_manager.RyuApp):
                 match=match
             )
             dp.send_msg(mod)
+        # === TAMBAHAN LOG KE DATABASE ===
+        self.insert_event_log("REROUTE_REVERT", f"Congestion cleared. Reverting to default: {path_str}", trigger_val)
+        # ================================
+
+    def insert_event_log(self, event_type, description, trigger_value=0):
+        """Mencatat event Reroute/Revert ke Database"""
+        if not self.db_conn: return
+        try:
+            cursor = self.db_conn.cursor()
+            query = """
+            INSERT INTO traffic.system_events 
+            (timestamp, event_type, description, trigger_value)
+            VALUES (%s, %s, %s, %s)
+            """
+            # Gunakan waktu sekarang
+            now = datetime.now()
+            cursor.execute(query, (now, event_type, description, trigger_value))
+            self.db_conn.commit()
+            cursor.close()
+            self.logger.info(f"DB LOG: [{event_type}] saved.")
+        except Exception as e:
+            self.logger.error(f"Failed to log event to DB: {e}")
+            self.db_conn.rollback()
 
     # =================================================================
     # 3. STANDARD HANDLERS (PacketIn, SwitchFeatures) - MIXED
