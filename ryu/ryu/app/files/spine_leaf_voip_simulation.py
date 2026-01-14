@@ -70,7 +70,8 @@ def run():
 
     for l in leaves:
         for s in spines:
-            net.addLink(l, s, bw=1000, delay='1ms')
+            #net.addLink(l, s, bw=1000, delay='1ms')
+            net.addLink(l, s, bw=0.4, delay='1ms', max_queue_size=10, use_htb=True)
 
     h1 = net.addHost('h1', ip='10.0.0.1/24')
     h2 = net.addHost('h2', ip='10.0.0.2/24')
