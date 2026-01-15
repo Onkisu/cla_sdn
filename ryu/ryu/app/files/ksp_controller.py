@@ -389,7 +389,7 @@ class VoIPSmartController(app_manager.RyuApp):
             dst_ip = ip_pkt.dst
             
             # Port 2 = Menuju Spine 2 (Jalur Tabrakan)
-            COLLISION_PORT = 2 
+            COLLISION_PORT = 3 
 
             # Cek: Jika paket dari H1 (di DPID 4) ATAU H3 (di DPID 6)
             if (dpid == 4 and src_ip == '10.0.0.1') or (dpid == 6 and src_ip == '10.0.0.3'):
