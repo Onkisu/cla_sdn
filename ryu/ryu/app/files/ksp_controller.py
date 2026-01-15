@@ -363,59 +363,59 @@ class VoIPSmartController(app_manager.RyuApp):
 
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
-        
+
         if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
         if eth.ethertype == ether_types.ETH_TYPE_IPV6: return
 
         dst = eth.dst
         src = eth.src
-        
+
+        # 1. MAC LEARNING
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
 
-        # --- ARP HANDLER & IP LEARNING (FROM ORIGINAL) ---
+        # 2. PROTOCOL EXTRACTION (INI BAGIAN PENTING)
         arp_pkt = pkt.get_protocol(arp.arp)
-        ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        ip_pkt = pkt.get_protocol(ipv4.ipv4) # Kita pakai nama ip_pkt
         
         if ip_pkt: self.ip_to_mac[ip_pkt.src] = src
 
-        # ----------------------------------------------------------------
-        # LOGIKA DEFAULT ROUTE (SUPAYA H1 & H3 TABRAKAN DI AWAL)
-        # ----------------------------------------------------------------
-        if ipv4_pkt:
-            src = ipv4_pkt.src
-            dst = ipv4_pkt.dst
+        # =================================================================
+        # LOGIKA DEFAULT ROUTE (PINNING KE SPINE 2) - FIXED VARIABLE NAME
+        # =================================================================
+        # Kita pakai 'ip_pkt' bukan 'ipv4_pkt' agar tidak NameError
+        if ip_pkt:
+            src_ip = ip_pkt.src
+            dst_ip = ip_pkt.dst
             
-            # Kita targetkan Spine 2. 
-            # Di Mininet Topo kamu: Port 1=S1, Port 2=S2, Port 3=S3, Port 4=Host
-            # Jadi kita pilih PORT 2.
-            DEFAULT_COLLISION_PORT = 2 
+            # Port 2 = Menuju Spine 2 (Jalur Tabrakan)
+            COLLISION_PORT = 2 
 
-            # Jika paket dari H1 (di Leaf 1/DPID 4) ATAU H3 (di Leaf 3/DPID 6)
-            if (dpid == 4 and src == '10.0.0.1') or (dpid == 6 and src == '10.0.0.3'):
+            # Cek: Jika paket dari H1 (di DPID 4) ATAU H3 (di DPID 6)
+            if (dpid == 4 and src_ip == '10.0.0.1') or (dpid == 6 and src_ip == '10.0.0.3'):
                 
-                # Cek: Apakah ini paket mau ke Host Lokal? Kalau iya, jangan dibuang ke Spine.
-                # Leaf 1 ke H1 ada di Port 4 (biasanya port terakhir)
-                # Tapi karena ini traffic 'keluar' menuju core, kita tembak ke Spine.
+                actions = [parser.OFPActionOutput(COLLISION_PORT)]
                 
-                actions = [parser.OFPActionOutput(DEFAULT_COLLISION_PORT)]
+                # Priority 10 (Lebih tinggi dari default 1, lebih rendah dari Reroute 30000)
+                match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
                 
-                # Pasang Flow Priority RENDAH (10). 
-                # Supaya nanti bisa DITIMPA oleh Reroute (Priority 30000).
-                match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src, ipv4_dst=dst)
+                # Add Flow agar switch ingat
+                self.add_flow(datapath, 10, match, actions, msg.buffer_id, idle_timeout=0)
                 
-                # Kita pasang flow ini sebagai "Default Route"
-                self.add_flow(datapath, 10, match, actions)
+                # Kirim paketnya jalan (Packet Out)
+                data = None
+                if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+                    data = msg.data
                 
-                # Kirim paketnya jalan
                 out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                          in_port=in_port, actions=actions, data=msg.data)
+                                          in_port=in_port, actions=actions, data=data)
                 datapath.send_msg(out)
                 
-                # Return supaya gak lanjut ke logika KSP di bawah
+                # STOP! Jangan lanjut ke logika flooding di bawah.
                 return 
-        # ----------------------------------------------------------------
+        # =================================================================
 
+        # --- ARP HANDLER ---
         if arp_pkt:
             self.ip_to_mac[arp_pkt.src_ip] = arp_pkt.src_mac
             if arp_pkt.opcode == arp.ARP_REQUEST and arp_pkt.dst_ip in self.ip_to_mac:
@@ -431,6 +431,7 @@ class VoIPSmartController(app_manager.RyuApp):
                 datapath.send_msg(out)
                 return
 
+        # --- STANDARD SWITCHING LOGIC ---
         if dst in self.mac_to_port[dpid]:
             out_port = self.mac_to_port[dpid][dst]
         else:
@@ -442,10 +443,10 @@ class VoIPSmartController(app_manager.RyuApp):
         
         if out_port == ofproto.OFPP_FLOOD:
             if is_leaf:
-                if in_port <= 3: # From Spine -> Flood only to Hosts
+                if in_port <= 3: 
                     actions.append(parser.OFPActionOutput(4))
                     actions.append(parser.OFPActionOutput(5))
-                else: # From Host -> Flood to Spines and other Hosts
+                else: 
                     actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD))
             elif is_spine:
                 actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD))
@@ -454,7 +455,6 @@ class VoIPSmartController(app_manager.RyuApp):
 
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-            # Priority 1 (Normal) agar kalah dengan Priority 100 (Reroute)
             self.add_flow(datapath, 1, match, actions, msg.buffer_id, idle_timeout=60)
 
         data = None
@@ -463,7 +463,6 @@ class VoIPSmartController(app_manager.RyuApp):
 
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
-
     # =================================================================
     # 4. SINE WAVE LOGIC & STATS HANDLER (FULL ORIGINAL LOGIC)
     # =================================================================
