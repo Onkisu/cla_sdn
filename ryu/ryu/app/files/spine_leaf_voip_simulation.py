@@ -8,6 +8,9 @@ import time
 import subprocess
 import threading
 import itertools
+import subprocess
+import psycopg2
+import re
 
 STEADY_DURATION_MS = 60000   # 60 detik per sesi
 STEADY_RATE = 50             # pps
@@ -17,37 +20,138 @@ RESTART_DELAY = 1            # detik
 def check_ditg():
     return subprocess.run(['which', 'ITGSend'], capture_output=True).returncode == 0
 
-def keep_steady_traffic(src_host, dst_host, dst_ip):
-    """
-    Watchdog loop yang diperbaiki:
-    1. Cek apakah ITGRecv di h2 masih hidup. Jika mati, nyalakan lagi.
-    2. Jalankan ITGSend di h1.
-    """
-    
-    for i in itertools.count(1):
-        # --- FIX: CEK DAN HIDUPKAN KEMBALI RECEIVER JIKA MATI ---
-        # Cek apakah proses ITGRecv berjalan di dst_host (h2)
-        recv_pid = dst_host.cmd('pgrep -x ITGRecv').strip()
-        
-        if not recv_pid:
-            info(f"*** [WATCHDOG] ITGRecv on {dst_host.name} is DEAD. Restarting...\n")
-            # Restart ITGRecv (Log dipisah atau di-append agar aman)
-            dst_host.cmd('ITGRecv -l /tmp/recv_steady.log &')
-            time.sleep(1) # Beri waktu untuk bind port
-        # ---------------------------------------------------------
+import subprocess
+import psycopg2
+import re
 
-        info("*** [WATCHDOG] (Re)starting STEADY VoIP h1 -> h2\n")
+def save_itg_session_to_db(log_file="/tmp/recv_steady.log"):
+    # Jalankan ITGDec
+    result = subprocess.check_output(
+        ["ITGDec", log_file],
+        text=True
+    )
+
+    data = {}
+
+    for line in result.splitlines():
+        if "Total time" in line:
+            data["duration"] = float(line.split("=")[1].split()[0])
+        elif "Total packets" in line:
+            data["total_packets"] = int(line.split("=")[1])
+        elif "Packets dropped" in line:
+            data["dropped"] = int(line.split("=")[1].split()[0])
+        elif "Average delay" in line:
+            data["avg_delay"] = float(line.split("=")[1].split()[0]) * 1000
+        elif "Average jitter" in line:
+            data["avg_jitter"] = float(line.split("=")[1].split()[0]) * 1000
+        elif "Maximum delay" in line:
+            data["max_delay"] = float(line.split("=")[1].split()[0]) * 1000
+        elif "Average bitrate" in line:
+            data["bitrate"] = float(line.split("=")[1].split()[0])
+        elif "Average packet rate" in line:
+            data["pps"] = float(line.split("=")[1].split()[0])
+
+    data["loss"] = (
+        data["dropped"] / data["total_packets"] * 100
+        if data["total_packets"] > 0 else 0
+    )
+
+    conn = psycopg2.connect(
+        host="127.0.0.1",
+        dbname="development",
+        user="dev_one",
+        password="hijack332."
+    )
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO traffic.itg_session_results (
+            src_ip, dst_ip,
+            duration_sec, total_packets,
+            packets_dropped, loss_percent,
+            avg_delay_ms, avg_jitter_ms, max_delay_ms,
+            avg_bitrate_kbps, avg_pps
+        ) VALUES (
+            '10.0.0.1', '10.0.0.2',
+            %s, %s, %s, %s,
+            %s, %s, %s,
+            %s, %s
+        )
+    """, (
+        data["duration"],
+        data["total_packets"],
+        data["dropped"],
+        data["loss"],
+        data["avg_delay"],
+        data["avg_jitter"],
+        data["max_delay"],
+        data["bitrate"],
+        data["pps"]
+    ))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# def keep_steady_traffic(src_host, dst_host, dst_ip):
+#     """
+#     Watchdog loop yang diperbaiki:
+#     1. Cek apakah ITGRecv di h2 masih hidup. Jika mati, nyalakan lagi.
+#     2. Jalankan ITGSend di h1.
+#     """
+    
+#     for i in itertools.count(1):
+#         # --- FIX: CEK DAN HIDUPKAN KEMBALI RECEIVER JIKA MATI ---
+#         # Cek apakah proses ITGRecv berjalan di dst_host (h2)
+#         recv_pid = dst_host.cmd('pgrep -x ITGRecv').strip()
         
-        # Menjalankan Sender
+#         if not recv_pid:
+#             info(f"*** [WATCHDOG] ITGRecv on {dst_host.name} is DEAD. Restarting...\n")
+#             # Restart ITGRecv (Log dipisah atau di-append agar aman)
+#             dst_host.cmd('ITGRecv -l /tmp/recv_steady.log &')
+#             time.sleep(1) # Beri waktu untuk bind port
+#         # ---------------------------------------------------------
+
+#         info("*** [WATCHDOG] (Re)starting STEADY VoIP h1 -> h2\n")
+        
+#         # Menjalankan Sender
+#         src_host.cmd(
+#             f'ITGSend -T UDP -a {dst_ip} '
+#             f'-c {PKT_SIZE} -C {STEADY_RATE} '
+#             f'-t {STEADY_DURATION_MS} -l /dev/null'
+#         )
+
+#         save_itg_session_to_db("/tmp/recv_steady.log")
+        
+#         # Jika ITGSend exit (selesai atau error), tunggu sebentar sebelum loop
+#         time.sleep(RESTART_DELAY)
+        
+def keep_steady_traffic(src_host, dst_host, dst_ip):
+    for i in itertools.count(1):
+        session_ts = int(time.time())
+        logfile = f"/tmp/recv_steady_{session_ts}.log"
+
+        info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
+
+        dst_host.cmd("pkill -9 ITGRecv")
+        dst_host.cmd(f"ITGRecv -l {logfile} &")
+        time.sleep(1)
+
+        info("*** Starting ITGSend (STEADY)\n")
         src_host.cmd(
             f'ITGSend -T UDP -a {dst_ip} '
             f'-c {PKT_SIZE} -C {STEADY_RATE} '
             f'-t {STEADY_DURATION_MS} -l /dev/null'
         )
-        
-        # Jika ITGSend exit (selesai atau error), tunggu sebentar sebelum loop
+
+        try:
+            save_itg_session_to_db(logfile)
+        except Exception as e:
+            info(f"!!! DB SAVE FAILED: {e}\n")
+
         time.sleep(RESTART_DELAY)
-        
+
 
 def run():
     info("*** Starting Spine-Leaf Topology (STEADY ONLY + WATCHDOG)\n")
