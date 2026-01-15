@@ -53,7 +53,7 @@ class VoIPSmartController(app_manager.RyuApp):
         
         # --- STATE CONGESTION ---
         self.congestion_active = False 
-        self.reroute_priority = 100 
+        self.reroute_priority = 30000 
 
         # [NEW] Variabel untuk mencegah Flapping
         self.last_congestion_time = 0
@@ -204,6 +204,31 @@ class VoIPSmartController(app_manager.RyuApp):
         self.logger.info("-" * 50)
         # ----------------------
 
+
+        # [TAMBAHAN WAJIB] Hapus Flow Lama di Switch Sumber (Leaf 1 / DPID 4)
+        # Kita paksa switch 4 lupa ingatan soal jalur lama ke H2
+        src_datapath = self.datapaths.get(src_sw) # src_sw = 4
+        if src_datapath:
+            ofp = src_datapath.ofproto
+            parser = src_datapath.ofproto_parser
+            
+            # Match spesifik ke IP Tujuan H2 (10.0.0.2)
+            match_delete = parser.OFPMatch(
+                eth_type=0x0800, 
+                ipv4_dst='10.0.0.2'
+            )
+            
+            # Perintah DELETE FLOW
+            mod = parser.OFPFlowMod(
+                datapath=src_datapath,
+                command=ofp.OFPFC_DELETE, # HAPUS!
+                out_port=ofp.OFPP_ANY,
+                out_group=ofp.OFPG_ANY,
+                match=match_delete
+            )
+            src_datapath.send_msg(mod)
+            self.logger.info(f"🧹 CLEARED OLD FLOWS on Switch {src_sw} to Host 10.0.0.2")
+
         # Install Rule Reroute (Priority 100)
         for i in range(len(new_route) - 1):
             curr_dpid = new_route[i]
@@ -216,7 +241,7 @@ class VoIPSmartController(app_manager.RyuApp):
                 if datapath:
                     parser = datapath.ofproto_parser
                     # Match UDP Traffic only (VoIP)
-                    match = parser.OFPMatch(eth_type=0x0800, ip_proto=17) 
+                    match = parser.OFPMatch(eth_type=0x0800, ip_proto=17, ipv4_src='10.0.0.1') 
                     actions = [parser.OFPActionOutput(out_port)]
                     self.add_flow(datapath, self.reroute_priority, match, actions)
         
@@ -353,6 +378,44 @@ class VoIPSmartController(app_manager.RyuApp):
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         
         if ip_pkt: self.ip_to_mac[ip_pkt.src] = src
+
+        # ----------------------------------------------------------------
+        # LOGIKA DEFAULT ROUTE (SUPAYA H1 & H3 TABRAKAN DI AWAL)
+        # ----------------------------------------------------------------
+        if ipv4_pkt:
+            src = ipv4_pkt.src
+            dst = ipv4_pkt.dst
+            
+            # Kita targetkan Spine 2. 
+            # Di Mininet Topo kamu: Port 1=S1, Port 2=S2, Port 3=S3, Port 4=Host
+            # Jadi kita pilih PORT 2.
+            DEFAULT_COLLISION_PORT = 2 
+
+            # Jika paket dari H1 (di Leaf 1/DPID 4) ATAU H3 (di Leaf 3/DPID 6)
+            if (dpid == 4 and src == '10.0.0.1') or (dpid == 6 and src == '10.0.0.3'):
+                
+                # Cek: Apakah ini paket mau ke Host Lokal? Kalau iya, jangan dibuang ke Spine.
+                # Leaf 1 ke H1 ada di Port 4 (biasanya port terakhir)
+                # Tapi karena ini traffic 'keluar' menuju core, kita tembak ke Spine.
+                
+                actions = [parser.OFPActionOutput(DEFAULT_COLLISION_PORT)]
+                
+                # Pasang Flow Priority RENDAH (10). 
+                # Supaya nanti bisa DITIMPA oleh Reroute (Priority 30000).
+                match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src, ipv4_dst=dst)
+                
+                # Kita pasang flow ini sebagai "Default Route"
+                self.add_flow(datapath, 10, match, actions)
+                
+                # Kirim paketnya jalan
+                out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                          in_port=in_port, actions=actions, data=msg.data)
+                datapath.send_msg(out)
+                
+                # Return supaya gak lanjut ke logika KSP di bawah
+                return 
+        # ----------------------------------------------------------------
+
         if arp_pkt:
             self.ip_to_mac[arp_pkt.src_ip] = arp_pkt.src_mac
             if arp_pkt.opcode == arp.ARP_REQUEST and arp_pkt.dst_ip in self.ip_to_mac:
