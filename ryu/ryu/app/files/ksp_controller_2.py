@@ -612,7 +612,7 @@ class VoIPSmartController(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
-        """Monitor REAL traffic H1→H2 (VoIP) dan H3→H2 (bursty) - REAL DATA ONLY!"""
+        """Monitor REAL traffic H1→H2 dan H3→H2 - Handle None values!"""
         body = ev.msg.body
         datapath = ev.msg.datapath
         dpid = datapath.id
@@ -623,8 +623,19 @@ class VoIPSmartController(app_manager.RyuApp):
                 continue
                 
             match = stat.match
-            src_ip = match.get('ipv4_src') or self._resolve_ip(match.get('eth_src'))
-            dst_ip = match.get('ipv4_dst') or self._resolve_ip(match.get('eth_dst'))
+            
+            # 1. Resolve IP addresses DENGAN FALLBACK
+            src_ip = match.get('ipv4_src')
+            dst_ip = match.get('ipv4_dst')
+            
+            # Jika IP tidak ada di match, coba resolve dari MAC
+            if not src_ip:
+                src_mac = match.get('eth_src')
+                src_ip = self._resolve_ip(src_mac) if src_mac else None
+                
+            if not dst_ip:
+                dst_mac = match.get('eth_dst')
+                dst_ip = self._resolve_ip(dst_mac) if dst_mac else None
             
             # HANYA monitor H1→H2 dan H3→H2
             if dst_ip != '10.0.0.2':
@@ -633,7 +644,7 @@ class VoIPSmartController(app_manager.RyuApp):
             if src_ip not in ['10.0.0.1', '10.0.0.3']:
                 continue
                 
-            # Hitung REAL traffic (dari counter switch)
+            # 2. Hitung REAL traffic
             flow_key = f"{dpid}-{src_ip}-{dst_ip}"
             byte_count = stat.byte_count
             packet_count = stat.packet_count
@@ -651,8 +662,21 @@ class VoIPSmartController(app_manager.RyuApp):
             if delta_bytes <= 0:
                 continue
                 
-            # === SIMPAN DATA REAL DARI SWITCH ===
-            # JANGAN buat data dummy!
+            # 3. Ambil protocol dan ports DENGAN FALLBACK
+            ip_proto = match.get('ip_proto')
+            if ip_proto is None:
+                # Default ke UDP (17) untuk VoIP/bursty traffic
+                ip_proto = 17
+            
+            # Get ports atau default ke 0
+            tp_src = match.get('tcp_src') or match.get('udp_src') or 0
+            tp_dst = match.get('tcp_dst') or match.get('udp_dst') or 0
+            
+            # 4. Get MAC addresses
+            src_mac = match.get('eth_src', '')
+            dst_mac = match.get('eth_dst', '')
+            
+            # 5. SIMPAN KE DB dengan semua field
             conn = self.get_db_conn()
             if conn:
                 try:
@@ -665,21 +689,22 @@ class VoIPSmartController(app_manager.RyuApp):
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (
                         timestamp, dpid, src_ip, dst_ip,
-                        match.get('eth_src', ''), match.get('eth_dst', ''),
-                        match.get('ip_proto', 0),  # Ambil real protocol
-                        match.get('udp_src', 0), match.get('udp_dst', 0),  # Ambil real ports
-                        delta_bytes, delta_bytes,  # tx = rx (asumsi no loss di switch)
-                        delta_packets, delta_packets,  # PAKAI delta_packets REAL!
-                        1.0,  # duration 1 detik (karena polling setiap 1s)
+                        src_mac, dst_mac,
+                        ip_proto, tp_src, tp_dst,
+                        delta_bytes, delta_bytes,
+                        delta_packets, delta_packets,
+                        1.0,
                         'voip' if src_ip == '10.0.0.1' else 'bursty'
                     ))
                     conn.commit()
                     cur.close()
                     conn.close()
                     
-                    # Debug log
-                    if delta_bytes > 1000:
-                        self.logger.info(f"📊 REAL DATA: {src_ip}→H2: {delta_bytes}B, {delta_packets} pkts on DPID {dpid}")
+                    # Debug: Log jika ada field yang 0/null
+                    if ip_proto == 0 or tp_src == 0 or tp_dst == 0:
+                        self.logger.debug(f"⚠️  Missing match fields: proto={ip_proto}, src_port={tp_src}, dst_port={tp_dst}")
+                    else:
+                        self.logger.info(f"📊 {src_ip}→H2: {delta_bytes}B on DPID {dpid}")
                         
                 except Exception as e:
                     if conn and not conn.closed:
