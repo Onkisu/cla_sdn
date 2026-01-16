@@ -261,44 +261,90 @@ class VoIPSmartController(app_manager.RyuApp):
 
 
 
+    # def revert_routing(self):
+    #     # Info logging
+    #     src_sw = 4; dst_sw = 5
+    #     paths = self.get_k_shortest_paths(src_sw, dst_sw, k=1)
+    #     if not paths:
+    #         self.logger.warning("No default route found during revert")
+    #         default_route = []
+    #     else:
+    #         default_route = paths[0]
+    #         self.logger.info(f" Back to Default Route = {default_route}")
+
+
+    #     self.logger.info(" -> Deleting High Priority Rules...")
+    #     for dpid, dp in self.datapaths.items():
+    #         parser = dp.ofproto_parser
+    #         ofproto = dp.ofproto
+    #         # Hapus flow priority 100
+    #         match = parser.OFPMatch(eth_type=0x0800, ip_proto=17)
+    #         mod = parser.OFPFlowMod(
+    #             datapath=dp, 
+    #             command=ofproto.OFPFC_DELETE, 
+    #             out_port=ofproto.OFPP_ANY, 
+    #             out_group=ofproto.OFPG_ANY,
+    #             priority=self.reroute_priority, 
+    #             match=match
+    #         )
+    #         dp.send_msg(mod)
+    #     # === TAMBAHAN LOG KE DATABASE ===
+    #     log_payload = {
+    #         "revert": default_route
+    #     }
+
+    #     self.insert_event_log(
+    #         event_type="REROUTE_REVERT",
+    #         description=json.dumps(log_payload),
+    #         trigger_value=0
+    #     )
+        # ================================
+    
     def revert_routing(self):
-        # Info logging
-        src_sw = 4; dst_sw = 5
-        paths = self.get_k_shortest_paths(src_sw, dst_sw, k=1)
-        if not paths:
-            self.logger.warning("No default route found during revert")
-            default_route = []
-        else:
-            default_route = paths[0]
-            self.logger.info(f" Back to Default Route = {default_route}")
+        # 1. Logging Event
+        self.logger.info("🔄 REVERT TRIGGERED: INSTANTLY Deleting Reroute Flows...")
 
+        # 2. Target Switch: Leaf 1 (DPID 4) - Titik awal reroute
+        # Pastikan ID ini benar (Leaf 1 tempat H1 nempel)
+        datapath = self.datapaths.get(4) 
 
-        self.logger.info(" -> Deleting High Priority Rules...")
-        for dpid, dp in self.datapaths.items():
-            parser = dp.ofproto_parser
-            ofproto = dp.ofproto
-            # Hapus flow priority 100
-            match = parser.OFPMatch(eth_type=0x0800, ip_proto=17)
+        if datapath:
+            ofp = datapath.ofproto
+            parser = datapath.ofproto_parser
+            
+            # --- BAGIAN KRUSIAL (MATCH HARUS 100% SAMA) ---
+            # Kita harus spesifik: Hapus flow UDP milik H1 (10.0.0.1)
+            # Jika ini beda sedikit saja dengan saat 'add_flow', switch akan menolak hapus.
+            match = parser.OFPMatch(
+                eth_type=0x0800, 
+                ip_proto=17,            # UDP
+                ipv4_src='10.0.0.1'     # Source IP H1 (WAJIB ADA)
+            )
+            
+            # --- COMMAND DELETE STRICT ---
+            # OFPFC_DELETE_STRICT = Hapus hanya jika priority & match sama persis
             mod = parser.OFPFlowMod(
-                datapath=dp, 
-                command=ofproto.OFPFC_DELETE, 
-                out_port=ofproto.OFPP_ANY, 
-                out_group=ofproto.OFPG_ANY,
-                priority=self.reroute_priority, 
+                datapath=datapath,
+                command=ofp.OFPFC_DELETE_STRICT,
+                out_port=ofp.OFPP_ANY,
+                out_group=ofp.OFPG_ANY,
+                priority=30000,         # Priority Reroute (WAJIB SAMA)
                 match=match
             )
-            dp.send_msg(mod)
-        # === TAMBAHAN LOG KE DATABASE ===
-        log_payload = {
-            "revert": default_route
-        }
+            
+            datapath.send_msg(mod)
+            self.logger.info("   >>> ⚡ DELETE MSG SENT to DPID 4: H1 Traffic -> Back to Default")
 
-        self.insert_event_log(
-            event_type="REROUTE_REVERT",
-            description=json.dumps(log_payload),
-            trigger_value=0
-        )
-        # ================================
+        # 3. Log ke Database (Opsional, buat grafik)
+        try:
+            log_payload = {"revert": "Explicit Strict Delete"}
+            self.insert_event_log(
+                event_type="REROUTE_REVERT",
+                description=json.dumps(log_payload),
+                trigger_value=0
+            )
+        except Exception as e:
+            self.logger.error(f"Error logging revert: {str(e)}")
 
     def insert_event_log(self, event_type, description, trigger_value=0):
         conn = self.get_db_conn()
