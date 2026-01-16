@@ -35,7 +35,7 @@ DB_CONFIG = {
 }
 
 # Threshold Congestion (Sesuai forecast_2.py)
-BURST_THRESHOLD_BPS = 199000 
+BURST_THRESHOLD_BPS = 120000 
 
 class VoIPSmartController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
