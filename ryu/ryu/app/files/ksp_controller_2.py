@@ -185,68 +185,100 @@ class VoIPSmartController(app_manager.RyuApp):
             return []
 
     def apply_ksp_reroute(self, k=3, trigger_val=0):
-        src_sw = 4 # Leaf 1
-        dst_sw = 5 # Leaf 2
+        self.logger.warning(f"🚀 APPLYING KSP REROUTE (Trigger: {trigger_val} bps)")
+        
+        # 1. FLUSH SEMUA FLOW DI SEMUA SWITCH (Nuklear option)
+        self.flush_all_switches()
+        
+        # 2. Install BARU di path baru
+        src_sw = 4
+        dst_sw = 5
         
         paths = self.get_k_shortest_paths(src_sw, dst_sw, k=k)
-        
         if len(paths) < k:
-            self.logger.error("Not enough paths for KSP rerouting")
             return
-
-        current_route = paths[0]
-        new_route     = paths[k-1]
         
-        # Simpan route untuk tracking
-        self.default_path = current_route
-        self.current_reroute_path = new_route
+        new_route = paths[k-1]
         
-        # --- LOGGING VISUAL ---
-        self.logger.info("-" * 50)
-        self.logger.info(f" Current Route = {current_route}")
-        self.logger.info(f" Rerouting     = {new_route}")
-        self.logger.info("-" * 50)
-        # ----------------------
-
-        # === HAPUS FLOW LAMA DI SEMUA SWITCH PATH LAMA ===
-        self.delete_flows_on_path(current_route, '10.0.0.1', '10.0.0.2')
+        # Install H1 flow DI AWAL PATH SAJA (Leaf 1)
+        first_switch = new_route[0]
+        second_switch = new_route[1]
         
-        # === INSTALL FLOW BARU DI PATH BARU ===
-        for i in range(len(new_route) - 1):
-            curr_dpid = new_route[i]
-            next_dpid = new_route[i+1]
+        dp = self.datapaths.get(first_switch)
+        if dp and self.net.has_edge(first_switch, second_switch):
+            out_port = self.net[first_switch][second_switch]['port']
+            parser = dp.ofproto_parser
             
-            if self.net.has_edge(curr_dpid, next_dpid):
-                out_port = self.net[curr_dpid][next_dpid]['port']
-                datapath = self.datapaths.get(curr_dpid)
-                
-                if datapath:
-                    parser = datapath.ofproto_parser
-                    # Match UDP Traffic only (VoIP) - Lebih spesifik
-                    match = parser.OFPMatch(
-                        eth_type=0x0800, 
-                        ip_proto=17, 
-                        ipv4_src='10.0.0.1',
-                        ipv4_dst='10.0.0.2'
-                    ) 
-                    actions = [parser.OFPActionOutput(out_port)]
-                    self.add_flow(datapath, self.reroute_priority, match, actions)
-                    self.logger.info(f"✅ Installed reroute flow on DPID {curr_dpid} -> port {out_port}")
+            # Match H1 → ANY (broad)
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src='10.0.0.1'
+            )
+            actions = [parser.OFPActionOutput(out_port)]
+            
+            # Install dengan HIGH priority
+            self.add_flow(dp, 40000, match, actions, idle_timeout=0)
+            
+            self.logger.info(f"✅ Installed H1 reroute: DPID {first_switch} → port {out_port}")
+            self.logger.info(f"📊 Path: {new_route}")
         
-        # === TAMBAHAN LOG KE DATABASE ===
-        log_payload = {
-            "current": current_route,
-            "reroute": new_route,
-            "k": k,
-            "trigger": trigger_val
-        }
+        # 3. Block H1 di Spine 2 (DPID 3) jika pindah ke Spine 1
+        if 3 in new_route:  # Masih lewat Spine 2
+            self.logger.info("📌 Reroute masih melalui Spine 2 (DPID 3)")
+        else:
+            # Install DROP rule di Spine 2
+            dp3 = self.datapaths.get(3)
+            if dp3:
+                parser = dp3.ofproto_parser
+                match_drop = parser.OFPMatch(
+                    eth_type=0x0800,
+                    ipv4_src='10.0.0.1'
+                )
+                # No actions = DROP
+                self.add_flow(dp3, 50000, match_drop, [], idle_timeout=0)
+                self.logger.info("⛔ Blocked H1 on Spine 2 (DPID 3)")
+        
+        # Simpan state
+        self.current_reroute_path = new_route
+        self.congestion_active = True
+        self.last_congestion_time = time.time()
 
-        self.insert_event_log(
-            event_type="REROUTE_ACTIVE",
-            description=json.dumps(log_payload),
-            trigger_value=trigger_val
-        )
-
+    def flush_all_switches(self):
+        """HAPUS SEMUA FLOW DI SEMUA SWITCH (kecuali table-miss)"""
+        self.logger.warning("🧨 FLUSHING ALL SWITCHES...")
+        
+        for dpid, dp in self.datapaths.items():
+            try:
+                parser = dp.ofproto_parser
+                ofp = dp.ofproto
+                
+                # Match ALL (empty) untuk hapus semua flow
+                match_all = parser.OFPMatch()
+                
+                # Delete SEMUA flow
+                mod = parser.OFPFlowMod(
+                    datapath=dp,
+                    command=ofp.OFPFC_DELETE,
+                    out_port=ofp.OFPP_ANY,
+                    out_group=ofp.OFPG_ANY,
+                    match=match_all
+                )
+                dp.send_msg(mod)
+                
+                # Re-install table-miss entry
+                actions = [parser.OFPActionOutput(ofp.OFPP_CONTROLLER, ofp.OFPCML_NO_BUFFER)]
+                self.add_flow(dp, 0, match_all, actions)
+                
+                self.logger.info(f"🧹 Flushed DPID {dpid}")
+                
+            except Exception as e:
+                self.logger.error(f"Error flushing DPID {dpid}: {e}")
+        
+        # Clear semua cache
+        self.mac_to_port.clear()
+        self.last_bytes.clear()
+        self.logger.info("✅ All switches flushed and ready for new flows")
+                    
     def delete_flows_on_path(self, path, src_ip, dst_ip):
         """Hapus semua flow terkait di semua switch pada path tertentu"""
         for dpid in path:
@@ -290,42 +322,24 @@ class VoIPSmartController(app_manager.RyuApp):
             self.logger.info(f"🧹 CLEARED FLOWS for {src_ip}->{dst_ip} on switch {dpid}")
 
     def revert_routing(self):
-        """Kembali ke default routing dengan membersihkan SEMUA flow reroute"""
-        if not self.current_reroute_path:
-            self.logger.warning("No active reroute path to revert")
-            return
-
-        self.logger.info("🔄 REVERT TRIGGERED: Cleaning ALL reroute flows...")
+        self.logger.warning("🔄 REVERTING TO DEFAULT...")
         
-        # 1. Hapus semua flow reroute di path reroute
-        self.delete_flows_on_path(self.current_reroute_path, '10.0.0.1', '10.0.0.2')
+        # 1. Flush semua
+        self.flush_all_switches()
         
-        # 2. Hapus juga flow reroute di path default (jika ada)
-        if self.default_path:
-            self.delete_flows_on_path(self.default_path, '10.0.0.1', '10.0.0.2')
-        
-        # 3. Reset tracking
+        # 2. Reset state
+        self.congestion_active = False
         self.current_reroute_path = None
         
-        # 4. Force packet-in untuk trigger default routing kembali
-        for dpid in [4, 5, 6]:  # Leaf switches
-            dp = self.datapaths.get(dpid)
-            if dp:
-                # Send dummy packet untuk trigger packet-in
-                self._trigger_packet_in(dp)
+        # 3. Tunggu packet-in untuk install default routes
+        self.logger.info("⏳ Waiting for packet-in to establish default routes...")
         
-        # 5. Log ke Database
-        try:
-            log_payload = {"revert": "Complete cleanup of reroute flows"}
-            self.insert_event_log(
-                event_type="REROUTE_REVERT",
-                description=json.dumps(log_payload),
-                trigger_value=0
-            )
-        except Exception as e:
-            self.logger.error(f"Error logging revert: {str(e)}")
-        
-        self.logger.info("✅ Revert completed. Default routing will be re-established via packet-in")
+        # Log event
+        self.insert_event_log(
+            event_type="REROUTE_REVERT",
+            description="Complete flush and revert",
+            trigger_value=0
+        )
 
     def _trigger_packet_in(self, datapath):
         """Trigger packet-in untuk memaksa controller mengatur ulang routing"""
@@ -576,33 +590,30 @@ class VoIPSmartController(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
-        """
-        Modified Handler to include Spike Detection Logic (1.4x Target)
-        """
+        """HANYA monitor H1 traffic, jangan buat data synthetic"""
         body = ev.msg.body
         datapath = ev.msg.datapath
-        dpid = format(datapath.id, '016x')
+        dpid = datapath.id  # Integer, bukan hex
         timestamp = datetime.now()
-        elapsed_seconds = int(time.time() - self.start_time)
         
-        valid_flows = []
-        total_real_bytes_dpid = 0
-        
-        # --- LANGKAH 1: Kumpulkan Flow Valid & Hitung Total Real ---
+        # HANYA proses flow H1
         for stat in body:
-            if stat.priority == 0: continue # Skip table-miss
-            
+            if stat.priority == 0: 
+                continue
+                
             match = stat.match
             src_ip = match.get('ipv4_src') or self._resolve_ip(match.get('eth_src'))
+            
+            # HANYA H1 (10.0.0.1)
+            if src_ip != '10.0.0.1':
+                continue
+                
             dst_ip = match.get('ipv4_dst') or self._resolve_ip(match.get('eth_dst'))
-            
-            if not src_ip or not dst_ip or dst_ip.endswith('.255'): continue
-            
-            # Hitung Delta (Real D-ITG traffic since last sec)
-            
-            # [FIX] Tambahkan in_port ke key untuk mencegah collision saat rerouting
-            in_port = match.get('in_port', 'any')
-            flow_key = f"{dpid}-{src_ip}-{dst_ip}-{match.get('udp_src',0)}-{match.get('udp_dst',0)}-{in_port}"
+            if not dst_ip or dst_ip.endswith('.255'):
+                continue
+                
+            # Hitung delta REAL
+            flow_key = f"{dpid}-{src_ip}-{dst_ip}"
             byte_count = stat.byte_count
             packet_count = stat.packet_count
             
@@ -616,68 +627,37 @@ class VoIPSmartController(app_manager.RyuApp):
             
             self.last_bytes[flow_key] = (byte_count, packet_count)
             
-            # Simpan data flow sementara
-            if delta_bytes >= 0: # Ambil semua flow aktif
-                valid_flows.append({
-                    'flow_key': flow_key,
-                    'src_ip': src_ip, 'dst_ip': dst_ip,
-                    'src_mac': match.get('eth_src', ''), 'dst_mac': match.get('eth_dst', ''),
-                    'ip_proto': match.get('ip_proto', 17),
-                    'tp_src': match.get('udp_src', 0), 'tp_dst': match.get('udp_dst', 0),
-                    'real_bytes': delta_bytes,
-                    'real_pkts': delta_pkts
-                })
-                total_real_bytes_dpid += delta_bytes
-
-        if not valid_flows:
-            return
-
-        # --- LANGKAH 2: Hitung Target (Sine Wave) ---
-        target_total_bytes = self.get_target_total_bytes(elapsed_seconds)
-        
-        # --- LANGKAH 3: Hitung Scaling Factor (LOGIC ASLI ANDA) ---
-        if total_real_bytes_dpid > 0:
-            # LOGIKA BARU: Deteksi Burst
-            # Jika traffic asli lebih besar dari 1.4x Target Sine Wave, anggap itu SERANGAN/BURST.
-            if total_real_bytes_dpid > (target_total_bytes * 1.4):
-                scaling_factor = 1.0
-                # self.logger.warning(f"!!! SPIKE DETECTED on {dpid} !!! Passing Real Traffic ({total_real_bytes_dpid} B)")
-            else:
-                # Jika traffic normal, paksa ikut bentuk Sine Wave
-                scaling_factor = target_total_bytes / total_real_bytes_dpid
-        else:
-            scaling_factor = 0 
-            
-        # Log sedikit dikurangi frekuensinya agar tidak menimpa log reroute terlalu cepat
-        # self.logger.info(f"--- DPID {dpid} Report: Real={total_real_bytes_dpid} B | Target={target_total_bytes} B | Scale={scaling_factor:.2f}x")
-
-        # --- LANGKAH 4: Distribusi & Insert ---
-        flows_count = len(valid_flows)
-        
-        for flow in valid_flows:
-            if total_real_bytes_dpid > 0:
-                # Proportional Scaling
-                simulated_bytes_tx = int(flow['real_bytes'] * scaling_factor)
-            else:
-                # Jika real traffic 0 tapi ada flow entry, bagi rata
-                simulated_bytes_tx = int(target_total_bytes / flows_count)
-
-            # Asumsi ukuran paket VoIP rata-rata ~180-200 bytes
-            simulated_pkts_tx = int(simulated_bytes_tx / 180)
-            if simulated_pkts_tx == 0 and simulated_bytes_tx > 0: simulated_pkts_tx = 1
-
-            # RX sedikit random (simulasi loss/jitter kecil)
-            simulated_bytes_rx = int(simulated_bytes_tx * random.uniform(0.95, 1.0))
-            simulated_pkts_rx = int(simulated_pkts_tx * random.uniform(0.95, 1.0))
-            
-            flow_data = (
-                timestamp, dpid,
-                flow['src_ip'], flow['dst_ip'],
-                flow['src_mac'], flow['dst_mac'],
-                flow['ip_proto'], flow['tp_src'], flow['tp_dst'],
-                simulated_bytes_tx, simulated_bytes_rx, 
-                simulated_pkts_tx, simulated_pkts_rx,
-                1.0, 'voip'
-            )
-            
-            self.insert_flow_data(flow_data)
+            if delta_bytes <= 0:
+                continue
+                
+            # SIMPAN KE DB - REAL DATA ONLY
+            conn = self.get_db_conn()
+            if conn:
+                try:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        INSERT INTO traffic.flow_stats_
+                        (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac,
+                        ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx,
+                        pkts_tx, pkts_rx, duration_sec, traffic_label)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, (
+                        timestamp, dpid, src_ip, dst_ip,
+                        match.get('eth_src', ''), match.get('eth_dst', ''),
+                        match.get('ip_proto', 17), match.get('udp_src', 0), match.get('udp_dst', 0),
+                        delta_bytes, delta_bytes,  # rx = tx (simplify)
+                        delta_pkts, delta_pkts,
+                        1.0, 'voip'
+                    ))
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    
+                    # LOG: H1 traffic ditemukan di DPID mana
+                    if delta_bytes > 1000:  # Only log significant traffic
+                        self.logger.info(f"H1 → {dst_ip}: {delta_bytes}B on DPID {dpid}")
+                        
+                except Exception as e:
+                    if conn and not conn.closed:
+                        conn.rollback()
+                        conn.close()
