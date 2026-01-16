@@ -185,99 +185,120 @@ class VoIPSmartController(app_manager.RyuApp):
             return []
 
     def apply_ksp_reroute(self, k=3, trigger_val=0):
-        self.logger.warning(f"🚀 APPLYING KSP REROUTE (Trigger: {trigger_val} bps)")
+        """Reroute H1 VoIP SAJA (biarkan H3 tetap di path lama)"""
+        self.logger.warning(f"🚀 REROUTING H1 VoIP to avoid congestion...")
         
-        # 1. FLUSH SEMUA FLOW DI SEMUA SWITCH (Nuklear option)
-        self.flush_all_switches()
+        # 1. HAPUS HANYA FLOW H1 (VoIP), jangan hapus H3!
+        self.delete_h1_flows_only()
         
-        # 2. Install BARU di path baru
-        src_sw = 4
-        dst_sw = 5
+        # 2. Cari path alternatif untuk H1 (HANYA H1!)
+        src_sw = 4  # Leaf 1 (tempat H1)
+        dst_sw = 5  # Leaf 2 (tempat H2)
         
         paths = self.get_k_shortest_paths(src_sw, dst_sw, k=k)
-        if len(paths) < k:
+        if len(paths) < 2:
             return
         
-        new_route = paths[k-1]
+        # Default path: [4, 3, 5] (Leaf1→Spine2→Leaf2)
+        # Pilih path alternatif: [4, 1, 5] (Leaf1→Spine1→Leaf2)
+        new_route = None
+        for path in paths:
+            if 1 in path:  # Pilih path yang lewat Spine 1 (DPID 1)
+                new_route = path
+                break
         
-        # Install H1 flow DI AWAL PATH SAJA (Leaf 1)
-        first_switch = new_route[0]
-        second_switch = new_route[1]
+        if not new_route:
+            new_route = paths[1]  # Fallback ke path kedua
         
-        dp = self.datapaths.get(first_switch)
-        if dp and self.net.has_edge(first_switch, second_switch):
-            out_port = self.net[first_switch][second_switch]['port']
-            parser = dp.ofproto_parser
+        # 3. Install flow H1 di Leaf 1 (DPID 4) untuk ke Spine 1
+        dp_leaf1 = self.datapaths.get(4)
+        if dp_leaf1 and len(new_route) > 1:
+            parser = dp_leaf1.ofproto_parser
+            next_hop = new_route[1]  # Spine 1 (DPID 1) atau Spine 3
             
-            # Match H1 → ANY (broad)
-            match = parser.OFPMatch(
-                eth_type=0x0800,
-                ipv4_src='10.0.0.1'
-            )
-            actions = [parser.OFPActionOutput(out_port)]
-            
-            # Install dengan HIGH priority
-            self.add_flow(dp, 40000, match, actions, idle_timeout=0)
-            
-            self.logger.info(f"✅ Installed H1 reroute: DPID {first_switch} → port {out_port}")
-            self.logger.info(f"📊 Path: {new_route}")
-        
-        # 3. Block H1 di Spine 2 (DPID 3) jika pindah ke Spine 1
-        if 3 in new_route:  # Masih lewat Spine 2
-            self.logger.info("📌 Reroute masih melalui Spine 2 (DPID 3)")
-        else:
-            # Install DROP rule di Spine 2
-            dp3 = self.datapaths.get(3)
-            if dp3:
-                parser = dp3.ofproto_parser
-                match_drop = parser.OFPMatch(
+            if self.net.has_edge(4, next_hop):
+                out_port = self.net[4][next_hop]['port']
+                
+                # Match H1→H2 (VoIP)
+                match = parser.OFPMatch(
                     eth_type=0x0800,
-                    ipv4_src='10.0.0.1'
+                    ipv4_src='10.0.0.1',
+                    ipv4_dst='10.0.0.2'
                 )
-                # No actions = DROP
-                self.add_flow(dp3, 50000, match_drop, [], idle_timeout=0)
-                self.logger.info("⛔ Blocked H1 on Spine 2 (DPID 3)")
+                actions = [parser.OFPActionOutput(out_port)]
+                
+                # Priority tinggi untuk reroute
+                self.add_flow(dp_leaf1, 40000, match, actions, idle_timeout=0)
+                
+                self.logger.info(f"✅ Rerouted H1→H2: DPID 4 → port {out_port} (to DPID {next_hop})")
+                self.logger.info(f"📊 New path: {new_route}")
         
-        # Simpan state
+        # 4. Simpan state
         self.current_reroute_path = new_route
         self.congestion_active = True
         self.last_congestion_time = time.time()
+        
+        # 5. Log ke DB
+        self.insert_event_log(
+            event_type="REROUTE_ACTIVE",
+            description=f"H1 rerouted to path {new_route}",
+            trigger_value=trigger_val
+        )
 
-    def flush_all_switches(self):
-        """HAPUS SEMUA FLOW DI SEMUA SWITCH (kecuali table-miss)"""
-        self.logger.warning("🧨 FLUSHING ALL SWITCHES...")
+
+    def delete_h1_flows_only(self):
+        """Hapus HANYA flow H1→H2 (VoIP), biarkan H3 tetap"""
+        self.logger.info("🧹 Deleting ONLY H1→H2 VoIP flows...")
         
         for dpid, dp in self.datapaths.items():
             try:
                 parser = dp.ofproto_parser
                 ofp = dp.ofproto
                 
-                # Match ALL (empty) untuk hapus semua flow
-                match_all = parser.OFPMatch()
+                # Hapus SEMUA flow untuk H1→H2 (tidak peduli protocol/port)
+                # Match spesifik: H1 source, H2 destination
+                match_h1_to_h2 = parser.OFPMatch(
+                    eth_type=0x0800,        # IPv4
+                    ipv4_src='10.0.0.1',    # H1
+                    ipv4_dst='10.0.0.2'     # H2
+                )
                 
-                # Delete SEMUA flow
+                # DELETE semua priority untuk H1→H2
                 mod = parser.OFPFlowMod(
                     datapath=dp,
                     command=ofp.OFPFC_DELETE,
                     out_port=ofp.OFPP_ANY,
                     out_group=ofp.OFPG_ANY,
-                    match=match_all
+                    match=match_h1_to_h2
                 )
                 dp.send_msg(mod)
                 
-                # Re-install table-miss entry
-                actions = [parser.OFPActionOutput(ofp.OFPP_CONTROLLER, ofp.OFPCML_NO_BUFFER)]
-                self.add_flow(dp, 0, match_all, actions)
+                # Juga hapus flow dengan hanya source H1 (catch-all)
+                match_h1_only = parser.OFPMatch(
+                    eth_type=0x0800,
+                    ipv4_src='10.0.0.1'
+                )
                 
-                self.logger.info(f"🧹 Flushed DPID {dpid}")
+                mod2 = parser.OFPFlowMod(
+                    datapath=dp,
+                    command=ofp.OFPFC_DELETE,
+                    out_port=ofp.OFPP_ANY,
+                    out_group=ofp.OFPG_ANY,
+                    match=match_h1_only
+                )
+                dp.send_msg(mod2)
                 
+                self.logger.info(f"  Deleted H1 flows from DPID {dpid}")
+                    
             except Exception as e:
-                self.logger.error(f"Error flushing DPID {dpid}: {e}")
+                self.logger.error(f"Error deleting H1 flows from DPID {dpid}: {e}")
         
-        # Clear semua cache
-        self.mac_to_port.clear()
-        self.last_bytes.clear()
-        self.logger.info("✅ All switches flushed and ready for new flows")
+        # Clear cache H1
+        h1_keys = [k for k in self.last_bytes.keys() if '10.0.0.1' in k]
+        for k in h1_keys:
+            del self.last_bytes[k]
+        
+        self.logger.info("✅ H1 VoIP flows cleared (H3 bursty flows remain intact)")
                     
     def delete_flows_on_path(self, path, src_ip, dst_ip):
         """Hapus semua flow terkait di semua switch pada path tertentu"""
@@ -322,22 +343,23 @@ class VoIPSmartController(app_manager.RyuApp):
             self.logger.info(f"🧹 CLEARED FLOWS for {src_ip}->{dst_ip} on switch {dpid}")
 
     def revert_routing(self):
-        self.logger.warning("🔄 REVERTING TO DEFAULT...")
+        """Kembalikan H1 ke path default (Spine 2), biarkan H3 tetap"""
+        self.logger.warning("🔄 REVERTING H1 VoIP to default path (Spine 2)...")
         
-        # 1. Flush semua
-        self.flush_all_switches()
+        # 1. Hapus flow H1 reroute
+        self.delete_h1_flows_only()
         
-        # 2. Reset state
+        # 2. Reset state - H3 MASIH ADA di path lama!
         self.congestion_active = False
         self.current_reroute_path = None
         
-        # 3. Tunggu packet-in untuk install default routes
-        self.logger.info("⏳ Waiting for packet-in to establish default routes...")
+        # 3. H1 akan kembali via packet-in ke Spine 2
+        self.logger.info("⏳ H1 will return to Spine 2 via packet-in...")
         
-        # Log event
+        # 4. Log
         self.insert_event_log(
             event_type="REROUTE_REVERT",
-            description="Complete flush and revert",
+            description="H1 VoIP returned to default path (Spine 2)",
             trigger_value=0
         )
 
@@ -590,47 +612,47 @@ class VoIPSmartController(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
-        """HANYA monitor H1 traffic, jangan buat data synthetic"""
+        """Monitor REAL traffic H1→H2 (VoIP) dan H3→H2 (bursty) - REAL DATA ONLY!"""
         body = ev.msg.body
         datapath = ev.msg.datapath
-        dpid = datapath.id  # Integer, bukan hex
+        dpid = datapath.id
         timestamp = datetime.now()
         
-        # HANYA proses flow H1
         for stat in body:
             if stat.priority == 0: 
                 continue
                 
             match = stat.match
             src_ip = match.get('ipv4_src') or self._resolve_ip(match.get('eth_src'))
-            
-            # HANYA H1 (10.0.0.1)
-            if src_ip != '10.0.0.1':
-                continue
-                
             dst_ip = match.get('ipv4_dst') or self._resolve_ip(match.get('eth_dst'))
-            if not dst_ip or dst_ip.endswith('.255'):
+            
+            # HANYA monitor H1→H2 dan H3→H2
+            if dst_ip != '10.0.0.2':
                 continue
                 
-            # Hitung delta REAL
+            if src_ip not in ['10.0.0.1', '10.0.0.3']:
+                continue
+                
+            # Hitung REAL traffic (dari counter switch)
             flow_key = f"{dpid}-{src_ip}-{dst_ip}"
             byte_count = stat.byte_count
             packet_count = stat.packet_count
             
             if flow_key in self.last_bytes:
-                last_b, last_p = self.last_bytes[flow_key]
-                delta_bytes = max(0, byte_count - last_b)
-                delta_pkts = max(0, packet_count - last_p)
+                last_bytes, last_packets = self.last_bytes[flow_key]
+                delta_bytes = max(0, byte_count - last_bytes)
+                delta_packets = max(0, packet_count - last_packets)
             else:
                 delta_bytes = byte_count
-                delta_pkts = packet_count
+                delta_packets = packet_count
             
             self.last_bytes[flow_key] = (byte_count, packet_count)
             
             if delta_bytes <= 0:
                 continue
                 
-            # SIMPAN KE DB - REAL DATA ONLY
+            # === SIMPAN DATA REAL DARI SWITCH ===
+            # JANGAN buat data dummy!
             conn = self.get_db_conn()
             if conn:
                 try:
@@ -644,18 +666,20 @@ class VoIPSmartController(app_manager.RyuApp):
                     """, (
                         timestamp, dpid, src_ip, dst_ip,
                         match.get('eth_src', ''), match.get('eth_dst', ''),
-                        match.get('ip_proto', 17), match.get('udp_src', 0), match.get('udp_dst', 0),
-                        delta_bytes, delta_bytes,  # rx = tx (simplify)
-                        delta_pkts, delta_pkts,
-                        1.0, 'voip'
+                        match.get('ip_proto', 0),  # Ambil real protocol
+                        match.get('udp_src', 0), match.get('udp_dst', 0),  # Ambil real ports
+                        delta_bytes, delta_bytes,  # tx = rx (asumsi no loss di switch)
+                        delta_packets, delta_packets,  # PAKAI delta_packets REAL!
+                        1.0,  # duration 1 detik (karena polling setiap 1s)
+                        'voip' if src_ip == '10.0.0.1' else 'bursty'
                     ))
                     conn.commit()
                     cur.close()
                     conn.close()
                     
-                    # LOG: H1 traffic ditemukan di DPID mana
-                    if delta_bytes > 1000:  # Only log significant traffic
-                        self.logger.info(f"H1 → {dst_ip}: {delta_bytes}B on DPID {dpid}")
+                    # Debug log
+                    if delta_bytes > 1000:
+                        self.logger.info(f"📊 REAL DATA: {src_ip}→H2: {delta_bytes}B, {delta_packets} pkts on DPID {dpid}")
                         
                 except Exception as e:
                     if conn and not conn.closed:
