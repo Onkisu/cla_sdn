@@ -207,27 +207,55 @@ class VoIPSmartController(app_manager.RyuApp):
 
         # [TAMBAHAN WAJIB] Hapus Flow Lama di Switch Sumber (Leaf 1 / DPID 4)
         # Kita paksa switch 4 lupa ingatan soal jalur lama ke H2
-        src_datapath = self.datapaths.get(src_sw) # src_sw = 4
-        if src_datapath:
-            ofp = src_datapath.ofproto
-            parser = src_datapath.ofproto_parser
+        # src_datapath = self.datapaths.get(src_sw) # src_sw = 4
+        # if src_datapath:
+        #     ofp = src_datapath.ofproto
+        #     parser = src_datapath.ofproto_parser
             
-            # Match spesifik ke IP Tujuan H2 (10.0.0.2)
+        #     # Match spesifik ke IP Tujuan H2 (10.0.0.2)
+        #     match_delete = parser.OFPMatch(
+        #         eth_type=0x0800, 
+        #         ipv4_dst='10.0.0.2'
+        #     )
+            
+        #     # Perintah DELETE FLOW
+        #     mod = parser.OFPFlowMod(
+        #         datapath=src_datapath,
+        #         command=ofp.OFPFC_DELETE, # HAPUS!
+        #         out_port=ofp.OFPP_ANY,
+        #         out_group=ofp.OFPG_ANY,
+        #         match=match_delete
+        #     )
+        #     src_datapath.send_msg(mod)
+        #     self.logger.info(f"🧹 CLEARED OLD FLOWS on Switch {src_sw} to Host 10.0.0.2")
+
+        # === HAPUS FLOW LAMA DI SEMUA SWITCH PATH LAMA ===
+        for dpid in current_route:
+            dp = self.datapaths.get(dpid)
+            if not dp:
+                continue
+
+            ofp = dp.ofproto
+            parser = dp.ofproto_parser
+
             match_delete = parser.OFPMatch(
-                eth_type=0x0800, 
-                ipv4_dst='10.0.0.2'
+                eth_type=0x0800,
+                ipv4_src='10.0.0.1',
+                ipv4_dst='10.0.0.2',
+                ip_proto=17  # UDP VoIP
             )
-            
-            # Perintah DELETE FLOW
+
             mod = parser.OFPFlowMod(
-                datapath=src_datapath,
-                command=ofp.OFPFC_DELETE, # HAPUS!
+                datapath=dp,
+                command=ofp.OFPFC_DELETE,
                 out_port=ofp.OFPP_ANY,
                 out_group=ofp.OFPG_ANY,
                 match=match_delete
             )
-            src_datapath.send_msg(mod)
-            self.logger.info(f"🧹 CLEARED OLD FLOWS on Switch {src_sw} to Host 10.0.0.2")
+            dp.send_msg(mod)
+
+            self.logger.info(f"🧹 CLEARED OLD FLOW on switch {dpid}")
+
 
         # Install Rule Reroute (Priority 100)
         for i in range(len(new_route) - 1):
@@ -345,6 +373,26 @@ class VoIPSmartController(app_manager.RyuApp):
             )
         except Exception as e:
             self.logger.error(f"Error logging revert: {str(e)}")
+
+    def delete_flow(self, dp, src_ip, dst_ip):
+        ofp = dp.ofproto
+        parser = dp.ofproto_parser
+
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ipv4_src=src_ip,
+            ipv4_dst=dst_ip
+        )
+
+        mod = parser.OFPFlowMod(
+            datapath=dp,
+            command=ofp.OFPFC_DELETE,
+            out_port=ofp.OFPP_ANY,
+            out_group=ofp.OFPG_ANY,
+            match=match
+        )
+        dp.send_msg(mod)
+
 
     def insert_event_log(self, event_type, description, trigger_value=0):
         conn = self.get_db_conn()
