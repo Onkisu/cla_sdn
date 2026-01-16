@@ -75,7 +75,7 @@ echo "       Controller will listen on port 6653"
 # Run Ryu in subshell with venv activated
 (
     source $RYU_VENV/bin/activate
-    ryu-manager --observe-links ksp_controller.py > /tmp/ryu_controller.log 2>&1 &
+    ryu-manager --observe-links ksp_controller_2.py > /tmp/ryu_controller.log 2>&1 &
     echo $! > /tmp/ryu_pid.txt
 )
 
