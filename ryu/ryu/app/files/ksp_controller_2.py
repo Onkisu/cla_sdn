@@ -530,45 +530,50 @@ class VoIPSmartController(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
-
-                # === IGNORE ZOMBIE TRAFFIC DURING TRANSITION ===
-        if time.time() < self.reroute_grace_until:
-            return
-
         """Monitor REAL traffic H1->H2 dan H3→H2 - Handle None values!"""
+
         body = ev.msg.body
         datapath = ev.msg.datapath
         dpid = datapath.id
         timestamp = datetime.now()
         
         conn = self.get_db_conn()
-        if not conn: return
+        if not conn:
+            return
 
         try:
             cur = conn.cursor()
             for stat in body:
-                if stat.priority == 0: continue
+
+                # === IGNORE ZOMBIE TRAFFIC DURING TRANSITION (BENAR) ===
+                if time.time() < self.reroute_grace_until:
+                    continue
+
+                if stat.priority == 0:
+                    continue
+
                 match = stat.match
-                
+
                 src_ip = match.get('ipv4_src')
                 dst_ip = match.get('ipv4_dst')
-                
+
                 if not src_ip:
                     src_mac = match.get('eth_src')
                     src_ip = self._resolve_ip(src_mac) if src_mac else None
-                
+
                 if not dst_ip:
                     dst_mac = match.get('eth_dst')
                     dst_ip = self._resolve_ip(dst_mac) if dst_mac else None
-                
-                # Filter only relevant traffic
-                if dst_ip != '10.0.0.2': continue
-                if src_ip not in ['10.0.0.1', '10.0.0.3']: continue
-                
+
+                if dst_ip != '10.0.0.2':
+                    continue
+                if src_ip not in ['10.0.0.1', '10.0.0.3']:
+                    continue
+
                 flow_key = f"{dpid}-{src_ip}-{dst_ip}"
                 byte_count = stat.byte_count
                 packet_count = stat.packet_count
-                
+
                 if flow_key in self.last_bytes:
                     last_bytes, last_packets = self.last_bytes[flow_key]
                     delta_bytes = max(0, byte_count - last_bytes)
@@ -576,12 +581,12 @@ class VoIPSmartController(app_manager.RyuApp):
                 else:
                     delta_bytes = byte_count
                     delta_packets = packet_count
-                
-                self.last_bytes[flow_key] = (byte_count, packet_count)
-                
-                if delta_bytes <= 0: continue
 
-                # INSERT FULL STATS KE DB
+                self.last_bytes[flow_key] = (byte_count, packet_count)
+
+                if delta_bytes <= 0:
+                    continue
+
                 cur.execute("""
                     INSERT INTO traffic.flow_stats_
                     (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac,
@@ -591,14 +596,19 @@ class VoIPSmartController(app_manager.RyuApp):
                 """, (
                     timestamp, dpid, src_ip, dst_ip,
                     match.get('eth_src'), match.get('eth_dst'),
-                    match.get('ip_proto', 17), 
-                    match.get('tcp_src') or match.get('udp_src') or 0, 
+                    match.get('ip_proto', 17),
+                    match.get('tcp_src') or match.get('udp_src') or 0,
                     match.get('tcp_dst') or match.get('udp_dst') or 0,
                     delta_bytes, delta_bytes,
                     delta_packets, delta_packets,
                     1.0,
                     'voip' if src_ip == '10.0.0.1' else 'bursty'
                 ))
-            conn.commit(); cur.close(); conn.close()
+
+            conn.commit()
+            cur.close()
+            conn.close()
+
         except Exception:
-            if conn: conn.close()
+            if conn:
+                conn.close()
