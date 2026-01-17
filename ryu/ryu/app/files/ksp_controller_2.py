@@ -311,8 +311,21 @@ class VoIPSmartController(app_manager.RyuApp):
                                   in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
 
+    # ... (Code sebelumnya tetap sama) ...
+
     # =================================================================
-    # 4. STATS MONITORING (PURE D-ITG)
+    # TAMBAHAN HELPER (DIPERLUKAN LAGI)
+    # =================================================================
+    def _resolve_ip(self, mac):
+        """Mencari IP address berdasarkan MAC address dari tabel ARP"""
+        if not mac: return None
+        # Reverse lookup: Cari IP yang punya mac address tersebut
+        for ip, m in self.ip_to_mac.items():
+            if m == mac: return ip
+        return None
+
+    # =================================================================
+    # 4. STATS MONITORING (FIXED IP RESOLUTION)
     # =================================================================
     def _monitor_traffic(self):
         while True:
@@ -330,23 +343,27 @@ class VoIPSmartController(app_manager.RyuApp):
         conn = self.get_db_conn()
         
         for stat in body:
-            # Skip rule controller/default
             if stat.priority == 0: continue 
 
-            # Ambil data REAL dari switch
-            byte_count = stat.byte_count
-            packet_count = stat.packet_count
-            
-            # Hitung Delta (Kenaikan trafik sejak detik lalu)
             match = stat.match
-            src_ip = match.get('ipv4_src')
-            dst_ip = match.get('ipv4_dst')
+            
+            # --- FIX DISINI: Coba ambil IP dari Match, kalau gak ada cari dari MAC ---
+            src_mac = match.get('eth_src')
+            dst_mac = match.get('eth_dst')
+            
+            src_ip = match.get('ipv4_src') or self._resolve_ip(src_mac)
+            dst_ip = match.get('ipv4_dst') or self._resolve_ip(dst_mac)
+            
             in_port = match.get('in_port', 0)
             
-            # Abaikan flow non-IP
+            # Jika IP masih tidak ketemu (misal trafik ARP atau LLDP murni), baru skip
             if not src_ip or not dst_ip: continue
             
-            flow_key = f"{dpid}-{src_ip}-{dst_ip}-{in_port}"
+            # Key Unik
+            flow_key = f"{dpid}-{src_ip}-{dst_ip}-{in_port}-{stat.priority}"
+            
+            byte_count = stat.byte_count
+            packet_count = stat.packet_count
             
             if flow_key in self.last_bytes:
                 last_b, last_p = self.last_bytes[flow_key]
@@ -358,8 +375,10 @@ class VoIPSmartController(app_manager.RyuApp):
                 
             self.last_bytes[flow_key] = (byte_count, packet_count)
 
-            # Insert ke Database HANYA jika ada trafik (mengurangi spam log 0)
-            # Dan murni apa yang dilaporkan switch (tidak ada math.sin/random)
+            # Debugging Print (Opsional: Cek di terminal apakah data terbaca)
+            # if delta_bytes > 0:
+            #    self.logger.info(f"Captured: {src_ip}->{dst_ip} | {delta_bytes} Bytes")
+
             if delta_bytes > 0 and conn:
                 try:
                     cur = conn.cursor()
@@ -371,16 +390,17 @@ class VoIPSmartController(app_manager.RyuApp):
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (
                         timestamp, dpid, src_ip, dst_ip,
-                        match.get('eth_src',''), match.get('eth_dst',''),
+                        src_mac, dst_mac,
                         match.get('ip_proto', 0), match.get('udp_src',0), match.get('udp_dst',0),
-                        delta_bytes, delta_bytes, # Murni RX = TX (approximation di switch level)
+                        delta_bytes, delta_bytes, 
                         delta_pkts, delta_pkts,
                         1.0,
                         'voip' if src_ip == '10.0.0.1' else 'bursty'
                     ))
                     conn.commit()
                     cur.close()
-                except Exception:
+                except Exception as e:
+                    # self.logger.error(f"DB Insert Error: {e}") # Uncomment untuk debug DB
                     conn.rollback()
         
         if conn: conn.close()
