@@ -530,6 +530,11 @@ class VoIPSmartController(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
+
+                # === IGNORE ZOMBIE TRAFFIC DURING TRANSITION ===
+        if time.time() < self.reroute_grace_until:
+            return
+
         """Monitor REAL traffic H1->H2 dan H3→H2 - Handle None values!"""
         body = ev.msg.body
         datapath = ev.msg.datapath
