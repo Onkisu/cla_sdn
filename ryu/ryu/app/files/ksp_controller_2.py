@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Ryu SDN Controller: VoIP KSP Rerouting (FINAL STABLE FIX)
-- FIX: Traffic Explosion on DPID 5 (Loop Prevention)
-- FIX: Reroute Stuck (Aggressive Cleanup + Forced Default Path)
-- FIX: No Synthetic Data (Pure D-ITG Stats)
+Ryu SDN Controller: VoIP KSP Rerouting (PURE D-ITG DATA)
+- NO Synthetic Traffic / Sine Wave.
+- FIX: Traffic Stuck on Reroute Path after Revert.
+- FIX: Ghost Traffic caused by leftover flows.
 """
 
 from ryu.base import app_manager
@@ -12,7 +12,8 @@ from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISP
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub
-from ryu.lib.packet import packet, ethernet, ether_types, ipv4, udp, arp
+from ryu.lib.packet import packet, ethernet, ether_types, ipv4, udp, tcp, arp
+from ryu.topology import event, api
 from ryu.topology.api import get_switch, get_link
 import networkx as nx
 import psycopg2
@@ -45,14 +46,15 @@ class VoIPSmartController(app_manager.RyuApp):
         self.last_bytes = {}
         self.start_time = time.time()
         
-        # --- STATE ---
+        # --- STATE CONGESTION ---
         self.congestion_active = False 
         
-        # PRIORITAS (CRITICAL)
-        self.PRIO_REROUTE = 30000  # Jalur Darurat (Spine 1)
-        self.PRIO_NORMAL  = 15000  # Jalur Normal (Spine 2) - Dipaksa saat revert
-        self.PRIO_L2      = 1      # Learning Biasa
+        # HIRARKI PRIORITAS (KUNCI PERBAIKAN)
+        self.PRIORITY_REROUTE = 30000  # Saat Macet
+        self.PRIORITY_NORMAL  = 15000  # Saat Normal (Dipaksa)
+        self.PRIORITY_L2      = 1      # Learning biasa
 
+        # Variabel cooldown
         self.last_congestion_time = 0
         self.cooldown_period = 30  
         self.LOWER_THRESHOLD_BPS = 90000 
@@ -64,22 +66,25 @@ class VoIPSmartController(app_manager.RyuApp):
         self.forecast_thread = hub.spawn(self._monitor_forecast)
         self.topology_thread = hub.spawn(self._discover_topology)
 
-        self.logger.info("VoIP Smart Controller (FINAL FIX) Started")
+        self.logger.info("VoIP Smart Controller (PURE LOGIC FIX) Started")
 
     def connect_database(self):
         try:
             self.db_conn = psycopg2.connect(**DB_CONFIG, connect_timeout=3)
+            self.logger.info("Database connected")
         except Exception as e:
-            self.logger.warning(f"DB Error: {e}")
+            self.logger.warning(f"DB Error: {e}. Running without DB storage.")
             self.db_conn = None
     
     def get_db_conn(self):
         try:
             return psycopg2.connect(**DB_CONFIG, connect_timeout=3)
-        except: return None
+        except Exception as e:
+            self.logger.error(f"DB Connect Error: {e}")
+            return None
 
     # =================================================================
-    # 1. TOPOLOGY & PATH CALCULATION
+    # 1. TOPOLOGY DISCOVERY
     # =================================================================
     def _discover_topology(self):
         while True:
@@ -92,11 +97,6 @@ class VoIPSmartController(app_manager.RyuApp):
             for l in links:
                 self.net.add_edge(l.src.dpid, l.dst.dpid, port=l.src.port_no)
                 self.net.add_edge(l.dst.dpid, l.src.dpid, port=l.dst.port_no)
-
-    def get_k_shortest_paths(self, src, dst, k=3):
-        try:
-            return list(nx.shortest_simple_paths(self.net, src, dst))[0:k]
-        except: return []
 
     # =================================================================
     # 2. LOGIC REROUTE & REVERT (THE FIX)
@@ -114,12 +114,13 @@ class VoIPSmartController(app_manager.RyuApp):
                 conn.close()
 
                 if not result: continue
+
                 pred_bps = result[0]
                 current_time = time.time()
 
-                # LOGIC TRIGGER
+                # --- LOGIC TRIGGER ---
                 if pred_bps > BURST_THRESHOLD_BPS and not self.congestion_active:
-                    self.logger.warning(f"⚠️  CONGESTION: {pred_bps:.0f} bps -> REROUTE!")
+                    self.logger.warning(f"⚠️ CONGESTION: {pred_bps:.0f} bps -> REROUTE!")
                     self.apply_ksp_reroute(k=3, trigger_val=pred_bps)
                     self.congestion_active = True
                     self.last_congestion_time = current_time
@@ -130,48 +131,45 @@ class VoIPSmartController(app_manager.RyuApp):
                         self.logger.info(f"✅ STABLE: {pred_bps:.0f} bps -> REVERT.")
                         self.revert_routing()
                         self.congestion_active = False
-            except Exception: pass
+            except Exception as e:
+                pass
+
+    def get_k_shortest_paths(self, src, dst, k=3):
+        try:
+            return list(nx.shortest_simple_paths(self.net, src, dst))[0:k]
+        except: return []
 
     def apply_ksp_reroute(self, k=3, trigger_val=0):
-        src_sw, dst_sw = 4, 5  # Leaf 1 -> Leaf 2
+        src_sw, dst_sw = 4, 5
         src_ip, dst_ip = '10.0.0.1', '10.0.0.2'
         
         paths = self.get_k_shortest_paths(src_sw, dst_sw, k=k)
         if len(paths) < k: return
 
-        new_route = paths[k-1] # Jalur Alternatif (DPID 4 -> 1 -> 5)
-        self.logger.info(f" >>> REROUTE ACTIVE: {new_route}")
+        current_route = paths[0]
+        new_route = paths[k-1] # Jalur alternatif (biasanya lewat DPID 1)
+        
+        self.logger.info(f" >>> REROUTE ACTIVE: {current_route} ==> {new_route}")
 
-        # 1. CLEANUP OLD NORMAL FLOWS (Agar tidak bentrok)
-        # Bersihkan di source
-        dp_src = self.datapaths.get(src_sw)
-        if dp_src: self.del_flow(dp_src, self.PRIO_NORMAL, src_ip, dst_ip)
+        # 1. DELETE NORMAL PRIORITY (15000) di Source
+        # Agar tidak bentrok, kita hapus rule "Normal" yang mungkin sedang aktif
+        datapath = self.datapaths.get(src_sw)
+        if datapath:
+            self.del_flow(datapath, self.PRIORITY_NORMAL, src_ip, dst_ip)
 
-        # 2. INSTALL REROUTE FLOWS (Priority 30000)
-        # Loop ini memasang aturan routing hop-by-hop
+        # 2. INSTALL REROUTE PRIORITY (30000)
+        # Pasang rule baru di sepanjang jalur baru
         for i in range(len(new_route) - 1):
-            curr_dpid = new_route[i]
-            next_dpid = new_route[i+1]
-            
-            if self.net.has_edge(curr_dpid, next_dpid):
-                out_port = self.net[curr_dpid][next_dpid]['port']
-                dp = self.datapaths.get(curr_dpid)
+            curr, next_dpid = new_route[i], new_route[i+1]
+            if self.net.has_edge(curr, next_dpid):
+                out_port = self.net[curr][next_dpid]['port']
+                dp = self.datapaths.get(curr)
                 if dp:
-                    self.add_flow_explicit(dp, self.PRIO_REROUTE, src_ip, dst_ip, out_port)
-
-        # 3. FIX: INSTALL LAST HOP (DESTINATION)
-        # Ini mencegah Loop di DPID 5. Kita beritahu DPID 5 untuk output ke H2.
-        # Kita asumsikan H2 ada di port 1 pada DPID 5 (sesuai topologi umum mininet)
-        # Atau gunakan mac_to_port jika sudah belajar.
-        dp_dst = self.datapaths.get(dst_sw)
-        if dp_dst:
-            # Cari port ke H2 (biasanya port 1 di Leaf 2, atau check self.mac_to_port)
-            # Untuk safety, kita gunakan mac learning atau port 1
-            h2_mac = self.ip_to_mac.get(dst_ip)
-            out_port_host = self.mac_to_port.get(dst_sw, {}).get(h2_mac, 1) # Default ke 1 jika belum tahu
-            
-            self.add_flow_explicit(dp_dst, self.PRIO_REROUTE, src_ip, dst_ip, out_port_host)
-            self.logger.info(f"   >>> Secured Destination DPID {dst_sw} -> Port {out_port_host}")
+                    parser = dp.ofproto_parser
+                    match = parser.OFPMatch(eth_type=0x0800, ip_proto=17, ipv4_src=src_ip, ipv4_dst=dst_ip)
+                    actions = [parser.OFPActionOutput(out_port)]
+                    # Idle timeout 0 agar tidak hilang sendiri
+                    self.add_flow(dp, self.PRIORITY_REROUTE, match, actions, idle_timeout=0)
 
         self.insert_event_log("REROUTE_ACTIVE", json.dumps(new_route), trigger_val)
 
@@ -180,39 +178,36 @@ class VoIPSmartController(app_manager.RyuApp):
         src_sw, dst_sw = 4, 5
         src_ip, dst_ip = '10.0.0.1', '10.0.0.2'
         
-        # 1. STRICT CLEANUP: Hapus Flow Reroute di SELURUH jalur reroute (4, 1, 5)
-        # Ini penting agar tidak ada sisa flow yang bikin loop
-        reroute_nodes = [4, 1, 5] 
-        for dpid in reroute_nodes:
-            dp = self.datapaths.get(dpid)
-            if dp:
-                self.del_flow(dp, self.PRIO_REROUTE, src_ip, dst_ip)
+        datapath = self.datapaths.get(src_sw)
+        if not datapath: return
 
-        # 2. FORCE DEFAULT PATH (Priority 15000)
-        # Kita paksa Source (DPID 4) lewat Spine 2 (DPID 3)
-        paths = self.get_k_shortest_paths(src_sw, dst_sw, k=1) # Path 0 (Default)
+        # 1. HAPUS Flow Reroute (Priority 30000)
+        # Ini menghentikan trafik lewat jalur alternatif
+        self.del_flow(datapath, self.PRIORITY_REROUTE, src_ip, dst_ip)
+
+        # 2. FORCE INSTALL JALUR DEFAULT (Priority 15000)
+        # Cari jalur terpendek (Path 0)
+        paths = self.get_k_shortest_paths(src_sw, dst_sw, k=1)
         if paths:
-            default_route = paths[0] # [4, 3, 5]
+            default_route = paths[0] # Biasanya [4, 3, 5]
             if len(default_route) > 1:
-                next_dpid = default_route[1] # DPID 3
+                next_dpid = default_route[1] # Hop berikutnya (misal DPID 3)
                 if self.net.has_edge(src_sw, next_dpid):
                     out_port = self.net[src_sw][next_dpid]['port']
-                    dp_src = self.datapaths.get(src_sw)
-                    if dp_src:
-                        self.add_flow_explicit(dp_src, self.PRIO_NORMAL, src_ip, dst_ip, out_port)
-                        self.logger.info(f"   >>> Default Path ENFORCED: DPID {src_sw} -> Port {out_port}")
+                    
+                    parser = datapath.ofproto_parser
+                    match = parser.OFPMatch(eth_type=0x0800, ip_proto=17, ipv4_src=src_ip, ipv4_dst=dst_ip)
+                    actions = [parser.OFPActionOutput(out_port)]
+                    
+                    # Kita pasang Priority 15000. 
+                    # Ini LEBIH TINGGI dari L2 Learning (Priority 1).
+                    # Jadi switch PASTI mematuhi ini dan tidak bingung.
+                    self.add_flow(datapath, self.PRIORITY_NORMAL, match, actions, idle_timeout=0)
+                    self.logger.info(f"   >>> Default Path ENFORCED on DPID {src_sw} -> Port {out_port}")
 
         self.insert_event_log("REROUTE_REVERT", "Restored Default Path", 0)
 
-    # --- Helper Functions ---
-    def add_flow_explicit(self, datapath, priority, src_ip, dst_ip, out_port):
-        parser = datapath.ofproto_parser
-        # Match spesifik IP & UDP agar tidak mengganggu trafik lain
-        match = parser.OFPMatch(eth_type=0x0800, ip_proto=17, ipv4_src=src_ip, ipv4_dst=dst_ip)
-        actions = [parser.OFPActionOutput(out_port)]
-        # Idle timeout 0 = Permanen sampai dihapus controller
-        self.add_flow(datapath, priority, match, actions, idle_timeout=0)
-
+    # --- Helper Delete Flow ---
     def del_flow(self, datapath, priority, src_ip, dst_ip):
         ofp = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -225,7 +220,7 @@ class VoIPSmartController(app_manager.RyuApp):
         datapath.send_msg(mod)
 
     # =================================================================
-    # 3. STANDARD HANDLERS
+    # 3. STANDARD HANDLERS (PacketIn & Stats)
     # =================================================================
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -261,13 +256,14 @@ class VoIPSmartController(app_manager.RyuApp):
         eth = pkt.get_protocols(ethernet.ethernet)[0]
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
-        
+        if eth.ethertype == ether_types.ETH_TYPE_IPV6: return
+
         dst = eth.dst
         src = eth.src
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
 
-        # Handle ARP agar ping jalan
+        # --- ARP HANDLER ---
         arp_pkt = pkt.get_protocol(arp.arp)
         if arp_pkt:
             self.ip_to_mac[arp_pkt.src_ip] = arp_pkt.src_mac
@@ -285,28 +281,29 @@ class VoIPSmartController(app_manager.RyuApp):
                 datapath.send_msg(out)
                 return
 
-        # L2 Switching Biasa (Priority 1)
+        # --- STANDARD L2 SWITCHING (PRIORITY 1) ---
         if dst in self.mac_to_port[dpid]:
             out_port = self.mac_to_port[dpid][dst]
         else:
             out_port = ofproto.OFPP_FLOOD
 
         actions = []
-        # Cegah Flooding balik ke Spine (Anti-Loop sederhana)
         is_leaf = dpid >= 4
+        is_spine = dpid <= 3
+        
         if out_port == ofproto.OFPP_FLOOD:
-            if is_leaf and in_port <= 3: # Jika datang dari Spine, jangan flood balik ke semua spine
-                # Flood ke host saja (port 1 dan 2 asumsi host)
-                # Sesuaikan dengan topologi Anda jika port host berbeda
-                actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD)) 
+            if is_leaf and in_port <= 3: 
+                actions.append(parser.OFPActionOutput(4)) # Uplink
+                actions.append(parser.OFPActionOutput(5)) # Uplink
             else:
                 actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD))
         else:
             actions = [parser.OFPActionOutput(out_port)]
 
+        # Install Flow Priority 1
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-            self.add_flow(datapath, self.PRIO_L2, match, actions, msg.buffer_id, idle_timeout=60)
+            self.add_flow(datapath, self.PRIORITY_L2, match, actions, msg.buffer_id, idle_timeout=60)
 
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER: data = msg.data
@@ -315,7 +312,7 @@ class VoIPSmartController(app_manager.RyuApp):
         datapath.send_msg(out)
 
     # =================================================================
-    # 4. MONITORING (PURE D-ITG, NO SYNTHETIC)
+    # 4. STATS MONITORING (PURE D-ITG)
     # =================================================================
     def _monitor_traffic(self):
         while True:
@@ -329,26 +326,27 @@ class VoIPSmartController(app_manager.RyuApp):
         body = ev.msg.body
         dpid = format(ev.msg.datapath.id, '016x')
         timestamp = datetime.now()
+        
         conn = self.get_db_conn()
         
         for stat in body:
-            # Skip flow controller
+            # Skip rule controller/default
             if stat.priority == 0: continue 
 
+            # Ambil data REAL dari switch
+            byte_count = stat.byte_count
+            packet_count = stat.packet_count
+            
+            # Hitung Delta (Kenaikan trafik sejak detik lalu)
             match = stat.match
             src_ip = match.get('ipv4_src')
             dst_ip = match.get('ipv4_dst')
-            # Gunakan in_port agar unik dan tidak ter-sum double
-            in_port = match.get('in_port', 0) 
+            in_port = match.get('in_port', 0)
             
+            # Abaikan flow non-IP
             if not src_ip or not dst_ip: continue
             
-            # Key Unik: Gabungan DPID + IP + Port + Priority
-            # Menambahkan Priority ke key penting agar tidak duplikat jika ada transisi rule
-            flow_key = f"{dpid}-{src_ip}-{dst_ip}-{in_port}-{stat.priority}"
-            
-            byte_count = stat.byte_count
-            packet_count = stat.packet_count
+            flow_key = f"{dpid}-{src_ip}-{dst_ip}-{in_port}"
             
             if flow_key in self.last_bytes:
                 last_b, last_p = self.last_bytes[flow_key]
@@ -360,7 +358,8 @@ class VoIPSmartController(app_manager.RyuApp):
                 
             self.last_bytes[flow_key] = (byte_count, packet_count)
 
-            # Insert HANYA jika ada trafik (mengurangi spam)
+            # Insert ke Database HANYA jika ada trafik (mengurangi spam log 0)
+            # Dan murni apa yang dilaporkan switch (tidak ada math.sin/random)
             if delta_bytes > 0 and conn:
                 try:
                     cur = conn.cursor()
@@ -374,7 +373,7 @@ class VoIPSmartController(app_manager.RyuApp):
                         timestamp, dpid, src_ip, dst_ip,
                         match.get('eth_src',''), match.get('eth_dst',''),
                         match.get('ip_proto', 0), match.get('udp_src',0), match.get('udp_dst',0),
-                        delta_bytes, delta_bytes, 
+                        delta_bytes, delta_bytes, # Murni RX = TX (approximation di switch level)
                         delta_pkts, delta_pkts,
                         1.0,
                         'voip' if src_ip == '10.0.0.1' else 'bursty'
