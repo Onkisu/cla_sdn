@@ -2,8 +2,9 @@
 """
 Ryu SDN Controller: VoIP KSP Rerouting + Traffic Monitoring (FIXED SAPU JAGAT)
 - Fix: Explicit Revert Logic (No implicit Packet-In dependence)
-- Fix: Traffic Doubling preventions (Strict Flow Cleanup)
+- Fix: Traffic Doubling preventions (Barrier Request + Strict Cleanup)
 - Fix: Explicit Priority Management (Normal=100, Reroute=200)
+- Features: All DB Logging and Forecasting retained.
 """
 
 from ryu.base import app_manager
@@ -31,21 +32,20 @@ DB_CONFIG = {
     'port': 5432
 }
 
-# Threshold Congestion
+# Threshold Congestion (Sesuai forecast_2.py)
 BURST_THRESHOLD_BPS = 120000 
-LOWER_THRESHOLD_BPS = 90000 # Hysteresis bawah
-COOLDOWN_PERIOD = 30 
+LOWER_THRESHOLD_BPS = 90000 # Hysteresis agar tidak flip-flop
+COOLDOWN_PERIOD = 15        # Detik menunggu sebelum revert diizinkan
 
 # --- CONSTANT PORTS & PRIORITY ---
-# Asumsi Topologi Mininet Spine-Leaf Default:
+# Asumsi Topologi Mininet Spine-Leaf:
 # Leaf 1 (DPID 4) Ports: 1->Spine1, 2->Spine2, 3->Spine3, 4->Host1
 PORT_TO_SPINE_1 = 1 # Jalur Reroute (Alternatif)
-PORT_TO_SPINE_2 = 2 # (Jarang dipakai di skenario ini)
 PORT_TO_SPINE_3 = 3 # Jalur Default (Rawan Tabrakan)
 
-PRIO_NORMAL = 100
-PRIO_REROUTE = 200
-PRIO_DEFAULT_MAC = 1
+PRIO_REROUTE = 200    # Prioritas Tertinggi
+PRIO_NORMAL = 100     # Prioritas Menengah (Default Path H1->H2)
+PRIO_DEFAULT_MAC = 1  # Prioritas Terendah (Learning Switch)
 
 class VoIPSmartController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -53,15 +53,13 @@ class VoIPSmartController(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(VoIPSmartController, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
-        self.ip_to_mac = {}     
         self.datapaths = {}
         self.net = nx.DiGraph()
         self.last_bytes = {}
         
         # --- STATE ---
         self.congestion_active = False 
-        self.last_congestion_time = 0
-        self.current_reroute_path = None
+        self.last_state_change_time = 0
         
         self.connect_database()
         
@@ -111,6 +109,7 @@ class VoIPSmartController(app_manager.RyuApp):
             
             try:
                 cur = conn.cursor()
+                # Ambil prediksi terbaru
                 cur.execute("SELECT y_pred FROM forecast_1h ORDER BY ts_created DESC LIMIT 1")
                 result = cur.fetchone()
                 cur.close()
@@ -119,33 +118,64 @@ class VoIPSmartController(app_manager.RyuApp):
                 if not result: continue
                 pred_bps = result[0]
                 now = time.time()
+                time_since_last_change = now - self.last_state_change_time
 
                 # --- LOGIC TRIGGER ---
-                # 1. CONGESTION DETECTED -> REROUTE
-                if pred_bps > BURST_THRESHOLD_BPS and not self.congestion_active:
-                    self.logger.warning(f"🚀 TRIGGER REROUTE (Pred: {pred_bps:.0f} bps)")
-                    self.apply_reroute_logic(pred_bps)
-                    
-                # 2. TRAFFIC NORMAL -> REVERT
-                elif self.congestion_active:
-                    delta_t = now - self.last_congestion_time
-                    if pred_bps < LOWER_THRESHOLD_BPS and delta_t > COOLDOWN_PERIOD:
-                        self.logger.info(f"🔄 TRIGGER REVERT (Pred: {pred_bps:.0f} bps, Stable: {int(delta_t)}s)")
+                
+                # CASE 1: PREDIKSI TINGGI -> REROUTE
+                if pred_bps > BURST_THRESHOLD_BPS:
+                    if not self.congestion_active:
+                        self.logger.warning(f"🚀 TRIGGER REROUTE (Pred: {pred_bps:.0f} bps)")
+                        self.apply_reroute_logic(pred_bps)
+
+                # CASE 2: PREDIKSI RENDAH -> REVERT
+                # (Pakai Hysteresis & Cooldown agar tidak flip-flop)
+                elif pred_bps < LOWER_THRESHOLD_BPS:
+                    if self.congestion_active and time_since_last_change > COOLDOWN_PERIOD:
+                        self.logger.info(f"🔄 TRIGGER REVERT (Pred: {pred_bps:.0f} bps)")
                         self.revert_logic()
                     
             except Exception as e:
-                self.logger.error(f"Forecast Error: {e}")
+                self.logger.error(f"Forecast Logic Error: {e}")
                 if conn: conn.close()
+
+    def clean_h1_flows_strict(self, datapath):
+        """
+        SAPU JAGAT: Menghapus flow spesifik H1->H2 dengan Barrier Request.
+        Ini memastikan switch BERSIH sebelum dipasang rule baru.
+        Mencegah Traffic Doubling.
+        """
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        
+        # Match spesifik H1->H2
+        match = parser.OFPMatch(eth_type=0x0800, ipv4_src='10.0.0.1', ipv4_dst='10.0.0.2')
+        
+        # Delete flow (Strict off, agar kena priority berapapun)
+        mod = parser.OFPFlowMod(
+            datapath=datapath,
+            command=ofproto.OFPFC_DELETE,
+            out_port=ofproto.OFPP_ANY,
+            out_group=ofproto.OFPG_ANY,
+            match=match
+        )
+        datapath.send_msg(mod)
+        
+        # KIRIM BARRIER: Tunggu switch selesai menghapus baru lanjut
+        # Ini kunci agar trafik tidak dobel.
+        barrier = parser.OFPBarrierRequest(datapath)
+        datapath.send_msg(barrier)
 
     def apply_reroute_logic(self, trigger_val):
         """Pindah H1 ke Spine 1 (Port 1 di Leaf 1)"""
-        dp_src = self.datapaths.get(4) # Leaf 1 (H1 location)
+        # Target: Leaf 1 (DPID 4) tempat H1 berada
+        dp_src = self.datapaths.get(4) 
         if not dp_src: return
 
-        # 1. BERSIHKAN FLOW LAMA (PENTING AGAR TIDAK DOUBLE)
-        self.clean_h1_flows_global()
+        # 1. BERSIHKAN DULU (PENTING!)
+        self.clean_h1_flows_strict(dp_src)
 
-        # 2. PASANG FLOW REROUTE (Priority TINGGI: 200)
+        # 2. PASANG FLOW REROUTE (Priority 200)
         # H1 -> H2 lewat Port 1 (Spine 1)
         parser = dp_src.ofproto_parser
         match = parser.OFPMatch(eth_type=0x0800, ipv4_src='10.0.0.1', ipv4_dst='10.0.0.2')
@@ -155,7 +185,8 @@ class VoIPSmartController(app_manager.RyuApp):
         
         # Update State
         self.congestion_active = True
-        self.last_congestion_time = time.time()
+        self.last_state_change_time = time.time()
+        
         self.insert_event_log("REROUTE_ACTIVE", "H1 moved to Spine 1 (High Prio)", trigger_val)
         self.logger.info("✅ REROUTE APPLIED: H1 -> Spine 1 (DPID 4 Port 1)")
 
@@ -164,50 +195,23 @@ class VoIPSmartController(app_manager.RyuApp):
         dp_src = self.datapaths.get(4)
         if not dp_src: return
 
-        # 1. BERSIHKAN FLOW REROUTE (PENTING AGAR TIDAK KONFLIK)
-        self.clean_h1_flows_global()
+        # 1. BERSIHKAN FLOW REROUTE (PENTING!)
+        self.clean_h1_flows_strict(dp_src)
 
-        # 2. PASANG FLOW DEFAULT (Priority NORMAL: 100)
-        # H1 -> H2 lewat Port 3 (Spine 3 - Default)
-        # Kita pasang Explicitly agar tidak perlu Packet-In
+        # 2. PASANG FLOW DEFAULT (Priority 100)
+        # BEDA UTAMA: Kita pasang EXPLICITLY, tidak menunggu Packet-In
         parser = dp_src.ofproto_parser
         match = parser.OFPMatch(eth_type=0x0800, ipv4_src='10.0.0.1', ipv4_dst='10.0.0.2')
-        actions = [parser.OFPActionOutput(PORT_TO_SPINE_3)] # Ke Spine 3
+        actions = [parser.OFPActionOutput(PORT_TO_SPINE_3)] # Ke Spine 3 (Default)
         
         self.add_flow(dp_src, PRIO_NORMAL, match, actions)
         
         # Update State
         self.congestion_active = False
+        self.last_state_change_time = time.time()
+        
         self.insert_event_log("REROUTE_REVERT", "H1 returned to Spine 3 (Normal Prio)", 0)
         self.logger.info("✅ REVERT APPLIED: H1 -> Spine 3 (DPID 4 Port 3)")
-
-    def clean_h1_flows_global(self):
-        """SAPU JAGAT: Hapus flow H1->H2 di SEMUA switch"""
-        self.logger.info("🧹 Cleaning H1->H2 flows on ALL switches...")
-        for dpid, dp in self.datapaths.items():
-            ofp = dp.ofproto
-            parser = dp.ofproto_parser
-            
-            # Match spesifik H1->H2
-            match = parser.OFPMatch(eth_type=0x0800, ipv4_src='10.0.0.1', ipv4_dst='10.0.0.2')
-            
-            # Hapus semua flow yang cocok (Strict or not, kita pakai non-strict agar kena semua priority)
-            mod = parser.OFPFlowMod(
-                datapath=dp,
-                command=ofp.OFPFC_DELETE, # Delete all matches regardless of priority
-                out_port=ofp.OFPP_ANY,
-                out_group=ofp.OFPG_ANY,
-                match=match
-            )
-            dp.send_msg(mod)
-            
-            # Barrier Request: Pastikan switch selesai menghapus sebelum lanjut
-            self.send_barrier_request(dp)
-            
-    def send_barrier_request(self, datapath):
-        parser = datapath.ofproto_parser
-        req = parser.OFPBarrierRequest(datapath)
-        datapath.send_msg(req)
 
     def insert_event_log(self, event_type, desc, val=0):
         conn = self.get_db_conn()
@@ -231,9 +235,9 @@ class VoIPSmartController(app_manager.RyuApp):
         if ev.state == MAIN_DISPATCHER:
             if datapath.id not in self.datapaths:
                 self.datapaths[datapath.id] = datapath
-                # Saat switch connect, pasang default rule H1->H2 (Spine 3) dengan Priority 100
-                if datapath.id == 4: # Only on Leaf 1
-                    self.revert_logic() # Init default route
+                # Saat switch connect, init jalur default untuk H1->H2 di Leaf 1
+                if datapath.id == 4: 
+                    self.revert_logic() 
         elif ev.state == DEAD_DISPATCHER:
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
@@ -270,45 +274,46 @@ class VoIPSmartController(app_manager.RyuApp):
 
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
+        
+        # Filter protocol standard
         if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
         if eth.ethertype == ether_types.ETH_TYPE_IPV6: return
 
         dst = eth.dst
         src = eth.src
         
-        # Learn MAC
+        # Learn MAC Location
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
 
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        
+        # --- LOGIC HANDLING KHUSUS H1->H2 ---
+        # Ini untuk menangani kasus jika flow statis terhapus atau belum terpasang.
+        # Kita force pasang jalur yang benar sesuai status congestion saat ini.
         if ip_pkt:
             src_ip = ip_pkt.src
             dst_ip = ip_pkt.dst
             
-            # --- CRITICAL FIX FOR H1->H2 ---
-            # Jika paket adalah H1->H2 dan sampai ke Controller,
-            # Berarti flow statis belum terpasang atau expired.
-            # Kita pasang flow "Normal" (Priority 100) sebagai fallback.
-            # JANGAN pasang flow priority 1 di sini untuk H1->H2, 
-            # karena akan menimpa logic reroute jika tidak hati-hati.
-            
             if dpid == 4 and src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
-                # Cek mode
+                # Tentukan Output berdasarkan State Controller
                 out_p = PORT_TO_SPINE_1 if self.congestion_active else PORT_TO_SPINE_3
                 prio = PRIO_REROUTE if self.congestion_active else PRIO_NORMAL
                 
                 actions = [parser.OFPActionOutput(out_p)]
                 match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
+                
+                # Pasang Flow Permanen (idle_timeout=0)
                 self.add_flow(datapath, prio, match, actions)
                 
-                # Kirim packet out
+                # Forward paket ini agar tidak drop
                 data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
                 out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
                                           in_port=in_port, actions=actions, data=data)
                 datapath.send_msg(out)
                 return
 
-        # --- STANDARD SWITCHING (FLOODING/MAC LEARNING) ---
+        # --- STANDARD SWITCHING (Fallback) ---
         if dst in self.mac_to_port[dpid]:
             out_port = self.mac_to_port[dpid][dst]
         else:
@@ -316,7 +321,8 @@ class VoIPSmartController(app_manager.RyuApp):
 
         actions = [parser.OFPActionOutput(out_port)]
 
-        # Install Flow (Priority rendah = 1)
+        # Install Flow Biasa (Priority 1) dengan Timeout
+        # Agar tidak menumpuk sampah flow
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
             self.add_flow(datapath, PRIO_DEFAULT_MAC, match, actions, msg.buffer_id, idle_timeout=60)
@@ -346,29 +352,33 @@ class VoIPSmartController(app_manager.RyuApp):
         timestamp = datetime.now()
 
         for stat in body:
-            if stat.priority == 0: continue # Skip table-miss flow
+            if stat.priority == 0: continue 
 
             match = stat.match
             src_ip = match.get('ipv4_src')
             dst_ip = match.get('ipv4_dst')
 
-            # Filter hanya trafik menarik
+            # Filter hanya trafik menarik untuk DB
             if dst_ip != '10.0.0.2': continue
             if src_ip not in ['10.0.0.1', '10.0.0.3']: continue
 
-            # Calc Delta
             flow_key = f"{dpid}-{src_ip}-{dst_ip}"
             byte_count = stat.byte_count
             packet_count = stat.packet_count
             
             prev_b, prev_p = self.last_bytes.get(flow_key, (0, 0))
-            delta_b = max(0, byte_count - prev_b)
-            delta_p = max(0, packet_count - prev_p)
+            
+            # Hitung delta
+            delta_b = byte_count - prev_b
+            delta_p = packet_count - prev_p
+            
+            # Update cache
             self.last_bytes[flow_key] = (byte_count, packet_count)
 
+            # Skip jika stats baru direset atau tidak ada trafik
             if delta_b <= 0: continue
 
-            # Insert DB
+            # Insert DB (Fitur yg harus dipertahankan)
             conn = self.get_db_conn()
             if conn:
                 try:
