@@ -161,11 +161,37 @@ class VoIPSmartController(app_manager.RyuApp):
             self.add_flow(dp_leaf1, self.reroute_priority, match, actions, idle_timeout=0)
             
             self.logger.info(f"✅ Rerouted H1->H2: DPID 4 -> Port {out_port} (Spine 1)")
+        
+
+        dp_spine = self.datapaths.get(1)
+        if dp_spine:
+            parser = dp_spine.ofproto_parser
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src='10.0.0.1',
+                ipv4_dst='10.0.0.2'
+            )
+            actions = [parser.OFPActionOutput(1)]  # port ke leaf tujuan (DPID 5)
+            self.add_flow(dp_spine, self.reroute_priority, match, actions, idle_timeout=0)
+
+        dp_leaf_dst = self.datapaths.get(5)
+        if dp_leaf_dst:
+            parser = dp_leaf_dst.ofproto_parser
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src='10.0.0.1',
+                ipv4_dst='10.0.0.2'
+            )
+            actions = [parser.OFPActionOutput(1)]  # port ke H2
+            self.add_flow(dp_leaf_dst, self.reroute_priority, match, actions, idle_timeout=0)
+
+
 
         # 3. Update State
         self.current_reroute_path = [4, 1, 5]
         self.congestion_active = True
         self.last_congestion_time = time.time()
+        self.last_reroute_ts = time.time()
         
         # 4. Log
         self.insert_event_log("REROUTE_ACTIVE", f"H1 rerouted to Spine 1", trigger_val)
@@ -190,10 +216,29 @@ class VoIPSmartController(app_manager.RyuApp):
             # Priority 10 (Sesuai logic default kamu)
             self.add_flow(dp_leaf1, self.default_priority, match, actions, idle_timeout=0)
             self.logger.info("✅ Explicitly restored H1->H2 to Port 3 (Spine 2)")
+        
+        # REVERT di Spine (DPID 1) → arah default
+        dp_spine = self.datapaths.get(1)
+        if dp_spine:
+            parser = dp_spine.ofproto_parser
+            match = parser.OFPMatch(eth_type=0x0800, ipv4_src='10.0.0.1', ipv4_dst='10.0.0.2')
+            actions = [parser.OFPActionOutput(3)]  # ke spine 2 / default
+            self.add_flow(dp_spine, self.default_priority, match, actions, idle_timeout=0)
+
+
+        # REVERT di Leaf tujuan (DPID 5)
+        dp_leaf_dst = self.datapaths.get(5)
+        if dp_leaf_dst:
+            parser = dp_leaf_dst.ofproto_parser
+            match = parser.OFPMatch(eth_type=0x0800, ipv4_src='10.0.0.1', ipv4_dst='10.0.0.2')
+            actions = [parser.OFPActionOutput(1)]
+            self.add_flow(dp_leaf_dst, self.default_priority, match, actions, idle_timeout=0)
 
         # 3. Reset State
         self.congestion_active = False
         self.current_reroute_path = None
+        self.last_reroute_ts = time.time()
+
         
         self.insert_event_log("REROUTE_REVERT", "H1 VoIP restored to Spine 2", 0)
 
@@ -218,8 +263,11 @@ class VoIPSmartController(app_manager.RyuApp):
             self.send_barrier_request(dp)
         
         # Clear cache
-        keys_to_del = [k for k in self.last_bytes if '10.0.0.1' in k]
-        for k in keys_to_del: del self.last_bytes[k]
+               
+        for k in list(self.last_bytes):
+            if '10.0.0.1' in k:
+                self.last_bytes[k] = self.last_bytes[k]  # NO-OP (intentional)
+
 
     def insert_event_log(self, event_type, description, trigger_value=0):
         conn = self.get_db_conn()
@@ -396,8 +444,16 @@ class VoIPSmartController(app_manager.RyuApp):
         body = ev.msg.body
         dpid = ev.msg.datapath.id
         timestamp = datetime.now()
+
+                # === PATCH 1: ignore stale stats right after reroute ===
+        now = time.time()
+        if hasattr(self, "last_reroute_ts"):
+            if now - self.last_reroute_ts < 2.0:
+                return   # DROP SEMUA stats (stale window)
+
         
         for stat in body:
+
             if stat.priority == 0: continue
             
             match = stat.match
