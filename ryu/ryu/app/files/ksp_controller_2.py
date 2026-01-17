@@ -1,456 +1,317 @@
-# ==============================================================================
-# ENTERPRISE SPINE-LEAF SDN CONTROLLER
-# Version: 3.0 (Production Ready)
-# Author: Gemini AI
-# ==============================================================================
+#!/usr/bin/env python3
+"""
+Ryu SDN Controller: VoIP KSP Rerouting + Traffic Monitoring (Final Polish)
+- Intelligent K-Shortest Path Rerouting
+- Postgres Integration for Forecasting
+- Anti-Flapping Mechanism
+"""
 
 import time
 import json
-import threading
-import datetime
-import logging
-from collections import defaultdict, deque
+import random
+import math
+import networkx as nx
+import psycopg2
+from datetime import datetime
+from operator import attrgetter
 
-# Import Ryu Libraries
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
-from ryu.lib.packet import packet
-from ryu.lib.packet import ethernet, ether_types, arp, ipv4, icmp, udp, tcp
 from ryu.lib import hub
+from ryu.lib.packet import packet, ethernet, ether_types, ipv4, udp, tcp, arp
+from ryu.topology import event, api
+from ryu.topology.api import get_switch, get_link
 
-# Import Database Driver
-try:
-    import psycopg2
-    from psycopg2 import pool
-except ImportError:
-    raise ImportError("CRITICAL: Module 'psycopg2' not found. Install with: pip3 install psycopg2-binary")
-
-# ==============================================================================
-# CONFIGURATION CONSTANTS
-# ==============================================================================
-
-# Database Configuration (Hardcoded sesuai request)
+# ==========================================
+# CONFIGURATION
+# ==========================================
 DB_CONFIG = {
-    "host": "127.0.0.1",
-    "database": "development",
-    "user": "dev_one",
-    "password": "hijack332.",
-    "port": "5432"
+    'host': '127.0.0.1',
+    'database': 'development',
+    'user': 'dev_one',
+    'password': 'hijack332.',
+    'port': 5432
 }
 
-# Network Thresholds
-BURST_THRESHOLD_BPS = 120000  # Threshold switch ke Spine 2
-RECOVERY_DELAY_SEC = 5        # Waktu tunggu sebelum kembali ke Spine 1 (Hysteresis)
-MONITOR_INTERVAL = 1.0        # Polling stats setiap 1 detik
+# Threshold sesuai forecast_2.py (120kbps)
+BURST_THRESHOLD_BPS = 120000
+LOWER_THRESHOLD_BPS = 80000  # Hysteresis: Traffic harus turun ke angka ini baru balik
+COOLDOWN_PERIOD = 20         # Detik (Waktu tunggu minimal sebelum revert)
 
-# Topology Definitions (Hardcoded for Spine-Leaf)
-# Leaf Switches DPIDs: 4, 5, 6
-# Spine Switches DPIDs: 1, 2, 3
-LEAF_SWITCHES = [4, 5, 6]
-SPINE_SWITCHES = [1, 2, 3]
-
-# Port Mapping pada Leaf Switch
-# Asumsi: Port 1 -> Spine 1, Port 2 -> Spine 2, Port 3+ -> Host
-PORT_UPLINK_SPINE_1 = 1
-PORT_UPLINK_SPINE_2 = 2
-
-# IP to MAC Table (Static mapping for Proxy ARP fallback)
-# Ini membantu jika learning belum selesai
-STATIC_HOSTS = {
-    "10.0.0.1": "00:00:00:00:00:01",
-    "10.0.0.2": "00:00:00:00:00:02",
-    "10.0.0.3": "00:00:00:00:00:03"
-}
-
-# Logging Setup
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S'
-)
-logger = logging.getLogger("SDN_Core")
-
-# ==============================================================================
-# MODULE: DATABASE MANAGER
-# Handles all PostgreSQL interactions safely with connection pooling
-# ==============================================================================
-class DatabaseManager:
-    def __init__(self):
-        self.pool = None
-        self.connected = False
-        self._setup_connection()
-
-    def _setup_connection(self):
-        try:
-            logger.info("Connecting to Database...")
-            self.pool = psycopg2.pool.SimpleConnectionPool(
-                1, 10, **DB_CONFIG
-            )
-            if self.pool:
-                self.connected = True
-                logger.info("✅ Database Connected Successfully.")
-                self._init_tables()
-        except Exception as e:
-            logger.error(f"❌ Database Connection Failed: {e}")
-            self.connected = False
-
-    def _init_tables(self):
-        """Memastikan tabel statistik ada (Opsional safety check)"""
-        conn = self._get_conn()
-        if not conn: return
-        try:
-            cur = conn.cursor()
-            # Cek tabel flow_stats_
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS traffic.flow_stats_ (
-                    id serial4 NOT NULL,
-                    "timestamp" timestamptz DEFAULT now() NOT NULL,
-                    dpid int8 NOT NULL,
-                    bytes_tx int8 NULL,
-                    bytes_rx int8 NULL,
-                    pkts_tx int8 NULL,
-                    pkts_rx int8 NULL,
-                    duration_sec float8 NULL,
-                    CONSTRAINT flow_stats__pkey PRIMARY KEY (id)
-                );
-            """)
-            conn.commit()
-            cur.close()
-            self._put_conn(conn)
-        except Exception as e:
-            logger.error(f"Table Init Error: {e}")
-            if conn: self._put_conn(conn)
-
-    def _get_conn(self):
-        if not self.connected or not self.pool:
-            # Try reconnecting
-            self._setup_connection()
-            if not self.connected: return None
-        try:
-            return self.pool.getconn()
-        except Exception as e:
-            logger.error(f"Error getting connection from pool: {e}")
-            return None
-
-    def _put_conn(self, conn):
-        try:
-            self.pool.putconn(conn)
-        except Exception:
-            pass
-
-    def insert_flow_stats(self, dpid, stats_list):
-        """Batch insert statistik port ke DB"""
-        conn = self._get_conn()
-        if not conn: return
-
-        try:
-            cur = conn.cursor()
-            args_str = ','.join(cur.mogrify("(%s, NOW(), %s, %s, %s, %s, %s)", (
-                dpid, x['tx_bytes'], x['rx_bytes'], x['tx_pkts'], x['rx_pkts'], x['duration']
-            )).decode('utf-8') for x in stats_list)
-            
-            cur.execute("INSERT INTO traffic.flow_stats_ (dpid, timestamp, bytes_tx, bytes_rx, pkts_tx, pkts_rx, duration_sec) VALUES " + args_str)
-            conn.commit()
-            cur.close()
-            self._put_conn(conn)
-        except Exception as e:
-            logger.error(f"Failed to insert stats: {e}")
-            self._put_conn(conn)
-
-    def get_latest_forecast(self):
-        """Mengambil prediksi AI terbaru dari tabel forecast_1h"""
-        conn = self._get_conn()
-        if not conn: return 0.0
-
-        try:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT y_pred 
-                FROM forecast_1h 
-                ORDER BY ts_created DESC 
-                LIMIT 1
-            """)
-            result = cur.fetchone()
-            cur.close()
-            self._put_conn(conn)
-            
-            if result:
-                return float(result[0])
-            return 0.0
-        except Exception as e:
-            logger.error(f"Failed to fetch forecast: {e}")
-            self._put_conn(conn)
-            return 0.0
-
-    def log_system_event(self, event_type, description, value):
-        conn = self._get_conn()
-        if not conn: return
-
-        try:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO traffic.system_events (event_type, description, trigger_value)
-                VALUES (%s, %s, %s)
-            """, (event_type, description, value))
-            conn.commit()
-            cur.close()
-            self._put_conn(conn)
-        except Exception as e:
-            logger.error(f"Failed to log event: {e}")
-            self._put_conn(conn)
-
-# ==============================================================================
-# MODULE: TRAFFIC MANAGER
-# Handles Rerouting Logic & Flow Modification
-# ==============================================================================
-class TrafficManager:
-    def __init__(self, db_manager):
-        self.db = db_manager
-        self.reroute_active = False
-        self.last_state_change = time.time()
-        self.consecutive_safe_count = 0
-
-    def evaluate_network_state(self, datapaths):
-        """
-        Dibaca oleh thread monitor. Membaca prediksi DB dan memutuskan routing.
-        """
-        # 1. Ambil Prediksi
-        predicted_bps = self.db.get_latest_forecast()
-        
-        # 2. Logic State Machine
-        is_congestion_predicted = predicted_bps > BURST_THRESHOLD_BPS
-        
-        # Target: Leaf 1 (dpid 4) - Tempat H1 berada
-        leaf1 = datapaths.get(4)
-        if not leaf1: return
-
-        current_time = time.time()
-
-        if is_congestion_predicted:
-            # Reset safe counter
-            self.consecutive_safe_count = 0
-            
-            if not self.reroute_active:
-                logger.warning(f"🚀 AI PREDICTION: BURST INCOMING ({predicted_bps:,.0f} bps). ENGAGING REROUTE.")
-                self._activate_reroute(leaf1, predicted_bps)
-                self.reroute_active = True
-                self.last_state_change = current_time
-
-        else:
-            # Kondisi Aman
-            if self.reroute_active:
-                self.consecutive_safe_count += 1
-                # Hysteresis: Perlu 5 detik aman berturut-turut untuk kembali
-                if self.consecutive_safe_count >= RECOVERY_DELAY_SEC:
-                    logger.info(f"✅ AI PREDICTION: NETWORK STABLE ({predicted_bps:,.0f} bps). RESTORING PATH.")
-                    self._deactivate_reroute(leaf1, predicted_bps)
-                    self.reroute_active = False
-                    self.last_state_change = current_time
-                    self.consecutive_safe_count = 0
-
-    def _activate_reroute(self, datapath, trigger_val):
-        """Memindahkan trafik H1->H2 ke Spine 2 (Port 2)"""
-        self._inject_flow(datapath, to_spine_2=True)
-        self.db.log_system_event(
-            "REROUTE_ACTIVATED",
-            f"Forecast {trigger_val:.0f} bps > Threshold. Switched H1->H2 to Spine 2.",
-            trigger_val
-        )
-
-    def _deactivate_reroute(self, datapath, trigger_val):
-        """Mengembalikan trafik H1->H2 ke Spine 1 (Port 1)"""
-        self._inject_flow(datapath, to_spine_2=False)
-        self.db.log_system_event(
-            "PATH_RESTORED",
-            f"Forecast {trigger_val:.0f} bps < Threshold. Switched H1->H2 to Spine 1.",
-            trigger_val
-        )
-
-    def _inject_flow(self, datapath, to_spine_2):
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        
-        # Match H1 (10.0.0.1) -> H2 (10.0.0.2)
-        match = parser.OFPMatch(
-            eth_type=ether_types.ETH_TYPE_IP,
-            ipv4_src="10.0.0.1",
-            ipv4_dst="10.0.0.2"
-        )
-        
-        # Tentukan output port
-        out_port = PORT_UPLINK_SPINE_2 if to_spine_2 else PORT_UPLINK_SPINE_1
-        
-        actions = [parser.OFPActionOutput(out_port)]
-        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-        
-        # Priority 100 menimpa priority 1 (default L2)
-        mod = parser.OFPFlowMod(
-            datapath=datapath,
-            priority=100,
-            match=match,
-            instructions=inst,
-            idle_timeout=0, # Permanen sampai diubah lagi
-            hard_timeout=0
-        )
-        datapath.send_msg(mod)
-
-
-# ==============================================================================
-# MODULE: TOPOLOGY & ARP HANDLER
-# Handles L2 Forwarding, Proxy ARP, and Loop Prevention
-# ==============================================================================
-class L2SwitchingModule:
-    def __init__(self):
-        # Struktur: self.mac_to_port[dpid][mac_address] = port
-        self.mac_to_port = defaultdict(dict)
-        # Struktur: self.arp_table[ip_address] = mac_address
-        self.arp_table = {} 
-        
-        # Pre-load static ARP host (untuk mempercepat ping awal)
-        for ip, mac in STATIC_HOSTS.items():
-            self.arp_table[ip] = mac
-
-    def learn_mac(self, dpid, src_mac, in_port):
-        self.mac_to_port[dpid][src_mac] = in_port
-
-    def get_port(self, dpid, dst_mac):
-        return self.mac_to_port[dpid].get(dst_mac)
-
-    def handle_arp(self, datapath, port, pkt_ethernet, pkt_arp):
-        """
-        PROXY ARP LOGIC:
-        Alih-alih membanjiri jaringan (Flood), controller menjawab ARP Request
-        jika IP tujuannya sudah dikenal.
-        """
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-
-        # 1. Pelajari mapping IP -> MAC dari pengirim
-        src_ip = pkt_arp.src_ip
-        src_mac = pkt_arp.src_mac
-        self.arp_table[src_ip] = src_mac
-        
-        # Pelajari lokasi MAC di switch ini
-        self.learn_mac(datapath.id, src_mac, port)
-
-        dst_ip = pkt_arp.dst_ip
-        
-        # 2. Jika ARP Request (Opcode 1)
-        if pkt_arp.opcode == arp.ARP_REQUEST:
-            # Cek apakah kita tahu MAC target?
-            if dst_ip in self.arp_table:
-                dst_mac = self.arp_table[dst_ip]
-                # KIRIM ARP REPLY (Unicast balik ke pengirim)
-                self._send_arp_reply(datapath, port, src_mac, src_ip, dst_mac, dst_ip)
-                # logger.info(f"🛡️ Proxy ARP: Answered {src_ip} asking for {dst_ip} at {datapath.id}")
-                return True # Handled by proxy
-            else:
-                # Jika tidak tahu, kita terpaksa flood tapi TERKONTROL
-                return False # Lanjutkan ke flooding logic
-
-        # 3. Jika ARP Reply (Opcode 2) - biasanya broadcast gratuitous atau unicast
-        elif pkt_arp.opcode == arp.ARP_REPLY:
-            self.arp_table[src_ip] = src_mac
-            return False
-
-    def _send_arp_reply(self, datapath, port, target_mac, target_ip, sender_mac, sender_ip):
-        """Membuat paket ARP Reply palsu dari Controller"""
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-
-        e = ethernet.ethernet(dst=target_mac, src=sender_mac, ethertype=ether_types.ETH_TYPE_ARP)
-        a = arp.arp(
-            opcode=arp.ARP_REPLY,
-            src_mac=sender_mac, src_ip=sender_ip,
-            dst_mac=target_mac, dst_ip=target_ip
-        )
-        p = packet.Packet()
-        p.add_protocol(e)
-        p.add_protocol(a)
-        p.serialize()
-
-        actions = [parser.OFPActionOutput(port)]
-        out = parser.OFPPacketOut(
-            datapath=datapath,
-            buffer_id=ofproto.OFP_NO_BUFFER,
-            in_port=ofproto.OFPP_CONTROLLER,
-            actions=actions,
-            data=p.data
-        )
-        datapath.send_msg(out)
-
-# ==============================================================================
-# MAIN CONTROLLER APP
-# Integrates all modules
-# ==============================================================================
-class MegaController(app_manager.RyuApp):
+class VoIPSmartController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
-        super(MegaController, self).__init__(*args, **kwargs)
+        super(VoIPSmartController, self).__init__(*args, **kwargs)
         
-        # Initialize Modules
-        self.db = DatabaseManager()
-        self.l2_switch = L2SwitchingModule()
-        self.traffic_mgr = TrafficManager(self.db)
+        # --- TOPOLOGY & STATE ---
+        self.net = nx.DiGraph()       # Graph Topologi
+        self.mac_to_port = {}         # Mac Learning Table
+        self.ip_to_mac = {}           # ARP Cache Table
+        self.datapaths = {}           # Active Switches
         
-        self.datapaths = {}
+        # --- TRAFFIC STATS ---
+        self.last_bytes = {}          # Untuk menghitung delta throughput
         
-        # Start Background Thread
-        self.monitor_thread = hub.spawn(self._monitor_loop)
+        # --- CONGESTION STATE MACHINE ---
+        self.congestion_active = False
+        self.last_reroute_time = 0
+        self.current_path_str = "DEFAULT (Shared)"
         
-        logger.info("🟢 MEGA CONTROLLER V3 STARTED")
-        logger.info("   - Proxy ARP: Enabled")
-        logger.info("   - AI Forecasting: Enabled")
-        logger.info("   - Loop Protection: Enabled")
+        # --- THREADS ---
+        # 1. Topology Discovery (Untuk NetworkX)
+        self.topology_thread = hub.spawn(self._discover_topology_loop)
+        # 2. Traffic Monitor (Kirim data ke DB untuk Forecaster)
+        self.monitor_thread = hub.spawn(self._monitor_traffic_loop)
+        # 3. Forecast Watchdog (Baca DB -> Trigger Reroute)
+        self.forecast_thread = hub.spawn(self._forecast_watchdog_loop)
 
-    # --------------------------------------------------------------------------
-    # Switch Connection Handling
-    # --------------------------------------------------------------------------
-    @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
-    def _state_change_handler(self, ev):
-        datapath = ev.datapath
-        if ev.state == MAIN_DISPATCHER:
-            if datapath.id not in self.datapaths:
-                logger.info(f"Switch Connected: dpid={datapath.id}")
-                self.datapaths[datapath.id] = datapath
-        elif ev.state == DEAD_DISPATCHER:
-            if datapath.id in self.datapaths:
-                logger.info(f"Switch Disconnected: dpid={datapath.id}")
-                del self.datapaths[datapath.id]
+        self.logger.info("🚀 SDN ORCHESTRATOR STARTED: Ready to handle traffic.")
 
+    # =================================================================
+    # DATABASE UTILS
+    # =================================================================
+    def get_db_conn(self):
+        try:
+            return psycopg2.connect(**DB_CONFIG, connect_timeout=3)
+        except Exception as e:
+            self.logger.error(f"❌ DB Connection Error: {e}")
+            return None
+
+    def log_system_event(self, event_type, description, val=0):
+        """Mencatat event penting ke tabel system_events"""
+        conn = self.get_db_conn()
+        if not conn: return
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO traffic.system_events (timestamp, event_type, description, trigger_value)
+                VALUES (NOW(), %s, %s, %s)
+            """, (event_type, description, val))
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            self.logger.error(f"Failed to log event: {e}")
+
+    # =================================================================
+    # 1. TOPOLOGY DISCOVERY (NETWORKX)
+    # =================================================================
+    def _discover_topology_loop(self):
+        """Looping untuk update graph networkx secara real-time"""
+        while True:
+            try:
+                # Update Nodes (Switches)
+                switches = get_switch(self, None)
+                nodes_before = self.net.number_of_nodes()
+                self.net.clear()
+                
+                for s in switches:
+                    self.net.add_node(s.dp.id)
+                
+                # Update Links (Edges)
+                links = get_link(self, None)
+                for l in links:
+                    # Simpan port info di edge attributes agar bisa diambil saat routing
+                    self.net.add_edge(l.src.dpid, l.dst.dpid, port=l.src.port_no)
+                    self.net.add_edge(l.dst.dpid, l.src.dpid, port=l.dst.port_no)
+
+                if self.net.number_of_nodes() > nodes_before:
+                    self.logger.info(f"🌐 Topology Updated: {self.net.number_of_nodes()} switches, {self.net.number_of_edges()} links")
+            except Exception as e:
+                self.logger.error(f"Topology Discovery Error: {e}")
+            
+            hub.sleep(3)
+
+    # =================================================================
+    # 2. FORECAST WATCHDOG & REROUTING LOGIC
+    # =================================================================
+    def _forecast_watchdog_loop(self):
+        """Membaca tabel forecast_1h dan mengambil keputusan routing"""
+        self.logger.info("👁️  Forecast Watchdog Active...")
+        
+        while True:
+            hub.sleep(1.0) # Cek setiap 1 detik
+            
+            conn = self.get_db_conn()
+            if not conn: continue
+            
+            try:
+                cur = conn.cursor()
+                # Ambil prediksi terbaru (paling update)
+                cur.execute("SELECT y_pred FROM forecast_1h ORDER BY ts_created DESC LIMIT 1")
+                row = cur.fetchone()
+                cur.close()
+                conn.close()
+                
+                if not row: continue
+                
+                predicted_bps = float(row[0])
+                now = time.time()
+                
+                # --- LOGIC REROUTE OTOMATIS ---
+                
+                # KONDISI 1: DETEKSI BURST (Trigger Reroute)
+                if predicted_bps > BURST_THRESHOLD_BPS and not self.congestion_active:
+                    self.logger.warning(f"⚠️  PREDICTION ALERT: {predicted_bps:,.0f} bps > Threshold. Initiating Reroute...")
+                    self._perform_reroute(predicted_bps)
+                    
+                # KONDISI 2: TRAFFIC NORMAL (Trigger Restore/Revert)
+                elif predicted_bps < LOWER_THRESHOLD_BPS and self.congestion_active:
+                    # Cek Cooldown (Hysteresis)
+                    if (now - self.last_reroute_time) > COOLDOWN_PERIOD:
+                        self.logger.info(f"✅ TRAFFIC STABLE: {predicted_bps:,.0f} bps. Restoring Default Path.")
+                        self._perform_restore(predicted_bps)
+                    else:
+                        remaining = int(COOLDOWN_PERIOD - (now - self.last_reroute_time))
+                        # Debug log (opsional, bisa dikomentari agar tidak spam)
+                        # self.logger.debug(f"⏳ Cooling down... {remaining}s remaining.")
+
+            except Exception as e:
+                self.logger.error(f"Watchdog Error: {e}")
+                if conn and not conn.closed: conn.close()
+
+    def get_ksp_path(self, src, dst, k=3, avoid_node=None):
+        """Mencari K-Shortest Paths menggunakan NetworkX"""
+        try:
+            all_paths = list(nx.shortest_simple_paths(self.net, src, dst))[:k]
+            if not all_paths: return None
+            
+            # Jika ada node yang harus dihindari (misal Spine 1 macet)
+            if avoid_node:
+                for p in all_paths:
+                    if avoid_node not in p:
+                        return p
+            
+            # Jika tidak ada preferensi, kembalikan path ke-2 (alternatif)
+            if len(all_paths) > 1:
+                return all_paths[1]
+            return all_paths[0]
+            
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            return None
+
+    def _perform_reroute(self, trigger_val):
+        """Memindahkan H1->H2 ke jalur alternatif"""
+        # H1 ada di Leaf 1 (dpid 4), H2 ada di Leaf 2 (dpid 5)
+        src_sw, dst_sw = 4, 5
+        
+        # Cari jalur yang TIDAK melewati Spine 1 (dpid 1) - Asumsi Spine 1 macet oleh H3
+        new_path = self.get_ksp_path(src_sw, dst_sw, k=3, avoid_node=1)
+        
+        if not new_path:
+            self.logger.error("❌ No alternative path found!")
+            return
+
+        self.logger.info(f"🔄 REROUTING H1 (VoIP) via: {new_path}")
+        
+        # Pasang Flow Priority Tinggi (30000) untuk H1->H2
+        self._install_path_flow(new_path, "10.0.0.1", "10.0.0.2", priority=30000)
+        
+        # Update State
+        self.congestion_active = True
+        self.last_reroute_time = time.time()
+        self.current_path_str = str(new_path)
+        
+        self.log_system_event("REROUTE_ACTIVE", f"Path changed to {new_path}", trigger_val)
+
+    def _perform_restore(self, trigger_val):
+        """Mengembalikan H1->H2 ke jalur default"""
+        # Kita cukup menghapus flow priority tinggi. 
+        # Traffic akan jatuh kembali ke flow priority rendah (default) atau Packet-In.
+        
+        self.logger.info("🔙 RESTORING H1 to Default Path.")
+        
+        # Hapus flow spesifik H1->H2 di semua switch
+        for dpid in self.datapaths:
+            self._delete_flow(self.datapaths[dpid], "10.0.0.1", "10.0.0.2")
+            
+        # Update State
+        self.congestion_active = False
+        self.last_reroute_time = time.time()
+        self.current_path_str = "DEFAULT (Shared)"
+        
+        self.log_system_event("PATH_RESTORED", "Traffic normalized", trigger_val)
+
+    def _install_path_flow(self, path, src_ip, dst_ip, priority):
+        """Helper untuk install flow di sepanjang jalur path"""
+        # Path contoh: [4, 2, 5] (Leaf1 -> Spine2 -> Leaf2)
+        
+        for i in range(len(path) - 1):
+            curr_dpid = path[i]
+            next_dpid = path[i+1]
+            
+            dp = self.datapaths.get(curr_dpid)
+            if not dp: continue
+            
+            # Cari port output dari curr ke next menggunakan graph networkx
+            if self.net.has_edge(curr_dpid, next_dpid):
+                out_port = self.net[curr_dpid][next_dpid]['port']
+                
+                parser = dp.ofproto_parser
+                match = parser.OFPMatch(
+                    eth_type=0x0800, # IPv4
+                    ipv4_src=src_ip,
+                    ipv4_dst=dst_ip
+                )
+                actions = [parser.OFPActionOutput(out_port)]
+                
+                # Install Flow
+                self.add_flow(dp, priority, match, actions, idle_timeout=0)
+
+    def _delete_flow(self, datapath, src_ip, dst_ip):
+        """Helper untuk menghapus flow VoIP Priority Tinggi"""
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+        
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ipv4_src=src_ip,
+            ipv4_dst=dst_ip
+        )
+        
+        mod = parser.OFPFlowMod(
+            datapath=datapath,
+            command=ofproto.OFPFC_DELETE, # Delete matching flows
+            out_port=ofproto.OFPP_ANY,
+            out_group=ofproto.OFPG_ANY,
+            priority=30000, # Hapus yang priority reroute saja
+            match=match
+        )
+        datapath.send_msg(mod)
+
+    # =================================================================
+    # 3. PACKET PROCESSING (CORE SWITCHING)
+    # =================================================================
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
-        datapath = ev.datapath
+        datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-
-        # Install Table-Miss Flow (Semua paket unknown kirim ke Controller)
+        self.datapaths[datapath.id] = datapath
+        
+        # Table-miss flow (Send to controller)
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
-        
         self.add_flow(datapath, 0, match, actions)
 
-    def add_flow(self, datapath, priority, match, actions, buffer_id=None, timeout=0):
+    def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=0):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        
         if buffer_id:
             mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
                                     priority=priority, match=match,
-                                    instructions=inst, idle_timeout=timeout)
+                                    instructions=inst, idle_timeout=idle_timeout)
         else:
             mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
-                                    match=match, instructions=inst, idle_timeout=timeout)
+                                    match=match, instructions=inst, idle_timeout=idle_timeout)
         datapath.send_msg(mod)
 
-    # --------------------------------------------------------------------------
-    # Packet Processing Core
-    # --------------------------------------------------------------------------
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         msg = ev.msg
@@ -462,130 +323,164 @@ class MegaController(app_manager.RyuApp):
 
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
-        
-        # Ignore LLDP & IPv6 (Keep logs clean)
+
         if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
-        if eth.ethertype == 34525: return # IPv6
+        if eth.ethertype == 34525: return # IPv6 Ignore
 
         dst = eth.dst
         src = eth.src
-
-        # 1. Proxy ARP Handling
-        if eth.ethertype == ether_types.ETH_TYPE_ARP:
-            arp_pkt = pkt.get_protocols(arp.arp)[0]
-            handled = self.l2_switch.handle_arp(datapath, in_port, eth, arp_pkt)
-            if handled:
-                return # Paket sudah dijawab oleh controller, stop processing.
-
-        # 2. MAC Learning
-        self.l2_switch.learn_mac(dpid, src, in_port)
-
-        # 3. Destination Lookup
-        out_port = self.l2_switch.get_port(dpid, dst)
-
-        # 4. Anti-Loop & Flooding Logic (SPINE-LEAF SPECIFIC)
-        if out_port is None:
-            # Kita perlu Flood, TAPI hati-hati loop.
-            if dpid in LEAF_SWITCHES:
-                # Jika di Leaf
-                if in_port in [PORT_UPLINK_SPINE_1, PORT_UPLINK_SPINE_2]:
-                    # Paket dari Spine -> HANYA flood ke Host (port > 2)
-                    # Karena kita tidak tahu port host pastinya, kita flood tapi exclude uplinks
-                    # Namun OFPP_FLOOD akan kirim ke semua port kecuali in_port.
-                    # Masalah: Akan kirim balik ke Spine 2 jika datang dari Spine 1.
-                    # SOLUSI: Jangan pakai OFPP_FLOOD jika datang dari Uplink. Drop atau Directed Flood.
-                    # Asumsi host di port 3, 4, dst.
-                    # Untuk keamanan: DROP paket broadcast/unknown unicast dari spine jika kita tidak tahu tujuannya.
-                    # Kenapa? Karena Spine seharusnya sudah tahu tujuannya jika ARP jalan.
-                    # Tapi untuk fail-safe:
-                    out_port = ofproto.OFPP_FLOOD # (Risky in generic, but handled by ProxyARP mostly)
-                else:
-                    # Paket dari Host -> Flood ke SEMUA (termasuk Uplinks)
-                    out_port = ofproto.OFPP_FLOOD
-            else:
-                # Jika di Spine
-                # Flood ke semua port
-                out_port = ofproto.OFPP_FLOOD
         
-        # Refinement Anti-Loop untuk Flooding di Leaf:
-        # Jika out_port adalah FLOOD dan kita di Leaf dan in_port adalah Uplink
-        if out_port == ofproto.OFPP_FLOOD and dpid in LEAF_SWITCHES and in_port in [PORT_UPLINK_SPINE_1, PORT_UPLINK_SPINE_2]:
-             # Ini berpotensi loop L1->S1->L2->S2->L1.
-             # Kita batalkan flood ke Uplink lain. Kita hanya flood ke port lokal.
-             # Cara paling aman di OpenFlow tanpa tahu port host: 
-             # Controller PacketOut ke semua port KECUALI port 1 & 2.
-             # Implementasi simplified: biarkan OFPP_FLOOD tapi andalkan Proxy ARP.
-             pass
+        # --- ARP PROXY (Penting untuk Ping Stabil) ---
+        if eth.ethertype == ether_types.ETH_TYPE_ARP:
+            self._handle_arp(datapath, in_port, pkt)
+            return
+
+        # --- IP PACKET HANDLING ---
+        ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        if ip_pkt:
+            src_ip = ip_pkt.src
+            dst_ip = ip_pkt.dst
+            
+            # DEFAULT ROUTING LOGIC (Sebelum Reroute Aktif)
+            # Kita paksa lewat Spine 1 (Port 1 di Leaf) untuk menciptakan tabrakan
+            # Asumsi topologi: Port 1 -> Spine 1, Port 2 -> Spine 2, Port 3 -> Host
+            
+            # Jika paket dari H1 atau H3, dan tujuan H2, dan belum ada Reroute
+            if dpid in [4, 6] and dst_ip == "10.0.0.2":
+                # Cek apakah flow reroute sudah handle? Kalau belum, pasang default
+                if not self.congestion_active:
+                    # Lewatkan Spine 1 (Port 1)
+                    # NOTE: Sesuaikan port ini dengan wiring Mininet Anda
+                    # Biasanya Leaf Link 1 -> Spine 1
+                    actions = [parser.OFPActionOutput(1)] 
+                    match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
+                    self.add_flow(datapath, 10, match, actions, msg.buffer_id, idle_timeout=10)
+                    
+                    # Kirim paket
+                    out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                            in_port=in_port, actions=actions, data=msg.data)
+                    datapath.send_msg(out)
+                    return
+
+        # --- FALLBACK L2 LEARNING (Jika tidak match logic di atas) ---
+        self.mac_to_port.setdefault(dpid, {})
+        self.mac_to_port[dpid][src] = in_port
+
+        if dst in self.mac_to_port[dpid]:
+            out_port = self.mac_to_port[dpid][dst]
+        else:
+            out_port = ofproto.OFPP_FLOOD
 
         actions = [parser.OFPActionOutput(out_port)]
-
-        # 5. Flow Installation
-        # Jika destination dikenal (Unicast), pasang flow agar packet selanjutnya hardware switching
+        
         if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
-            # Verify buffer_id
-            if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                self.add_flow(datapath, 1, match, actions, msg.buffer_id)
-                return
-            else:
-                self.add_flow(datapath, 1, match, actions)
+            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+            self.add_flow(datapath, 1, match, actions, msg.buffer_id)
 
-        # 6. Kirim Paket (Packet Out)
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
-
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
                                   in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
 
-    # --------------------------------------------------------------------------
-    # Monitoring & Telemetry Loop
-    # --------------------------------------------------------------------------
-    def _monitor_loop(self):
-        """Thread utama yang berjalan paralel"""
+    def _handle_arp(self, datapath, port, pkt):
+        """Menangani ARP Request/Reply untuk mengurangi broadcast storm"""
+        pkt_arp = pkt.get_protocol(arp.arp)
+        src_ip = pkt_arp.src_ip
+        src_mac = pkt_arp.src_mac
+        dst_ip = pkt_arp.dst_ip
+
+        # Simpan mapping IP->MAC
+        self.ip_to_mac[src_ip] = src_mac
+        
+        # Jika ARP Request
+        if pkt_arp.opcode == arp.ARP_REQUEST:
+            if dst_ip in self.ip_to_mac:
+                # Kita tahu jawabannya! Kirim ARP Reply langsung (Proxy ARP)
+                dst_mac = self.ip_to_mac[dst_ip]
+                self._send_arp_reply(datapath, port, src_mac, src_ip, dst_mac, dst_ip)
+            else:
+                # Flood jika tidak tahu
+                out = datapath.ofproto_parser.OFPPacketOut(
+                    datapath=datapath, buffer_id=datapath.ofproto.OFP_NO_BUFFER,
+                    in_port=port, actions=[datapath.ofproto_parser.OFPActionOutput(datapath.ofproto.OFPP_FLOOD)],
+                    data=pkt.data)
+                datapath.send_msg(out)
+
+    def _send_arp_reply(self, datapath, port, target_mac, target_ip, sender_mac, sender_ip):
+        e = ethernet.ethernet(dst=target_mac, src=sender_mac, ethertype=ether_types.ETH_TYPE_ARP)
+        a = arp.arp(opcode=arp.ARP_REPLY, src_mac=sender_mac, src_ip=sender_ip,
+                    dst_mac=target_mac, dst_ip=target_ip)
+        p = packet.Packet()
+        p.add_protocol(e)
+        p.add_protocol(a)
+        p.serialize()
+        
+        actions = [datapath.ofproto_parser.OFPActionOutput(port)]
+        out = datapath.ofproto_parser.OFPPacketOut(
+            datapath=datapath, buffer_id=datapath.ofproto.OFP_NO_BUFFER,
+            in_port=datapath.ofproto.OFPP_CONTROLLER, actions=actions, data=p.data)
+        datapath.send_msg(out)
+
+    # =================================================================
+    # 4. MONITORING LOOP (WRITE TO DB FOR FORECASTER)
+    # =================================================================
+    def _monitor_traffic_loop(self):
         while True:
-            # 1. Minta Statistik Switch (Request)
+            hub.sleep(1)
             for dp in self.datapaths.values():
                 self._request_stats(dp)
-            
-            # 2. Jalankan Logika Traffic Manager (AI Check & Reroute)
-            #    Kita pass copy dari datapaths untuk thread safety
-            if self.datapaths:
-                self.traffic_mgr.evaluate_network_state(self.datapaths.copy())
-            
-            hub.sleep(MONITOR_INTERVAL)
 
     def _request_stats(self, datapath):
-        ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        req = parser.OFPPortStatsRequest(datapath, 0, ofproto.OFPP_ANY)
+        req = parser.OFPFlowStatsRequest(datapath)
         datapath.send_msg(req)
 
-    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
-    def _port_stats_reply_handler(self, ev):
-        """Menerima balasan statistik dari switch dan simpan ke DB"""
+    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
+    def _flow_stats_reply_handler(self, ev):
+        """Menerima statistik flow dan simpan ke DB traffic.flow_stats_"""
         body = ev.msg.body
         dpid = ev.msg.datapath.id
+        timestamp = datetime.now()
         
-        stats_to_insert = []
-        for stat in body:
-            # Filter Port: Local & Controller
-            if stat.port_no > 1000: continue
-            
-            stats_data = {
-                'tx_bytes': stat.tx_bytes,
-                'rx_bytes': stat.rx_bytes,
-                'tx_pkts': stat.tx_packets,
-                'rx_pkts': stat.rx_packets,
-                'duration': stat.duration_sec
-            }
-            stats_to_insert.append(stats_data)
+        conn = self.get_db_conn()
+        if not conn: return
+        
+        try:
+            cur = conn.cursor()
+            for stat in body:
+                if stat.priority == 0: continue # Skip table-miss
+                
+                # Logic sederhana untuk ambil delta bytes
+                # (Sederhana: Kita insert totalnya saja, forecast script akan handle delta nya via SQL window function)
+                
+                match = stat.match
+                src_ip = match.get('ipv4_src')
+                dst_ip = match.get('ipv4_dst')
+                
+                if not src_ip or not dst_ip: continue
+                
+                # Hanya simpan trafik host-to-host (filter noise)
+                if not src_ip.startswith('10.0.0.'): continue
 
-        # Kirim ke DB Module
-        if stats_to_insert:
-            self.db.insert_flow_stats(dpid, stats_to_insert)
+                cur.execute("""
+                    INSERT INTO traffic.flow_stats_ 
+                    (timestamp, dpid, src_ip, dst_ip, bytes_tx, bytes_rx, pkts_tx, pkts_rx, duration_sec)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    timestamp, dpid, src_ip, dst_ip,
+                    stat.byte_count, stat.byte_count, 
+                    stat.packet_count, stat.packet_count, 
+                    stat.duration_sec
+                ))
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception:
+            # Silent fail agar log tidak penuh error jika DB locking
+            if conn: conn.close()
 
-# ==============================================================================
-# END OF CODE
-# ==============================================================================
+if __name__ == '__main__':
+    # Ryu main entry point (tidak dieksekusi langsung sebagai script python biasa)
+    pass
