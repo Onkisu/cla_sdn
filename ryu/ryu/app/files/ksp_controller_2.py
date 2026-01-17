@@ -43,6 +43,9 @@ COOLDOWN_PERIOD_SEC = 20       # Waktu tunggu minimal antar switch
 # Constants for Industrial Flow Management
 COOKIE_REROUTE = 0xDEADBEEF    # Penanda khusus flow reroute
 PRIORITY_REROUTE = 30000       # Priority Tinggi (mengalahkan default user priority 10)
+# === ZOMBIE TRAFFIC MITIGATION ===
+REROUTE_GRACE_SEC = 2.5
+
 
 class VoIPSmartController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -56,6 +59,11 @@ class VoIPSmartController(app_manager.RyuApp):
         self.net = nx.DiGraph() # NetworkX Graph
         self.last_bytes = {}
         self.start_time = time.time()
+
+                # --- ZOMBIE TRANSITION CONTROL ---
+        self.reroute_grace_until = 0
+        self.state_transition = None
+
         
         # --- STATE CONGESTION ---
         self.congestion_active = False 
@@ -223,6 +231,12 @@ class VoIPSmartController(app_manager.RyuApp):
 
         except Exception as e:
             self.logger.error(f"Reroute Logic Error: {e}")
+        
+                # === ZOMBIE CLEANUP ===
+        self.last_bytes.clear()
+        self.reroute_grace_until = time.time() + REROUTE_GRACE_SEC
+        self.state_transition = "REROUTE"
+
 
     def perform_industrial_revert(self, trigger_val):
         """
@@ -237,6 +251,11 @@ class VoIPSmartController(app_manager.RyuApp):
         
         self.current_reroute_path = None
         self.insert_event_log("REROUTE_REVERT", "Restored to Default Path", trigger_val)
+        # === ZOMBIE CLEANUP ===
+        self.last_bytes.clear()
+        self.reroute_grace_until = time.time() + REROUTE_GRACE_SEC
+        self.state_transition = "REVERT"
+
 
     # --- LOW LEVEL FLOW HELPERS ---
 
