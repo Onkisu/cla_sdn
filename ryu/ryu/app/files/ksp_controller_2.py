@@ -546,8 +546,9 @@ class VoIPSmartController(app_manager.RyuApp):
             for stat in body:
 
                 # === IGNORE ZOMBIE TRAFFIC DURING TRANSITION (BENAR) ===
-                if time.time() < self.reroute_grace_until:
+                if stat.duration_sec < 2:
                     continue
+
 
                 if stat.priority == 0:
                     continue
