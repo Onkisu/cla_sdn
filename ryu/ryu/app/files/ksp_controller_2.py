@@ -43,8 +43,7 @@ COOLDOWN_PERIOD_SEC = 20       # Waktu tunggu minimal antar switch
 # Constants for Industrial Flow Management
 COOKIE_REROUTE = 0xDEADBEEF    # Penanda khusus flow reroute
 PRIORITY_REROUTE = 30000       # Priority Tinggi (mengalahkan default user priority 10)
-# === ZOMBIE TRAFFIC MITIGATION ===
-REROUTE_GRACE_SEC = 2.5
+
 
 
 class VoIPSmartController(app_manager.RyuApp):
@@ -52,17 +51,20 @@ class VoIPSmartController(app_manager.RyuApp):
 
     def __init__(self, *args, **kwargs):
         super(VoIPSmartController, self).__init__(*args, **kwargs)
+
+        # [TAMBAHKAN INI]
+        self.reroute_stage = 'IDLE' 
+        self.stopped_spines = []
+        self.trigger_val_cache = 0
+        self.temp_silence_cache = {}
+        
         # --- INIT DATA STRUCTURES ---
         self.mac_to_port = {}
         self.ip_to_mac = {}     
         self.datapaths = {}
         self.net = nx.DiGraph() # NetworkX Graph
         self.last_bytes = {}
-        self.start_time = time.time()
-
-                # --- ZOMBIE TRANSITION CONTROL ---
-        self.reroute_grace_until = 0
-        self.state_transition = None
+       
 
         
         # --- STATE CONGESTION ---
@@ -116,146 +118,251 @@ class VoIPSmartController(app_manager.RyuApp):
             for l in links:
                 self.net.add_edge(l.src.dpid, l.dst.dpid, port=l.src.port_no)
                 self.net.add_edge(l.dst.dpid, l.src.dpid, port=l.dst.port_no)
-
+    
     # =================================================================
-    # 2. FORECAST MONITORING & REROUTE LOGIC (THE "KEREN" PART)
-    #    Menggantikan _monitor_forecast lama dengan State Machine
+    # 2. FORECAST MONITORING (SYMMETRICAL BREAK-BEFORE-MAKE)
     # =================================================================
     def _monitor_forecast_smart(self):
-        """
-        Logic Otomatis yang membaca DB Forecast dan melakukan Reroute
-        dengan Hysteresis dan State Machine.
-        """
-        self.logger.info("👁️  AI Watchdog Active: Waiting for burst prediction...")
+        self.logger.info("👁️  AI Watchdog: Symmetrical Break-Before-Make Active")
         
+        target_src = '10.0.0.1'
+        target_dst = '10.0.0.2'
+
         while True:
-            hub.sleep(1.0) # Cek setiap detik
+            hub.sleep(1.0)
             
-            conn = self.get_db_conn()
-            if not conn: continue
-            
-            try:
-                cur = conn.cursor()
-                # Ambil 1 prediksi terbaru
-                cur.execute("""
-                    SELECT y_pred 
-                    FROM forecast_1h 
-                    ORDER BY ts_created DESC 
-                    LIMIT 1
-                """)
-                result = cur.fetchone()
-                cur.close(); conn.close()
+            # --- STAGE 1: IDLE (Monitoring Burst) ---
+            if self.reroute_stage == 'IDLE':
+                conn = self.get_db_conn()
+                if not conn: continue
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT y_pred FROM forecast_1h ORDER BY ts_created DESC LIMIT 1")
+                    result = cur.fetchone()
+                    cur.close(); conn.close()
 
-                if not result: continue
+                    if result:
+                        pred_bps = float(result[0])
+                        # DETEKSI BURST
+                        if pred_bps > BURST_THRESHOLD_BPS:
+                            # 1. Cari Spine yang SEDANG AKTIF (Biasanya Spine 1)
+                            current_spines = self._get_active_spines_for_flow(target_src, target_dst)
+                            
+                            if not current_spines:
+                                continue # Trafik belum kebaca, skip cycle ini
 
-                pred_bps = float(result[0])
-                now = time.time()
-                time_since_change = now - self.last_state_change_time
+                            self.logger.warning(f"🚀 BURST DETECTED ({pred_bps:.0f}). KILLING Active Spines: {current_spines}")
+                            
+                            # 2. STOP FLOW DI JALUR SAAT INI
+                            for sp_dpid in current_spines:
+                                self._emergency_stop_flow(sp_dpid, target_src, target_dst)
+                            
+                            self.stopped_spines = current_spines
+                            self.reroute_stage = 'VERIFYING' # Masuk mode verifikasi Reroute
+                            self.silence_check_counter = 0
+                            self.trigger_val_cache = pred_bps
+                except Exception as e:
+                    self.logger.error(f"DB Error: {e}")
 
-                # --- STATE MACHINE LOGIC ---
-                
-                # KONDISI 1: DETEKSI BURST (NORMAL -> REROUTE)
-                # Jika prediksi > threshold DAN kita belum reroute
-                if not self.congestion_active:
-                    if pred_bps > BURST_THRESHOLD_BPS:
-                        self.logger.warning(f"🚀 AI PREDICTION: Burst Incoming ({pred_bps:,.0f} bps). ENGAGING REROUTE!")
-                        self.perform_industrial_reroute(trigger_val=pred_bps)
-                        
-                        self.congestion_active = True
-                        self.last_state_change_time = now
-
-                # KONDISI 2: RESTORE NORMAL (REROUTE -> NORMAL)
-                # Jika prediksi aman DAN sudah lewat masa cooldown (anti-flapping)
-                else:
-                    if pred_bps < HYSTERESIS_LOWER_BPS and time_since_change > COOLDOWN_PERIOD_SEC:
-                        self.logger.info(f"✅ AI PREDICTION: Traffic Stable ({pred_bps:,.0f} bps). RESTORING PATH.")
-                        self.perform_industrial_revert(trigger_val=pred_bps)
-                        
-                        self.congestion_active = False
-                        self.last_state_change_time = now
-
-            except Exception as e:
-                self.logger.error(f"Forecast Monitor Error: {e}")
-                if conn and not conn.closed: conn.close()
-
-    # =================================================================
-    # 3. INDUSTRIAL REROUTING IMPLEMENTATION
-    #    Menggunakan "Make-Before-Break" + Reverse Installation
-    # =================================================================
-    def perform_industrial_reroute(self, trigger_val):
-        """
-        Reroute H1->H2 menghindari jalur macet (Spine 1 / DPID 1).
-        Teknik: Reverse Flow Install + Barrier Request.
-        """
-        src_sw = 4  # Leaf 1 (tempat H1)
-        dst_sw = 5  # Leaf 2 (tempat H2)
-        bad_node = 1 # Spine 1 (Asumsi jalur default macet)
-
-        try:
-            # A. Kalkulasi Jalur dengan NetworkX
-            # Cari semua jalur terpendek
-            paths = list(nx.shortest_simple_paths(self.net, src_sw, dst_sw))
-            
-            # Cari jalur yang TIDAK melewati Spine 1
-            alt_path = next((p for p in paths if bad_node not in p), None)
-
-            # Fallback: Jika tidak ada jalur bersih, ambil jalur kedua terbaik
-            if not alt_path and len(paths) > 1:
-                alt_path = paths[1]
-
-            if not alt_path:
-                self.logger.error("❌ CRITICAL: No alternative path available!")
-                return
-
-            self.logger.info(f"🛣️  Installing Bypass Path: {alt_path}")
-
-            # B. INSTALASI FLOW (REVERSE ORDER)
-            # Install flow dari switch TERAKHIR (dekat H2) mundur ke switch PERTAMA (dekat H1).
-            # Ini mencegah packet loss (blackhole) saat switch pertama membelokkan paket.
-            for i in range(len(alt_path) - 1, 0, -1):
-                curr_node = alt_path[i-1]
-                next_node = alt_path[i]
-                
-                # Cari port output dari curr ke next
-                if self.net.has_edge(curr_node, next_node):
-                    out_port = self.net[curr_node][next_node]['port']
-                    dp = self.datapaths.get(curr_node)
+            # --- STAGE 2: VERIFYING SILENCE (Sebelum Reroute) ---
+            elif self.reroute_stage == 'VERIFYING':
+                self.silence_check_counter += 1
+                if self._are_spines_silent(self.stopped_spines, target_src, target_dst):
+                    self.logger.info(f"✅ SILENCE CONFIRMED. Installing Alternate Path...")
                     
-                    if dp:
-                        self._install_reroute_flow(dp, out_port)
-                        # Barrier Request: Pastikan switch selesai menulis ke TCAM sebelum lanjut
-                        self._send_barrier(dp)
+                    # 3. INSTALL JALUR BARU (Hindari Spine Lama)
+                    avoid_node = self.stopped_spines[0] 
+                    self.perform_dynamic_reroute(target_src, target_dst, avoid_node, self.trigger_val_cache)
+                    
+                    self.reroute_stage = 'REROUTED'
+                    self.last_state_change_time = time.time()
+                else:
+                    self.logger.info(f"⏳ Waiting for traffic to drain (Reroute Phase)...")
+                    # Retry kill safety
+                    if self.silence_check_counter % 3 == 0:
+                         for sp in self.stopped_spines: self._emergency_stop_flow(sp, target_src, target_dst)
 
-            self.current_reroute_path = alt_path
-            self.insert_event_log("REROUTE_ACTIVE", f"Switched H1 to {alt_path}", trigger_val)
+            # --- STAGE 3: REROUTED (Monitoring kapan boleh REVERT) ---
+            elif self.reroute_stage == 'REROUTED':
+                conn = self.get_db_conn()
+                if not conn: continue
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT y_pred FROM forecast_1h ORDER BY ts_created DESC LIMIT 1")
+                    result = cur.fetchone()
+                    cur.close(); conn.close()
+
+                    if result:
+                        pred_bps = float(result[0])
+                        now = time.time()
+                        
+                        # Syarat Revert: Trafik Turun DAN Waktu Cooldown Habis
+                        if pred_bps < HYSTERESIS_LOWER_BPS and (now - self.last_state_change_time > COOLDOWN_PERIOD_SEC):
+                            self.logger.info("🔙 TRAFFIC NORMAL. Initiating REVERT Sequence...")
+                            
+                            # 1. Cari Spine yang SEDANG AKTIF (Sekarang pasti Spine Backup, misal Spine 2/3)
+                            current_spines = self._get_active_spines_for_flow(target_src, target_dst)
+                            
+                            if not current_spines:
+                                # Fallback jika switch stats belum lapor tapi kita tau harus revert
+                                # Kita paksa asumsi spine selain 1 (karena kita di state Rerouted)
+                                self.logger.warning("Warning: No active spine detected for revert, attempting blind stop.")
+                            
+                            self.logger.warning(f"⛔ STOPPING ALTERNATE PATH: {current_spines}")
+                            
+                            # 2. STOP FLOW DI JALUR BACKUP
+                            for sp_dpid in current_spines:
+                                self._emergency_stop_flow(sp_dpid, target_src, target_dst)
+                                
+                            self.stopped_spines = current_spines
+                            self.reroute_stage = 'REVERT_VERIFY' # State Baru: Verifikasi Revert
+                            self.silence_check_counter = 0
+
+                except Exception as e:
+                     self.logger.error(f"Revert Logic Error: {e}")
+
+            # --- STAGE 4: REVERT VERIFY (Pastikan Backup Mati dulu, baru Default Nyala) ---
+            elif self.reroute_stage == 'REVERT_VERIFY':
+                self.silence_check_counter += 1
+                
+                # Cek apakah jalur backup sudah diam?
+                if self._are_spines_silent(self.stopped_spines, target_src, target_dst):
+                    self.logger.info(f"✅ BACKUP PATH SILENT. Restoring Best Path (Default)...")
+                    
+                    # 3. INSTALL BEST PATH (Tanpa 'avoid', cari shortest path murni)
+                    self.perform_dynamic_revert(target_src, target_dst)
+                    
+                    self.reroute_stage = 'IDLE' # Kembali ke awal
+                    self.last_state_change_time = time.time()
+                else:
+                    self.logger.info(f"⏳ Waiting for traffic to drain (Revert Phase)...")
+                    if self.silence_check_counter % 3 == 0:
+                         for sp in self.stopped_spines: self._emergency_stop_flow(sp, target_src, target_dst)
+
+    # =================================================================
+    # MISSING HELPERS (PASTE INI KE DALAM CLASS)
+    # =================================================================
+
+    def _emergency_stop_flow(self, dpid_target, src_ip, dst_ip):
+        """Hanya stop flow H1->H2 di switch tertentu"""
+        if dpid_target in self.datapaths:
+            dp = self.datapaths[dpid_target]
+            ofproto = dp.ofproto
+            parser = dp.ofproto_parser
+            
+            # Match spesifik IP
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src=src_ip,
+                ipv4_dst=dst_ip
+            )
+            # Command DELETE
+            mod = parser.OFPFlowMod(
+                datapath=dp,
+                command=ofproto.OFPFC_DELETE,
+                out_port=ofproto.OFPP_ANY,
+                out_group=ofproto.OFPG_ANY,
+                match=match
+            )
+            dp.send_msg(mod)
+            self._send_barrier(dp)
+
+    def _check_is_traffic_silent(self, dpid, src_ip, dst_ip):
+        """Cek apakah bytes flow ini tidak bertambah (delta == 0)"""
+        flow_key = f"{dpid}-{src_ip}-{dst_ip}"
+        
+        # Jika key tidak ada di last_bytes, berarti switch belum lapor/flow hilang -> Anggap Silent
+        if flow_key not in self.last_bytes: return True
+        
+        curr, _ = self.last_bytes[flow_key]
+        
+        # Cache logic untuk membandingkan dengan detik sebelumnya
+        cache_key = f"silent_check_{flow_key}"
+        prev = self.temp_silence_cache.get(cache_key, -1)
+        self.temp_silence_cache[cache_key] = curr
+        
+        # Silent jika byte saat ini SAMA dengan byte saat check terakhir (tidak nambah)
+        return curr == prev
+
+    def perform_dynamic_reroute(self, src_ip, dst_ip, avoid_dpid, trigger_val):
+        """Cari jalur baru menghindari avoid_dpid"""
+        # Hardcode Leaf Host sesuai topologi (karena switch host jarang pindah)
+        src_sw = 4 
+        dst_sw = 5 
+        
+        try:
+            paths = list(nx.shortest_simple_paths(self.net, src_sw, dst_sw))
+            # Filter: Path TIDAK BOLEH lewat avoid_dpid
+            alt_path = next((p for p in paths if avoid_dpid not in p), None)
+            
+            if alt_path:
+                self.logger.info(f"🛣️  REROUTING {src_ip}->{dst_ip} via {alt_path}")
+                # Install Flow Reverse
+                for i in range(len(alt_path) - 1, 0, -1):
+                    curr = alt_path[i-1]
+                    nxt = alt_path[i]
+                    if self.net.has_edge(curr, nxt):
+                        out_port = self.net[curr][nxt]['port']
+                        dp = self.datapaths.get(curr)
+                        if dp:
+                            self._install_reroute_flow(dp, out_port) 
+                            self._send_barrier(dp)
+                
+                self.current_reroute_path = alt_path
+                self.congestion_active = True
+                self.insert_event_log("REROUTE_DYN", f"Path: {alt_path}", trigger_val)
+            else:
+                self.logger.warning("No alternative path found!")
 
         except Exception as e:
-            self.logger.error(f"Reroute Logic Error: {e}")
+            self.logger.error(f"Reroute Fail: {e}")
+
+    # =================================================================
+    # NEW HELPERS FOR REVERT
+    # =================================================================
+
+    def _are_spines_silent(self, dpids_list, src, dst):
+        """Helper untuk cek list spine apakah sudah 0 semua delta bytes-nya"""
+        if not dpids_list: return True # Kalau list kosong, anggap silent (aman)
         
-                # === ZOMBIE CLEANUP ===
-        self.last_bytes.clear()
-        self.reroute_grace_until = time.time() + REROUTE_GRACE_SEC
-        self.state_transition = "REROUTE"
+        all_silent = True
+        for dpid in dpids_list:
+            if not self._check_is_traffic_silent(dpid, src, dst):
+                all_silent = False
+                break
+        return all_silent
 
-
-    def perform_industrial_revert(self, trigger_val):
+    def perform_dynamic_revert(self, src_ip, dst_ip):
         """
-        Mengembalikan jalur secara bersih dengan menghapus flow reroute.
+        Kembalikan ke jalur terbaik (Shortest Path) tanpa batasan/avoid.
+        Biasanya akan memilih Spine 1 lagi jika itu cost terendah.
         """
-        self.logger.info("🔙 Reverting to Default Path (Atomic Cleanup)...")
+        src_sw = 4 # Hardcode Leaf Host 1 (sesuai topologi)
+        dst_sw = 5 # Hardcode Leaf Host 2
         
-        # Hapus flow yang memiliki Cookie REROUTE di semua switch yang terhubung
-        for dpid, dp in self.datapaths.items():
-            self._delete_reroute_flow_by_cookie(dp)
-            self._send_barrier(dp)
-        
-        self.current_reroute_path = None
-        self.insert_event_log("REROUTE_REVERT", "Restored to Default Path", trigger_val)
-        # === ZOMBIE CLEANUP ===
-        self.last_bytes.clear()
-        self.reroute_grace_until = time.time() + REROUTE_GRACE_SEC
-        self.state_transition = "REVERT"
+        try:
+            # Cari shortest path murni
+            best_path = nx.shortest_path(self.net, src_sw, dst_sw)
+            
+            self.logger.info(f"🔙 RESTORING PATH: {best_path}")
+            
+            # Install Flow Reverse
+            for i in range(len(best_path) - 1, 0, -1):
+                curr = best_path[i-1]
+                nxt = best_path[i]
+                if self.net.has_edge(curr, nxt):
+                    out_port = self.net[curr][nxt]['port']
+                    dp = self.datapaths.get(curr)
+                    if dp:
+                        self._install_reroute_flow(dp, out_port) # Pakai priority tinggi
+                        self._send_barrier(dp)
+            
+            self.current_reroute_path = best_path
+            self.congestion_active = False # Reset flag
+            self.insert_event_log("REVERT_DONE", f"Restored: {best_path}", 0)
 
+        except Exception as e:
+            self.logger.error(f"Revert Install Fail: {e}")
 
     # --- LOW LEVEL FLOW HELPERS ---
 
@@ -283,22 +390,6 @@ class VoIPSmartController(app_manager.RyuApp):
             cookie=COOKIE_REROUTE,
             idle_timeout=0, 
             hard_timeout=0
-        )
-        datapath.send_msg(mod)
-
-    def _delete_reroute_flow_by_cookie(self, datapath):
-        parser = datapath.ofproto_parser
-        ofproto = datapath.ofproto
-        
-        # Hapus flow dengan Cookie tertentu (Sangat bersih & aman)
-        # Tidak akan menghapus flow default User Code karena cookienya beda (0)
-        mod = parser.OFPFlowMod(
-            datapath=datapath,
-            command=ofproto.OFPFC_DELETE,
-            out_port=ofproto.OFPP_ANY,
-            out_group=ofproto.OFPG_ANY,
-            cookie=COOKIE_REROUTE,
-            cookie_mask=0xFFFFFFFFFFFFFFFF # Exact match cookie
         )
         datapath.send_msg(mod)
 
@@ -499,34 +590,61 @@ class VoIPSmartController(app_manager.RyuApp):
             if m == mac: return ip
         return None
 
-    def get_target_total_bytes(self, elapsed_seconds):
-        # Target: 13,000 to 19,800 bytes total per second per DPID
-        min_val = 13000
-        max_val = 19800
-        mid = (max_val + min_val) / 2  # 16400
-        amp = (max_val - min_val) / 2  # 3400
-        period = 3600
-        phase = (elapsed_seconds % period) / period * 2 * math.pi
-        sine_value = math.sin(phase)
-        noise = random.uniform(-0.3, 0.3) 
-        target = mid + (amp * sine_value) + (mid * 0.05 * noise)
-        return int(max(min_val, min(max_val, target)))
 
-    def insert_flow_data(self, flow_data):
-        conn = self.get_db_conn()
-        if not conn: return
-        try:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO traffic.flow_stats_
-                (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac,
-                ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx,
-                pkts_tx, pkts_rx, duration_sec, traffic_label)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """, flow_data)
-            conn.commit(); cur.close(); conn.close()
-        except:
-            if conn: conn.close()
+    # =================================================================
+    # NEW DYNAMIC DETECTION HELPER (NO HARDCODE)
+    # =================================================================
+    def _get_active_spines_for_flow(self, src_ip, dst_ip):
+        """
+        Mendeteksi Spine mana yang sedang membawa trafik src->dst
+        berdasarkan statistik bytes terakhir.
+        Logika:
+        1. Cari semua DPID yang punya stats untuk flow ini.
+        2. Filter: Jika paket datang dari 'Link Antar Switch', itu Spine/Intermediate.
+                   Jika paket datang dari 'Port Host', itu Leaf.
+        """
+        active_spines = []
+        
+        # Iterasi semua data statistik yang tersimpan
+        for flow_key, (bytes_count, pkts) in self.last_bytes.items():
+            # flow_key format: "dpid-src_ip-dst_ip"
+            try:
+                dpid_str, f_src, f_dst = flow_key.split('-')
+                dpid = int(dpid_str)
+            except ValueError:
+                continue
+
+            # Filter hanya untuk flow target
+            if f_src != src_ip or f_dst != dst_ip:
+                continue
+                
+            # Filter hanya yang trafiknya 'hidup' (> 0 bytes)
+            if bytes_count <= 0:
+                continue
+
+            # --- LOGIC DETEKSI LEAF VS SPINE ---
+            # Kita cek source MAC flow ini
+            src_mac = self.ip_to_mac.get(src_ip)
+            if not src_mac: continue
+            
+            # Cek port ingress (masuk) untuk src_mac di dpid ini
+            in_port = self.mac_to_port.get(dpid, {}).get(src_mac)
+            if in_port is None: continue
+
+            # Cek di Graph Topologi: Apakah (dpid, in_port) terhubung ke switch lain?
+            # Jika YA  -> Berarti paket datang dari switch lain -> INI SPINE (Intermediate)
+            # Jika TIDAK -> Berarti paket datang dari host -> INI LEAF (Ingress)
+            is_link_port = False
+            if self.net.has_node(dpid):
+                for neighbor in self.net[dpid]:
+                    if self.net[dpid][neighbor]['port'] == in_port:
+                        is_link_port = True
+                        break
+            
+            if is_link_port:
+                active_spines.append(dpid)
+        
+        return list(set(active_spines))
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
