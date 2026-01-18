@@ -268,22 +268,38 @@ class VoIPSmartController(app_manager.RyuApp):
             self._send_barrier(dp)
 
     def _check_is_traffic_silent(self, dpid, src_ip, dst_ip):
-        """Cek apakah bytes flow ini tidak bertambah (delta == 0)"""
-        # Tambahkan Priority/Cookie agar flow lama (prio 1) dan baru (prio 30000) tidak tabrakan
-        flow_key = f"{dpid}-{src_ip}-{dst_ip}-{stat.priority}"
+        """
+        Cek apakah bytes flow ini tidak bertambah.
+        Logic Update: Support format key baru (dpid-src-dst-prio).
+        """
+        # Prefix pattern: "dpid-src-dst-"
+        prefix_key = f"{dpid}-{src_ip}-{dst_ip}-"
         
-        # Jika key tidak ada di last_bytes, berarti switch belum lapor/flow hilang -> Anggap Silent
-        if flow_key not in self.last_bytes: return True
+        # Cari semua key di memori yang cocok dengan pattern flow ini (priority berapapun)
+        matching_keys = [k for k in self.last_bytes.keys() if k.startswith(prefix_key)]
         
-        curr, _ = self.last_bytes[flow_key]
+        # Jika tidak ada key yg cocok, berarti switch belum lapor atau sudah bersih -> Silent
+        if not matching_keys: 
+            return True
         
-        # Cache logic untuk membandingkan dengan detik sebelumnya
-        cache_key = f"silent_check_{flow_key}"
-        prev = self.temp_silence_cache.get(cache_key, -1)
-        self.temp_silence_cache[cache_key] = curr
+        all_silent = True
         
-        # Silent jika byte saat ini SAMA dengan byte saat check terakhir (tidak nambah)
-        return curr == prev
+        if not hasattr(self, 'temp_silence_cache'): 
+            self.temp_silence_cache = {}
+
+        for key in matching_keys:
+            curr_bytes, _ = self.last_bytes[key]
+            
+            # Cache logic untuk membandingkan dengan detik sebelumnya
+            cache_key = f"silent_check_{key}"
+            prev_bytes = self.temp_silence_cache.get(cache_key, -1)
+            self.temp_silence_cache[cache_key] = curr_bytes
+            
+            # Jika ada SATU SAJA flow yang bytes-nya nambah, return False (Not Silent)
+            if curr_bytes != prev_bytes:
+                all_silent = False
+        
+        return all_silent
 
     def perform_dynamic_reroute(self, src_ip, dst_ip, avoid_dpid, trigger_val):
         """Cari jalur baru menghindari avoid_dpid"""
@@ -597,20 +613,23 @@ class VoIPSmartController(app_manager.RyuApp):
     # =================================================================
     def _get_active_spines_for_flow(self, src_ip, dst_ip):
         """
-        Mendeteksi Spine mana yang sedang membawa trafik src->dst
-        berdasarkan statistik bytes terakhir.
-        Logika:
-        1. Cari semua DPID yang punya stats untuk flow ini.
-        2. Filter: Jika paket datang dari 'Link Antar Switch', itu Spine/Intermediate.
-                   Jika paket datang dari 'Port Host', itu Leaf.
+        Mendeteksi Spine mana yang sedang membawa trafik src->dst.
+        Logic Update: Parsing key format baru dengan 4 komponen.
         """
         active_spines = []
         
-        # Iterasi semua data statistik yang tersimpan
         for flow_key, (bytes_count, pkts) in self.last_bytes.items():
-            # flow_key format: "dpid-src_ip-dst_ip"
+            # Parse Key: dpid-src-dst-prio
             try:
-                dpid_str, f_src, f_dst = flow_key.split('-')
+                parts = flow_key.split('-')
+                # Kita butuh handle jika formatnya 3 (lama) atau 4 (baru)
+                if len(parts) == 4:
+                    dpid_str, f_src, f_dst, _ = parts
+                elif len(parts) == 3:
+                    dpid_str, f_src, f_dst = parts
+                else:
+                    continue
+                
                 dpid = int(dpid_str)
             except ValueError:
                 continue
@@ -619,22 +638,16 @@ class VoIPSmartController(app_manager.RyuApp):
             if f_src != src_ip or f_dst != dst_ip:
                 continue
                 
-            # Filter hanya yang trafiknya 'hidup' (> 0 bytes)
             if bytes_count <= 0:
                 continue
 
-            # --- LOGIC DETEKSI LEAF VS SPINE ---
-            # Kita cek source MAC flow ini
+            # --- LOGIC DETEKSI LEAF VS SPINE (Sama seperti sebelumnya) ---
             src_mac = self.ip_to_mac.get(src_ip)
             if not src_mac: continue
             
-            # Cek port ingress (masuk) untuk src_mac di dpid ini
             in_port = self.mac_to_port.get(dpid, {}).get(src_mac)
             if in_port is None: continue
 
-            # Cek di Graph Topologi: Apakah (dpid, in_port) terhubung ke switch lain?
-            # Jika YA  -> Berarti paket datang dari switch lain -> INI SPINE (Intermediate)
-            # Jika TIDAK -> Berarti paket datang dari host -> INI LEAF (Ingress)
             is_link_port = False
             if self.net.has_node(dpid):
                 for neighbor in self.net[dpid]:
