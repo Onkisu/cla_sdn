@@ -345,6 +345,46 @@ class VoIPSmartController(app_manager.RyuApp):
                 break
         return all_silent
 
+    def perform_dynamic_reroute(self, src_ip, dst_ip, avoid_dpid, trigger_val):
+        """
+        Mencari jalur alternatif menghindari switch macet (avoid_dpid).
+        Biasanya menghindari Spine 3, jadi lewat Spine 1 atau 2.
+        """
+        src_sw = 4 
+        dst_sw = 5 
+        
+        try:
+            # 1. Ambil daftar semua kemungkinan jalur (Simple Paths)
+            paths = list(nx.shortest_simple_paths(self.net, src_sw, dst_sw))
+            
+            # 2. Filter: Cari path yang TIDAK lewat 'avoid_dpid' (biasanya node 3)
+            alt_path = next((p for p in paths if avoid_dpid not in p), None)
+            
+            if alt_path:
+                self.logger.info(f"🛣️  REROUTING {src_ip}->{dst_ip} via {alt_path}")
+                
+                # 3. Install Flow Baru (Mundur dari tujuan ke asal)
+                for i in range(len(alt_path) - 1, 0, -1):
+                    curr = alt_path[i-1]
+                    nxt = alt_path[i]
+                    if self.net.has_edge(curr, nxt):
+                        out_port = self.net[curr][nxt]['port']
+                        dp = self.datapaths.get(curr)
+                        if dp:
+                            # Gunakan Priority Tinggi (30000)
+                            self._install_reroute_flow(dp, out_port) 
+                            self._send_barrier(dp)
+                
+                # 4. Update Status Controller
+                self.current_reroute_path = alt_path
+                self.congestion_active = True
+                self.insert_event_log("REROUTE_DYN", f"Path: {alt_path}", trigger_val)
+            else:
+                self.logger.warning("⚠️ No alternative path found!")
+
+        except Exception as e:
+            self.logger.error(f"Reroute Fail: {e}")
+
     def perform_dynamic_revert(self, src_ip, dst_ip):
         """
         Kembalikan ke SPINE 3 secara paksa (Sesuai request).
