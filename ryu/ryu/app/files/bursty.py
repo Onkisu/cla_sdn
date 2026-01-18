@@ -1,15 +1,36 @@
 #!/usr/bin/env python3
 import time
 import subprocess
+import json
 
 H3 = "h3"
 DST_IP = "10.0.0.2"
+STATE_FILE = '/tmp/controller_state.json'
 
-def clear_recv_log():
-    subprocess.run(["truncate", "-s", "0", "/tmp/recv_steady.log"])
-    print("[CLEANUP] /tmp/recv_steady.log cleared")
+def check_controller_state():
+    """Cek state controller sebelum mengirim burst"""
+    try:
+        with open(STATE_FILE, 'r') as f:
+            state = json.load(f)
+        
+        # Jangan kirim burst jika controller sedang transition
+        if state.get('state') in ['VERIFYING_SILENCE', 'REVERT_VERIFY']:
+            print(f"[BURST] Skipping - Controller in {state['state']} state")
+            return False
+        
+        # Jika baru saja reroute, tunggu sedikit
+        if state.get('congestion') == True:
+            print("[BURST] Reroute active, waiting...")
+            time.sleep(2)
+            
+        return True
+    except:
+        return True  # Default allow jika file tidak ada
 
 def burst(rate, duration):
+    if not check_controller_state():
+        return
+    
     print(f"[BURST] rate={rate} pps | duration={duration}s")
     subprocess.run([
         "mnexec", "-a",
@@ -24,96 +45,22 @@ def burst(rate, duration):
     ])
 
 if __name__ == "__main__":
+    print("[BURST] Generator with controller awareness started")
+    
     while True:
-        # Burst 1
-        time.sleep(600) # Wait 30 minutes before starting bursts
-        burst(rate=150, duration=60)
-        # Burst 2
-        time.sleep(1)
-        burst(rate=200, duration=30)
+        # Initial wait
+        time.sleep(600)  # Wait 10 minutes
         
-        time.sleep(1)
-        # Burst 3
-        burst(rate=250, duration=20)
-        time.sleep(1)
-
-        # Burst 3
-        burst(rate=300, duration=20)
-        time.sleep(1)
-        # Burst 4
-        burst(rate=400, duration=10)
-        time.sleep(1)
-
-        # Burst 5
-        burst(rate=250, duration=20)
-        time.sleep(1)
-        # Burst 6
-        burst(rate=360, duration=10)
-        time.sleep(1)
-        # Burst 7
-        burst(rate=200, duration=20)
-        time.sleep(1)
-        # Burst 8
-        burst(rate=150, duration=30)
-
-        time.sleep(500) # Wait 20 minutes before starting bursts
-        burst(rate=150, duration=60)
-        # Burst 2
-        time.sleep(1)
-        burst(rate=200, duration=30)
+        # Burst sequence dengan cooldown
+        bursts = [
+            (150, 60), (200, 30), (250, 20),
+            (300, 20), (400, 10), (250, 20),
+            (360, 10), (200, 20), (150, 30)
+        ]
         
-        time.sleep(1)
-        # Burst 3
-        burst(rate=250, duration=20)
-        time.sleep(1)
-
-        # Burst 3
-        burst(rate=300, duration=20)
-        time.sleep(1)
-        # Burst 4
-        burst(rate=400, duration=10)
-        time.sleep(1)
-
-        # Burst 5
-        burst(rate=250, duration=20)
-        time.sleep(1)
-        # Burst 6
-        burst(rate=360, duration=10)
-        time.sleep(1)
-        # Burst 7
-        burst(rate=200, duration=20)
-        time.sleep(1)
-        # Burst 8
-        burst(rate=150, duration=30)
-
-        time.sleep(600) # Wait 30 minutes before starting bursts
-        burst(rate=150, duration=60)
-        # Burst 2
-        time.sleep(1)
-        burst(rate=200, duration=30)
+        for rate, duration in bursts:
+            burst(rate, duration)
+            time.sleep(1)  # Cooldown antar burst
         
-        time.sleep(1)
-        # Burst 3
-        burst(rate=250, duration=20)
-        time.sleep(1)
-
-        # Burst 3
-        burst(rate=300, duration=20)
-        time.sleep(1)
-        # Burst 4
-        burst(rate=400, duration=10)
-        time.sleep(1)
-
-        # Burst 5
-        burst(rate=250, duration=20)
-        time.sleep(1)
-        # Burst 6
-        burst(rate=360, duration=10)
-        time.sleep(1)
-        # Burst 7
-        burst(rate=200, duration=20)
-        time.sleep(1)
-        # Burst 8
-        burst(rate=150, duration=30)
-        # clear_recv_log()
-        # print("[CYCLE COMPLETE] Restarting burst cycle...\n")
+        # Wait sebelum cycle berikutnya
+        time.sleep(500)  
