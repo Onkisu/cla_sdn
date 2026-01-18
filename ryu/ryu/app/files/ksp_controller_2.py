@@ -37,7 +37,7 @@ DB_CONFIG = {
 
 # Threshold Congestion (Sesuai forecast_2.py)
 BURST_THRESHOLD_BPS = 120000 
-HYSTERESIS_LOWER_BPS = 80000   # Traffic harus turun ke sini baru revert
+HYSTERESIS_LOWER_BPS = 88000   # Traffic harus turun ke sini baru revert
 COOLDOWN_PERIOD_SEC = 20       # Waktu tunggu minimal antar switch
 
 # Constants for Industrial Flow Management
@@ -65,6 +65,9 @@ class VoIPSmartController(app_manager.RyuApp):
         self.net = nx.DiGraph() # NetworkX Graph
         self.last_bytes = {}
        
+        # [BARU] Counter untuk memastikan trafik stabil sebelum revert
+        self.stability_counter = 0 
+        self.required_stable_cycles = 10  # Butuh 5 detik stabil berturut-turut
 
         
         # --- STATE CONGESTION ---
@@ -123,13 +126,13 @@ class VoIPSmartController(app_manager.RyuApp):
     # 2. FORECAST MONITORING (SYMMETRICAL BREAK-BEFORE-MAKE)
     # =================================================================
     def _monitor_forecast_smart(self):
-        self.logger.info("👁️  AI Watchdog: Logic (Normal=Spine3, Burst=Spine1/2)")
+        self.logger.info("👁️  AI Watchdog: Stability Check Logic Added (5s Wait)")
         
         target_src = '10.0.0.1'
         target_dst = '10.0.0.2'
 
         while True:
-            hub.sleep(1.0)
+            hub.sleep(1.0) # Cycle 1 detik
             
             # --- STAGE 1: IDLE (Monitoring Burst) ---
             if self.reroute_stage == 'IDLE':
@@ -145,14 +148,12 @@ class VoIPSmartController(app_manager.RyuApp):
                         pred_bps = float(result[0])
                         # DETEKSI BURST
                         if pred_bps > BURST_THRESHOLD_BPS:
-                            # Cari Spine yang sedang aktif (Harusnya Spine 3)
                             current_spines = self._get_active_spines_for_flow(target_src, target_dst)
-                            
                             if not current_spines: continue 
 
-                            self.logger.warning(f"🚀 BURST DETECTED ({pred_bps:.0f}). KILLING Active Spines: {current_spines}")
+                            self.logger.warning(f"🚀 BURST DETECTED ({pred_bps:.0f}). KILLING Active Spines...")
                             
-                            # Matikan jalur yang sedang dipakai (Spine 3)
+                            # Matikan jalur aktif
                             for sp_dpid in current_spines:
                                 self._emergency_stop_flow(sp_dpid, target_src, target_dst)
                             
@@ -167,21 +168,18 @@ class VoIPSmartController(app_manager.RyuApp):
             elif self.reroute_stage == 'VERIFYING':
                 self.silence_check_counter += 1
                 if self._are_spines_silent(self.stopped_spines, target_src, target_dst):
-                    self.logger.info(f"✅ SILENCE CONFIRMED. Moving to Safety...")
-                    
-                    # CARI JALAN SELAIN YANG DIMATIKAN
-                    # Kalau Spine 3 dimatikan, dia akan cari Spine 1 atau 2
+                    self.logger.info(f"✅ SILENCE CONFIRMED. Rerouting...")
                     avoid_node = self.stopped_spines[0] 
                     self.perform_dynamic_reroute(target_src, target_dst, avoid_node, self.trigger_val_cache)
                     
                     self.reroute_stage = 'REROUTED'
                     self.last_state_change_time = time.time()
+                    self.stability_counter = 0 # Reset counter stabilitas
                 else:
-                    self.logger.info(f"⏳ Waiting for traffic to drain...")
                     if self.silence_check_counter % 3 == 0:
                          for sp in self.stopped_spines: self._emergency_stop_flow(sp, target_src, target_dst)
 
-            # --- STAGE 3: REROUTED (Monitoring kapan boleh REVERT) ---
+            # --- STAGE 3: REROUTED (Monitoring Stabilisasi & Revert) ---
             elif self.reroute_stage == 'REROUTED':
                 conn = self.get_db_conn()
                 if not conn: continue
@@ -193,26 +191,32 @@ class VoIPSmartController(app_manager.RyuApp):
 
                     if result:
                         pred_bps = float(result[0])
-                        now = time.time()
                         
-                        # Syarat Revert: Trafik Turun DAN Waktu Cooldown Habis
-                        if pred_bps < HYSTERESIS_LOWER_BPS and (now - self.last_state_change_time > COOLDOWN_PERIOD_SEC):
-                            self.logger.info("🔙 TRAFFIC NORMAL. Initiating REVERT to Spine 3...")
+                        # --- LOGIKA BARU: STABILITY CHECK ---
+                        if pred_bps <= HYSTERESIS_LOWER_BPS:
+                            # Jika trafik rendah, naikkan counter
+                            self.stability_counter += 1
+                            self.logger.info(f"📉 Traffic Low. Stability Check: {self.stability_counter}/{self.required_stable_cycles}")
                             
-                            # Cari Spine yang sedang aktif (Sekarang pasti Spine 1 atau 2)
-                            current_spines = self._get_active_spines_for_flow(target_src, target_dst)
-                            
-                            if not current_spines:
-                                self.logger.warning("Warning: Blind stop for revert.")
-                            
-                            self.logger.warning(f"⛔ STOPPING BACKUP PATH: {current_spines}")
-                            
-                            for sp_dpid in current_spines:
-                                self._emergency_stop_flow(sp_dpid, target_src, target_dst)
+                            # Cek apakah sudah stabil CUKUP LAMA (misal 5 detik)
+                            if self.stability_counter >= self.required_stable_cycles:
+                                self.logger.info("🛡️  TRAFFIC STABLE. Initiating REVERT to Spine 3...")
                                 
-                            self.stopped_spines = current_spines
-                            self.reroute_stage = 'REVERT_VERIFY'
-                            self.silence_check_counter = 0
+                                # Matikan jalur Backup
+                                current_spines = self._get_active_spines_for_flow(target_src, target_dst)
+                                self.logger.warning(f"⛔ STOPPING BACKUP PATH: {current_spines}")
+                                
+                                for sp_dpid in current_spines:
+                                    self._emergency_stop_flow(sp_dpid, target_src, target_dst)
+                                    
+                                self.stopped_spines = current_spines
+                                self.reroute_stage = 'REVERT_VERIFY'
+                                self.silence_check_counter = 0
+                        else:
+                            # Jika trafik TINGGI lagi (Burst susulan), RESET counter!
+                            if self.stability_counter > 0:
+                                self.logger.warning("⚠️  Burst detected during stability check! Resetting timer.")
+                            self.stability_counter = 0
 
                 except Exception as e:
                      self.logger.error(f"Revert Logic Error: {e}")
@@ -222,15 +226,14 @@ class VoIPSmartController(app_manager.RyuApp):
                 self.silence_check_counter += 1
                 
                 if self._are_spines_silent(self.stopped_spines, target_src, target_dst):
-                    self.logger.info(f"✅ BACKUP PATH SILENT. Restoring Target Spine 3...")
-                    
-                    # PANGGIL FUNGSI REVERT KHUSUS
+                    self.logger.info(f"✅ BACKUP SILENT. Restoring Spine 3...")
                     self.perform_dynamic_revert(target_src, target_dst)
                     
                     self.reroute_stage = 'IDLE'
                     self.last_state_change_time = time.time()
+                    self.stability_counter = 0
                 else:
-                    self.logger.info(f"⏳ Waiting for traffic to drain (Revert Phase)...")
+                    self.logger.info(f"⏳ Waiting for backup to drain...")
                     if self.silence_check_counter % 3 == 0:
                          for sp in self.stopped_spines: self._emergency_stop_flow(sp, target_src, target_dst)
 
