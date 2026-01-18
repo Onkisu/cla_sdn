@@ -269,7 +269,8 @@ class VoIPSmartController(app_manager.RyuApp):
 
     def _check_is_traffic_silent(self, dpid, src_ip, dst_ip):
         """Cek apakah bytes flow ini tidak bertambah (delta == 0)"""
-        flow_key = f"{dpid}-{src_ip}-{dst_ip}"
+        # Tambahkan Priority/Cookie agar flow lama (prio 1) dan baru (prio 30000) tidak tabrakan
+        flow_key = f"{dpid}-{src_ip}-{dst_ip}-{stat.priority}"
         
         # Jika key tidak ada di last_bytes, berarti switch belum lapor/flow hilang -> Anggap Silent
         if flow_key not in self.last_bytes: return True
