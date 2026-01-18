@@ -630,31 +630,36 @@ class VoIPSmartController(app_manager.RyuApp):
         datapath.send_msg(datapath.ofproto_parser.OFPBarrierRequest(datapath))
     
     def _get_active_spines_for_flow(self, src_ip, dst_ip):
-        """Detect which spines are carrying the flow (H1->H2 only)"""
+        """Deteksi spine aktif yang membawa traffic H1->H2 - VERSI DIPERBAIKI"""
         active_spines = []
         current_time = time.time()
         
         for flow_key, (bytes_count, _) in self.last_bytes.items():
-            # Parse flow key
+            # Parse flow key dengan berbagai format
             parts = flow_key.split('-')
-            if len(parts) < 3:
-                continue
             
             try:
-                dpid = int(parts[0])
-                flow_src = parts[1]
-                flow_dst = parts[2]
-            except:
+                # Format: "dpid-src-dst" atau "dpid-src-dst-prio"
+                if len(parts) >= 3:
+                    dpid = int(parts[0])
+                    flow_src = parts[1]
+                    flow_dst = parts[2]
+                else:
+                    continue
+                    
+                # Filter untuk flow H1->H2 di spine (dpid 1-3)
+                if (flow_src == src_ip and flow_dst == dst_ip and 
+                    1 <= dpid <= 3):  # Hanya spine 1, 2, 3
+                    
+                    # Cek data freshness (tidak lebih dari 10 detik)
+                    if current_time - self.last_bytes_timestamp.get(flow_key, 0) <= 10:
+                        active_spines.append(dpid)
+                        
+            except (ValueError, IndexError) as e:
+                self.logger.debug(f"Error parsing flow key {flow_key}: {e}")
                 continue
-            
-            # Filter untuk flow H1->H2 di spine (dpid <= 3)
-            if (flow_src == src_ip and flow_dst == dst_ip and 
-                dpid <= 3 and bytes_count > 0):
-                
-                # Cek data freshness (tidak lebih dari 5 detik)
-                if current_time - self.last_bytes_timestamp.get(flow_key, 0) <= 5:
-                    active_spines.append(dpid)
         
+        # Remove duplicates
         return list(set(active_spines))
     
     def _check_is_traffic_silent(self, dpid, src_ip, dst_ip):
@@ -739,68 +744,119 @@ class VoIPSmartController(app_manager.RyuApp):
     
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
-        """Handle flow statistics reply"""
+        """Handle flow statistics reply - PERBAIKAN: Catat semua switch"""
         body = ev.msg.body
         datapath = ev.msg.datapath
         dpid = datapath.id
         
         current_time = time.time()
+        timestamp = datetime.now()
         
-        for stat in body:
-            # Skip low priority flows
-            if stat.priority <= 0:
-                continue
+        # Dapatkan koneksi DB
+        conn = self.get_db_connection()
+        if not conn:
+            return
+        
+        try:
+            cur = conn.cursor()
             
-            # Skip flows yang terlalu baru (mungkin zombie)
-            if stat.duration_sec < 1:
-                continue
+            for stat in body:
+                # Skip default flows (priority 0)
+                if stat.priority == 0:
+                    continue
+                
+                match = stat.match
+                
+                # 1. Coba ambil IP dari match langsung
+                src_ip = match.get('ipv4_src')
+                dst_ip = match.get('ipv4_dst')
+                
+                # 2. Jika tidak ada IP, coba resolve dari MAC
+                if not src_ip:
+                    src_mac = match.get('eth_src')
+                    if src_mac:
+                        src_ip = self._resolve_ip(src_mac)
+                
+                if not dst_ip:
+                    dst_mac = match.get('eth_dst')
+                    if dst_mac:
+                        dst_ip = self._resolve_ip(dst_mac)
+                
+                # 3. Tentukan apakah ini traffic yang kita minati
+                is_target_traffic = False
+                traffic_label = 'other'
+                
+                if dst_ip == '10.0.0.2':
+                    if src_ip == '10.0.0.1':
+                        is_target_traffic = True
+                        traffic_label = 'voip'
+                    elif src_ip == '10.0.0.3':
+                        is_target_traffic = True
+                        traffic_label = 'bursty'
+                
+                # 4. Update traffic counters (untuk semua traffic, tidak hanya target)
+                if src_ip and dst_ip:
+                    flow_key = f"{dpid}-{src_ip}-{dst_ip}"
+                    byte_count = stat.byte_count
+                    packet_count = stat.packet_count
+                    
+                    # Calculate deltas
+                    if flow_key in self.last_bytes:
+                        last_bytes, last_packets = self.last_bytes[flow_key]
+                        delta_bytes = max(0, byte_count - last_bytes)
+                        delta_packets = max(0, packet_count - last_packets)
+                    else:
+                        delta_bytes = byte_count
+                        delta_packets = packet_count
+                    
+                    # Update cache
+                    self.last_bytes[flow_key] = (byte_count, packet_count)
+                    self.last_bytes_timestamp[flow_key] = current_time
+                    
+                    # 5. Insert ke DB jika ada traffic DAN ini traffic target kita
+                    if delta_bytes > 0 and is_target_traffic:
+                        try:
+                            cur.execute("""
+                                INSERT INTO traffic.flow_stats_
+                                (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac,
+                                ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx,
+                                pkts_tx, pkts_rx, duration_sec, traffic_label)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """, (
+                                timestamp, dpid, src_ip, dst_ip,
+                                match.get('eth_src'), match.get('eth_dst'),
+                                match.get('ip_proto', 17),
+                                match.get('tcp_src') or match.get('udp_src') or 0,
+                                match.get('tcp_dst') or match.get('udp_dst') or 0,
+                                delta_bytes, delta_bytes,
+                                delta_packets, delta_packets,
+                                stat.duration_sec,  # JANGAN hardcode 1.0!
+                                traffic_label
+                            ))
+                        except Exception as e:
+                            self.logger.debug(f"DB insert error for dpid {dpid}: {e}")
             
-            match = stat.match
+            conn.commit()
+            cur.close()
             
-            # Extract IP addresses
-            src_ip = match.get('ipv4_src')
-            dst_ip = match.get('ipv4_dst')
+            # Debug logging untuk memastikan semua switch tercatat
+            if random.random() < 0.1:  # Log 10% dari waktu
+                dpids_with_traffic = set()
+                for flow_key in self.last_bytes.keys():
+                    parts = flow_key.split('-')
+                    if len(parts) >= 1:
+                        try:
+                            dpids_with_traffic.add(int(parts[0]))
+                        except:
+                            pass
+                
+                if dpids_with_traffic:
+                    self.logger.debug(f"📊 Active switches: {sorted(dpids_with_traffic)}")
             
-            # If no IP, try to resolve from MAC
-            if not src_ip:
-                src_mac = match.get('eth_src')
-                if src_mac:
-                    src_ip = self._resolve_ip(src_mac)
-            
-            if not dst_ip:
-                dst_mac = match.get('eth_dst')
-                if dst_mac:
-                    dst_ip = self._resolve_ip(dst_mac)
-            
-            # Filter hanya traffic H1/H3 ke H2
-            if not dst_ip or dst_ip != '10.0.0.2':
-                continue
-            
-            if not src_ip or src_ip not in ['10.0.0.1', '10.0.0.3']:
-                continue
-            
-            # Update traffic counters
-            flow_key = f"{dpid}-{src_ip}-{dst_ip}"
-            byte_count = stat.byte_count
-            packet_count = stat.packet_count
-            
-            # Calculate deltas
-            if flow_key in self.last_bytes:
-                last_bytes, last_packets = self.last_bytes[flow_key]
-                delta_bytes = max(0, byte_count - last_bytes)
-                delta_packets = max(0, packet_count - last_packets)
-            else:
-                delta_bytes = byte_count
-                delta_packets = packet_count
-            
-            # Update cache
-            self.last_bytes[flow_key] = (byte_count, packet_count)
-            self.last_bytes_timestamp[flow_key] = current_time
-            
-            # Insert ke DB jika ada traffic
-            if delta_bytes > 0:
-                self._insert_flow_stats(dpid, src_ip, dst_ip, match, 
-                                      delta_bytes, delta_packets, stat.duration_sec)
+        except Exception as e:
+            self.logger.error(f"Flow stats processing error: {e}")
+        finally:
+            self.return_db_connection(conn)
     
     def _insert_flow_stats(self, dpid, src_ip, dst_ip, match, delta_bytes, delta_packets, duration):
         """Insert flow statistics ke database"""
@@ -835,8 +891,23 @@ class VoIPSmartController(app_manager.RyuApp):
             self.return_db_connection(conn)
     
     def _resolve_ip(self, mac):
-        """Resolve IP dari MAC address"""
-        return self.ip_to_mac.get(mac)
+        """Resolve IP dari MAC address - versi lebih robust"""
+        if not mac:
+            return None
+        
+        # Coba dari cache
+        ip = self.ip_to_mac.get(mac)
+        if ip:
+            return ip
+        
+        # Coba reverse lookup dari cache yang ada
+        for cached_ip, cached_mac in self.ip_to_mac.items():
+            if cached_mac == mac:
+                return cached_ip
+        
+        # Jika tidak ditemukan, coba kueri ARP table switch (jika ada)
+        # Fallback: return None
+        return None
 
     # =================================================================
     # PACKET HANDLERS (Unchanged from your working code)
