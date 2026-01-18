@@ -611,18 +611,20 @@ class VoIPSmartController(app_manager.RyuApp):
     # =================================================================
     # NEW DYNAMIC DETECTION HELPER (NO HARDCODE)
     # =================================================================
+    # =================================================================
+    # REVISI: _get_active_spines_for_flow (FIX LEAF KILLING ISSUE)
+    # =================================================================
     def _get_active_spines_for_flow(self, src_ip, dst_ip):
         """
         Mendeteksi Spine mana yang sedang membawa trafik src->dst.
-        Logic Update: Parsing key format baru dengan 4 komponen.
+        REVISI: Hanya mengembalikan DPID 1, 2, atau 3. Mengabaikan Leaf.
         """
         active_spines = []
         
         for flow_key, (bytes_count, pkts) in self.last_bytes.items():
-            # Parse Key: dpid-src-dst-prio
+            # Parse Key
             try:
                 parts = flow_key.split('-')
-                # Kita butuh handle jika formatnya 3 (lama) atau 4 (baru)
                 if len(parts) == 4:
                     dpid_str, f_src, f_dst, _ = parts
                 elif len(parts) == 3:
@@ -634,30 +636,31 @@ class VoIPSmartController(app_manager.RyuApp):
             except ValueError:
                 continue
 
-            # Filter hanya untuk flow target
+            # 1. Filter Flow yang tidak sesuai
             if f_src != src_ip or f_dst != dst_ip:
                 continue
                 
             if bytes_count <= 0:
                 continue
 
-            # --- LOGIC DETEKSI LEAF VS SPINE (Sama seperti sebelumnya) ---
+            # 2. [PENTING] FILTER LEAF SWITCH
+            # Jangan pernah masukkan DPID > 3 (Leaf 4 & 5) ke dalam target "KILL"
+            if dpid > 3:
+                continue
+
+            # 3. Validasi Link Port (Opsional, tapi bagus dipertahankan)
             src_mac = self.ip_to_mac.get(src_ip)
             if not src_mac: continue
             
             in_port = self.mac_to_port.get(dpid, {}).get(src_mac)
-            if in_port is None: continue
-
+            
+            # Jika switch punya link ke switch lain (indikasi spine/forwarder)
             is_link_port = False
             if self.net.has_node(dpid):
-                for neighbor in self.net[dpid]:
-                    if self.net[dpid][neighbor]['port'] == in_port:
-                        is_link_port = True
-                        break
-            
-            if is_link_port:
+                # Kalau flow masuk dari port yang terhubung ke switch lain, catat
                 active_spines.append(dpid)
         
+        # Gunakan set() agar dpid unik
         return list(set(active_spines))
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
