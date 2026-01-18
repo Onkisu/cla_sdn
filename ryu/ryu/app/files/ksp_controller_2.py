@@ -126,13 +126,13 @@ class VoIPSmartController(app_manager.RyuApp):
     # 2. FORECAST MONITORING (SYMMETRICAL BREAK-BEFORE-MAKE)
     # =================================================================
     def _monitor_forecast_smart(self):
-        self.logger.info("👁️  AI Watchdog: Stability Check Logic Added (5s Wait)")
+        self.logger.info("👁️  AI Watchdog: Stability Check Logic Added")
         
         target_src = '10.0.0.1'
         target_dst = '10.0.0.2'
 
         while True:
-            hub.sleep(1.0) # Cycle 1 detik
+            hub.sleep(1.0) 
             
             # --- STAGE 1: IDLE (Monitoring Burst) ---
             if self.reroute_stage == 'IDLE':
@@ -146,14 +146,13 @@ class VoIPSmartController(app_manager.RyuApp):
 
                     if result:
                         pred_bps = float(result[0])
-                        # DETEKSI BURST
                         if pred_bps > BURST_THRESHOLD_BPS:
+                            # HANYA AMBIL SPINE (1, 2, 3). LEAF (4, 5) DIABAIKAN.
                             current_spines = self._get_active_spines_for_flow(target_src, target_dst)
                             if not current_spines: continue 
 
-                            self.logger.warning(f"🚀 BURST DETECTED ({pred_bps:.0f}). KILLING Active Spines...")
+                            self.logger.warning(f"🚀 BURST ({pred_bps:.0f}). REROUTING...")
                             
-                            # Matikan jalur aktif
                             for sp_dpid in current_spines:
                                 self._emergency_stop_flow(sp_dpid, target_src, target_dst)
                             
@@ -164,22 +163,22 @@ class VoIPSmartController(app_manager.RyuApp):
                 except Exception as e:
                     self.logger.error(f"DB Error: {e}")
 
-            # --- STAGE 2: VERIFYING SILENCE (Sebelum Reroute) ---
+            # --- STAGE 2: VERIFYING SILENCE ---
             elif self.reroute_stage == 'VERIFYING':
                 self.silence_check_counter += 1
                 if self._are_spines_silent(self.stopped_spines, target_src, target_dst):
-                    self.logger.info(f"✅ SILENCE CONFIRMED. Rerouting...")
-                    avoid_node = self.stopped_spines[0] 
+                    self.logger.info(f"✅ Path Clear. Installing Reroute...")
+                    # Jika spine 3 macet, pindah ke jalur lain
+                    avoid_node = self.stopped_spines[0] if self.stopped_spines else 3
                     self.perform_dynamic_reroute(target_src, target_dst, avoid_node, self.trigger_val_cache)
                     
                     self.reroute_stage = 'REROUTED'
-                    self.last_state_change_time = time.time()
-                    self.stability_counter = 0 # Reset counter stabilitas
+                    self.stability_counter = 0 
                 else:
                     if self.silence_check_counter % 3 == 0:
                          for sp in self.stopped_spines: self._emergency_stop_flow(sp, target_src, target_dst)
 
-            # --- STAGE 3: REROUTED (Monitoring Stabilisasi & Revert) ---
+            # --- STAGE 3: REROUTED (Monitoring Stabilitas) ---
             elif self.reroute_stage == 'REROUTED':
                 conn = self.get_db_conn()
                 if not conn: continue
@@ -192,20 +191,16 @@ class VoIPSmartController(app_manager.RyuApp):
                     if result:
                         pred_bps = float(result[0])
                         
-                        # --- LOGIKA BARU: STABILITY CHECK ---
+                        # LOGIKA STABILITAS FINAL
                         if pred_bps <= HYSTERESIS_LOWER_BPS:
-                            # Jika trafik rendah, naikkan counter
                             self.stability_counter += 1
-                            self.logger.info(f"📉 Traffic Low. Stability Check: {self.stability_counter}/{self.required_stable_cycles}")
+                            self.logger.info(f"📉 Traffic Calm. Stability: {self.stability_counter}/{self.required_stable_cycles}")
                             
-                            # Cek apakah sudah stabil CUKUP LAMA (misal 5 detik)
                             if self.stability_counter >= self.required_stable_cycles:
-                                self.logger.info("🛡️  TRAFFIC STABLE. Initiating REVERT to Spine 3...")
+                                self.logger.info("🛡️  STABLE. Cleaning Backup Paths...")
                                 
-                                # Matikan jalur Backup
+                                # Matikan jalur Reroute/Backup SEBELUM Revert
                                 current_spines = self._get_active_spines_for_flow(target_src, target_dst)
-                                self.logger.warning(f"⛔ STOPPING BACKUP PATH: {current_spines}")
-                                
                                 for sp_dpid in current_spines:
                                     self._emergency_stop_flow(sp_dpid, target_src, target_dst)
                                     
@@ -213,28 +208,27 @@ class VoIPSmartController(app_manager.RyuApp):
                                 self.reroute_stage = 'REVERT_VERIFY'
                                 self.silence_check_counter = 0
                         else:
-                            # Jika trafik TINGGI lagi (Burst susulan), RESET counter!
+                            # RESET JIKA TIDAK STABIL
                             if self.stability_counter > 0:
-                                self.logger.warning("⚠️  Burst detected during stability check! Resetting timer.")
+                                self.logger.warning(f"⚠️  Unstable! Resetting timer. ({pred_bps:.0f})")
                             self.stability_counter = 0
 
                 except Exception as e:
-                     self.logger.error(f"Revert Logic Error: {e}")
+                     self.logger.error(f"Logic Error: {e}")
 
             # --- STAGE 4: REVERT VERIFY ---
             elif self.reroute_stage == 'REVERT_VERIFY':
                 self.silence_check_counter += 1
                 
                 if self._are_spines_silent(self.stopped_spines, target_src, target_dst):
-                    self.logger.info(f"✅ BACKUP SILENT. Restoring Spine 3...")
+                    self.logger.info(f"✅ Backup Drained. Executing Revert...")
                     self.perform_dynamic_revert(target_src, target_dst)
                     
                     self.reroute_stage = 'IDLE'
-                    self.last_state_change_time = time.time()
                     self.stability_counter = 0
                 else:
-                    self.logger.info(f"⏳ Waiting for backup to drain...")
-                    if self.silence_check_counter % 3 == 0:
+                    self.logger.info(f"⏳ Draining backup path...")
+                    if self.silence_check_counter % 2 == 0:
                          for sp in self.stopped_spines: self._emergency_stop_flow(sp, target_src, target_dst)
 
     # =================================================================
@@ -299,41 +293,42 @@ class VoIPSmartController(app_manager.RyuApp):
         
         return all_silent
 
-    def perform_dynamic_reroute(self, src_ip, dst_ip, avoid_dpid, trigger_val):
-        """Cari jalur baru menghindari avoid_dpid"""
-        src_sw = 4 
-        dst_sw = 5 
+    def perform_dynamic_revert(self, src_ip, dst_ip):
+        """
+        Revert ke Spine 3 dengan metode 'Clean-First' (Anti-Loop).
+        """
+        src_sw = 4
+        dst_sw = 5
+        preferred_spine = 3 
         
         try:
-            # Ambil semua jalur simple
-            paths = list(nx.shortest_simple_paths(self.net, src_sw, dst_sw))
+            target_path = [src_sw, preferred_spine, dst_sw]
+            self.logger.info(f"🔙 REVERT TARGET: {target_path}")
             
-            # Filter: Cari path yang TIDAK lewat 'avoid_dpid'
-            # Jika avoid_dpid = 3, dia akan pilih path yang lewat 1 atau 2
-            alt_path = next((p for p in paths if avoid_dpid not in p), None)
+            # [LANGKAH KUNCI] 
+            # Hapus paksa flow di Spine 1 & Spine 2.
+            # Agar H1 tidak punya pilihan lain selain menunggu Spine 3 siap.
+            # H3 TIDAK AKAN TERGANGGU karena _emergency_stop_flow memfilter IP src H1.
+            self._emergency_stop_flow(1, src_ip, dst_ip)
+            self._emergency_stop_flow(2, src_ip, dst_ip)
             
-            if alt_path:
-                self.logger.info(f"🛣️  REROUTING {src_ip}->{dst_ip} via {alt_path}")
-                
-                # Install Flow Baru
-                for i in range(len(alt_path) - 1, 0, -1):
-                    curr = alt_path[i-1]
-                    nxt = alt_path[i]
-                    if self.net.has_edge(curr, nxt):
-                        out_port = self.net[curr][nxt]['port']
-                        dp = self.datapaths.get(curr)
-                        if dp:
-                            self._install_reroute_flow(dp, out_port) 
-                            self._send_barrier(dp)
-                
-                self.current_reroute_path = alt_path
-                self.congestion_active = True
-                self.insert_event_log("REROUTE_DYN", f"Path: {alt_path}", trigger_val)
-            else:
-                self.logger.warning("No alternative path found!")
+            # Install Flow Spine 3 (Dari belakang: 5 -> 3 -> 4)
+            for i in range(len(target_path) - 1, 0, -1):
+                curr = target_path[i-1]
+                nxt = target_path[i]
+                if self.net.has_edge(curr, nxt):
+                    out_port = self.net[curr][nxt]['port']
+                    dp = self.datapaths.get(curr)
+                    if dp:
+                        self._install_reroute_flow(dp, out_port) 
+                        self._send_barrier(dp)
+            
+            self.current_reroute_path = target_path
+            self.congestion_active = False 
+            self.insert_event_log("REVERT_DONE", f"Restored: {target_path}", 0)
 
         except Exception as e:
-            self.logger.error(f"Reroute Fail: {e}")
+            self.logger.error(f"Revert Fail: {e}")
 
     # =================================================================
     # NEW HELPERS FOR REVERT
