@@ -152,6 +152,14 @@ class VoIPSmartController(app_manager.RyuApp):
         if self.db_pool and conn:
             self.db_pool.putconn(conn)
 
+    def _write_state_file(self, data):
+        """Tulis state ke file untuk monitoring"""
+        try:
+            data['timestamp'] = datetime.now().isoformat()
+            with open(STATE_FILE, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            self.logger.debug(f"Failed to write state file: {e}")
     # =================================================================
     # HEALTH MONITOR & STUCK DETECTION
     # =================================================================
