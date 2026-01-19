@@ -20,6 +20,7 @@ from datetime import datetime
 import threading
 import time
 import json
+import random
 import os
 
 # ==========================================
@@ -242,7 +243,7 @@ class VoIPSmartController(app_manager.RyuApp):
     # SAFE FORECAST MONITORING (BREAK-BEFORE-MAKE)
     # =================================================================
     def _monitor_forecast_safe(self):
-        """Main logic dengan deadlock protection"""
+        """FIXED VERSION: Break-Before-Make dengan timeout protection"""
         target_src = '10.0.0.1'
         target_dst = '10.0.0.2'
         
@@ -253,6 +254,7 @@ class VoIPSmartController(app_manager.RyuApp):
             
             with self.lock:
                 current_stage = self.reroute_stage
+                stage_duration = time.time() - self.stage_start_time
                 
                 # --- STAGE 1: IDLE (Monitor for burst) ---
                 if current_stage == 'IDLE':
@@ -274,10 +276,13 @@ class VoIPSmartController(app_manager.RyuApp):
                         
                         # BREAK PHASE: Stop semua flow di spine aktif
                         for sp_dpid in current_spines:
-                            self._emergency_stop_flow(sp_dpid, target_src, target_dst)
+                            self._emergency_stop_flow_fixed(sp_dpid, target_src, target_dst)
                         
                         self.stopped_spines = current_spines
                         self.trigger_val_cache = pred_bps
+                        
+                        # CLEAN CACHE untuk spine yang di-stop
+                        self._clean_cache_for_spines(current_spines, target_src, target_dst)
                         
                         # Pindah ke stage VERIFYING_SILENCE
                         self.reroute_stage = 'VERIFYING_SILENCE'
@@ -286,7 +291,7 @@ class VoIPSmartController(app_manager.RyuApp):
                         
                         # Log dan update state
                         self._log_event("BREAK_STARTED", f"Stopped spines: {current_spines}", pred_bps)
-                        write_state_file({
+                        self._write_state_file({
                             'state': 'VERIFYING_SILENCE',
                             'stopped_spines': current_spines,
                             'pred_bps': pred_bps
@@ -296,18 +301,22 @@ class VoIPSmartController(app_manager.RyuApp):
                 elif current_stage == 'VERIFYING_SILENCE':
                     self.silence_check_counter += 1
                     
-                    # Cek apakah semua spine sudah silent
-                    all_silent = self._are_spines_silent(self.stopped_spines, target_src, target_dst)
+                    # TIMEOUT PROTECTION: Max 10 detik
+                    if self.silence_check_counter > 10:
+                        self.logger.warning(f"⚠️ SILENCE VERIFICATION TIMEOUT ({self.silence_check_counter}s). FORCING CONTINUE...")
+                        all_silent = True  # Force continue
+                    else:
+                        all_silent = self._are_spines_silent_fixed(self.stopped_spines, target_src, target_dst)
                     
                     if all_silent:
-                        self.logger.info(f"✅ All spines silent. Starting MAKE phase...")
+                        self.logger.info(f"✅ Path clear. Starting MAKE phase...")
                         
-                        # Tentukan spine yang dihindari (biasanya yang macet)
+                        # Tentukan spine yang dihindari
                         avoid_node = self.stopped_spines[0] if self.stopped_spines else 3
                         
                         # MAKE PHASE: Install jalur baru
                         success = self.perform_dynamic_reroute(target_src, target_dst, avoid_node, 
-                                                             self.trigger_val_cache)
+                                                            self.trigger_val_cache)
                         
                         if success:
                             self.reroute_stage = 'REROUTED'
@@ -317,23 +326,27 @@ class VoIPSmartController(app_manager.RyuApp):
                             self.last_reroute_time = time.time()
                             self.stats['reroute_count'] += 1
                             
-                            write_state_file({
+                            self._log_event("REROUTE_COMPLETE", 
+                                        f"Path: {self.current_reroute_path}", 
+                                        self.trigger_val_cache)
+                            self._write_state_file({
                                 'state': 'REROUTED',
                                 'current_path': self.current_reroute_path,
                                 'congestion': True
                             })
                         else:
-                            # Jika gagal, fallback ke IDLE
-                            self.logger.error("❌ Reroute installation failed. Falling back...")
-                            self._emergency_fallback_to_spine3()
+                            # Jika gagal, fallback ke default path
+                            self.logger.error("❌ Reroute installation failed. Fallback to default...")
+                            self._force_install_default_path()
                             self.reroute_stage = 'IDLE'
                     else:
-                        # Jika belum silent, cek timeout
-                        if self.silence_check_counter > 10:  # 10 detik timeout
-                            self.logger.warning("⚠️ Silence verification timeout")
-                            # Force stop lagi untuk memastikan
-                            for sp in self.stopped_spines:
-                                self._emergency_stop_flow(sp, target_src, target_dst)
+                        # Log progress jika belum silent
+                        if self.silence_check_counter % 3 == 0:
+                            self.logger.info(f"⏳ Waiting for silence... {self.silence_check_counter}/10s")
+                        
+                        # Periodic cleanup untuk pastikan cache fresh
+                        if self.silence_check_counter % 5 == 0:
+                            self._clean_cache_for_spines(self.stopped_spines, target_src, target_dst)
                 
                 # --- STAGE 3: REROUTED (Monitor for stability) ---
                 elif current_stage == 'REROUTED':
@@ -345,7 +358,7 @@ class VoIPSmartController(app_manager.RyuApp):
                     if pred_bps <= HYSTERESIS_LOWER_BPS:
                         self.stability_counter += 1
                         
-                        if self.stability_counter % 5 == 0:
+                        if self.stability_counter % 3 == 0:  # Log setiap 3 cycle
                             self.logger.info(f"📉 Traffic calming ({pred_bps:.0f} bps). Stability: {self.stability_counter}/{self.required_stable_cycles}")
                         
                         if self.stability_counter >= self.required_stable_cycles:
@@ -353,18 +366,33 @@ class VoIPSmartController(app_manager.RyuApp):
                             
                             # BREAK PHASE untuk revert: Stop jalur backup
                             current_backup_spines = self._get_active_spines_for_flow(target_src, target_dst)
-                            for sp_dpid in current_backup_spines:
-                                self._emergency_stop_flow(sp_dpid, target_src, target_dst)
-                            
-                            self.stopped_spines = current_backup_spines
-                            self.reroute_stage = 'REVERT_VERIFY'
-                            self.stage_start_time = time.time()
-                            self.silence_check_counter = 0
-                            
-                            write_state_file({
-                                'state': 'REVERT_VERIFY',
-                                'stopped_spines': current_backup_spines
-                            })
+                            if current_backup_spines:
+                                for sp_dpid in current_backup_spines:
+                                    self._emergency_stop_flow_fixed(sp_dpid, target_src, target_dst)
+                                
+                                self.stopped_spines = current_backup_spines
+                                
+                                # Clean cache untuk backup spines
+                                self._clean_cache_for_spines(current_backup_spines, target_src, target_dst)
+                                
+                                self.reroute_stage = 'REVERT_VERIFY'
+                                self.stage_start_time = time.time()
+                                self.silence_check_counter = 0
+                                
+                                self._log_event("REVERT_STARTED", 
+                                            f"Stopping backup spines: {current_backup_spines}", 
+                                            0)
+                                self._write_state_file({
+                                    'state': 'REVERT_VERIFY',
+                                    'stopped_spines': current_backup_spines
+                                })
+                            else:
+                                # Jika tidak ada backup spines, langsung revert
+                                self.logger.info("⚠️ No backup spines found. Direct revert...")
+                                success = self.perform_dynamic_revert(target_src, target_dst)
+                                if success:
+                                    self.reroute_stage = 'IDLE'
+                                    self.congestion_active = False
                     else:
                         # Reset jika traffic naik lagi
                         if self.stability_counter > 0:
@@ -375,8 +403,12 @@ class VoIPSmartController(app_manager.RyuApp):
                 elif current_stage == 'REVERT_VERIFY':
                     self.silence_check_counter += 1
                     
-                    # Cek apakah backup path sudah silent
-                    all_silent = self._are_spines_silent(self.stopped_spines, target_src, target_dst)
+                    # TIMEOUT PROTECTION: Max 15 detik
+                    if self.silence_check_counter > 15:
+                        self.logger.warning(f"⚠️ REVERT VERIFICATION TIMEOUT ({self.silence_check_counter}s). FORCING REVERT...")
+                        all_silent = True  # Force revert
+                    else:
+                        all_silent = self._are_spines_silent_fixed(self.stopped_spines, target_src, target_dst)
                     
                     if all_silent:
                         self.logger.info("✅ Backup path silent. Starting revert MAKE phase...")
@@ -391,25 +423,27 @@ class VoIPSmartController(app_manager.RyuApp):
                             self.stats['revert_count'] += 1
                             self.stability_counter = 0
                             
-                            write_state_file({
+                            self._log_event("REVERT_COMPLETE", 
+                                        f"Restored path: {self.current_reroute_path}", 
+                                        0)
+                            self._write_state_file({
                                 'state': 'IDLE',
                                 'current_path': self.current_reroute_path,
                                 'congestion': False
                             })
                         else:
                             self.logger.error("❌ Revert failed. Emergency fallback...")
-                            self._emergency_fallback_to_spine3()
+                            self._force_install_default_path()
                             self.reroute_stage = 'IDLE'
                     else:
                         # Jika belum silent, drain dengan periodic stop
                         if self.silence_check_counter % 3 == 0:
                             for sp in self.stopped_spines:
-                                self._emergency_stop_flow(sp, target_src, target_dst)
+                                self._emergency_stop_flow_fixed(sp, target_src, target_dst)
                         
-                        if self.silence_check_counter > 15:  # Timeout 15 detik
-                            self.logger.warning("⚠️ Revert verification timeout. Force revert...")
-                            self.perform_dynamic_revert(target_src, target_dst)
-                            self.reroute_stage = 'IDLE'
+                        # Log progress
+                        if self.silence_check_counter % 5 == 0:
+                            self.logger.info(f"⏳ Draining backup path... {self.silence_check_counter}/15s")
 
     def _get_latest_prediction(self):
         """Ambil prediksi terbaru dari database dengan timeout"""
@@ -440,46 +474,7 @@ class VoIPSmartController(app_manager.RyuApp):
     # =================================================================
     # CORE REROUTE/REVERT FUNCTIONS
     # =================================================================
-    def _emergency_stop_flow(self, dpid_target, src_ip, dst_ip):
-        """Delete flow spesifik tanpa mengganggu flow lain"""
-        with self.lock:
-            if dpid_target not in self.datapaths:
-                return
-            
-            dp = self.datapaths[dpid_target]
-            parser = dp.ofproto_parser
-            
-            # Match spesifik untuk H1->H2
-            match = parser.OFPMatch(
-                eth_type=0x0800,
-                ipv4_src=src_ip,
-                ipv4_dst=dst_ip
-            )
-            
-            # Gunakan DELETE_STRICT untuk menghapus exact match
-            mod = parser.OFPFlowMod(
-                datapath=dp,
-                command=dp.ofproto.OFPFC_DELETE_STRICT,
-                out_port=dp.ofproto.OFPP_ANY,
-                out_group=dp.ofproto.OFPG_ANY,
-                match=match,
-                priority=PRIORITY_REROUTE  # Hanya hapus flow dengan priority reroute
-            )
-            dp.send_msg(mod)
-            
-            # Juga hapus flow dengan priority user (10) jika ada
-            mod_user = parser.OFPFlowMod(
-                datapath=dp,
-                command=dp.ofproto.OFPFC_DELETE_STRICT,
-                out_port=dp.ofproto.OFPP_ANY,
-                out_group=dp.ofproto.OFPG_ANY,
-                match=match,
-                priority=PRIORITY_USER
-            )
-            dp.send_msg(mod_user)
-            
-            self._send_barrier(dp)
-            self.logger.debug(f"Stopped flow on DPID {dpid_target}")
+    
 
     def perform_dynamic_reroute(self, src_ip, dst_ip, avoid_dpid, trigger_val):
         """
@@ -596,6 +591,130 @@ class VoIPSmartController(app_manager.RyuApp):
             except Exception as e:
                 self.logger.error(f"Revert failed: {e}")
                 return False
+    
+
+    def _emergency_stop_flow_fixed(self, dpid_target, src_ip, dst_ip):
+        """Stop flow dengan cache cleanup"""
+        if dpid_target not in self.datapaths:
+            return
+        
+        dp = self.datapaths[dpid_target]
+        parser = dp.ofproto_parser
+        
+        # 1. CLEAN CACHE DULU sebelum delete flow
+        self._clean_cache_for_spines([dpid_target], src_ip, dst_ip)
+        
+        # 2. Delete flow dari switch
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ipv4_src=src_ip,
+            ipv4_dst=dst_ip
+        )
+        
+        # Delete flow dengan priority reroute
+        mod_reroute = parser.OFPFlowMod(
+            datapath=dp,
+            command=dp.ofproto.OFPFC_DELETE_STRICT,
+            out_port=dp.ofproto.OFPP_ANY,
+            out_group=dp.ofproto.OFPG_ANY,
+            match=match,
+            priority=PRIORITY_REROUTE
+        )
+        dp.send_msg(mod_reroute)
+        
+        # Juga delete flow dengan priority user
+        mod_user = parser.OFPFlowMod(
+            datapath=dp,
+            command=dp.ofproto.OFPFC_DELETE_STRICT,
+            out_port=dp.ofproto.OFPP_ANY,
+            out_group=dp.ofproto.OFPG_ANY,
+            match=match,
+            priority=PRIORITY_USER
+        )
+        dp.send_msg(mod_user)
+        
+        self._send_barrier(dp)
+        self.logger.debug(f"Stopped flow on DPID {dpid_target} and cleaned cache")
+
+    def _clean_cache_for_spines(self, spines, src, dst):
+        """Bersihkan cache untuk spine-spine tertentu"""
+        current_time = time.time()
+        
+        for dpid in spines:
+            prefix = f"{dpid}-{src}-{dst}"
+            
+            # Hapus semua entry yang match
+            keys_to_delete = [k for k in self.last_bytes.keys() if k.startswith(prefix)]
+            for key in keys_to_delete:
+                self.last_bytes.pop(key, None)
+                self.last_bytes_timestamp.pop(key, None)
+            
+            # Juga hapus dari silence cache
+            if hasattr(self, 'temp_silence_cache'):
+                silence_keys = [k for k in self.temp_silence_cache.keys() 
+                            if k.startswith(f"silence_check_{prefix}")]
+                for key in silence_keys:
+                    self.temp_silence_cache.pop(key, None)
+
+    def _are_spines_silent_fixed(self, dpids_list, src, dst):
+        """FIXED: Cek silence dengan data freshness"""
+        if not dpids_list:
+            return True  # Empty list = silent
+        
+        current_time = time.time()
+        
+        for dpid in dpids_list:
+            prefix = f"{dpid}-{src}-{dst}"
+            matching_keys = [k for k in self.last_bytes.keys() if k.startswith(prefix)]
+            
+            if not matching_keys:
+                # Tidak ada entry = silent
+                continue
+            
+            # Cek setiap entry untuk data FRESH (≤ 2 detik)
+            for key in matching_keys:
+                last_update = self.last_bytes_timestamp.get(key, 0)
+                
+                # Jika data ≤ 2 detik yang lalu = NOT SILENT
+                if current_time - last_update <= 2:
+                    # Data fresh, cek apakah bytes bertambah
+                    curr_bytes, _ = self.last_bytes[key]
+                    
+                    # Bandingkan dengan cache sebelumnya
+                    cache_key = f"silence_check_{key}"
+                    prev_bytes = getattr(self, 'temp_silence_cache', {}).get(cache_key, -1)
+                    
+                    if not hasattr(self, 'temp_silence_cache'):
+                        self.temp_silence_cache = {}
+                    
+                    if prev_bytes == -1:
+                        # First check, set cache dan anggap NOT silent
+                        self.temp_silence_cache[cache_key] = curr_bytes
+                        return False
+                    
+                    if curr_bytes != prev_bytes:
+                        # Bytes berubah = NOT silent
+                        self.temp_silence_cache[cache_key] = curr_bytes
+                        return False
+        
+        return True  # Semua spine silent
+
+    def _force_install_default_path(self):
+        """Force install path default 4->3->5"""
+        try:
+            path = [4, 3, 5]
+            for i in range(len(path) - 1, 0, -1):
+                curr = path[i-1]
+                nxt = path[i]
+                if self.net.has_edge(curr, nxt):
+                    out_port = self.net[curr][nxt]['port']
+                    dp = self.datapaths.get(curr)
+                    if dp:
+                        self._install_flow_specific(dp, '10.0.0.1', '10.0.0.2', 
+                                                out_port, PRIORITY_REROUTE, COOKIE_REROUTE)
+            self.logger.info("🔄 Default path (4->3->5) force installed")
+        except Exception as e:
+            self.logger.error(f"Force install failed: {e}")
 
     # =================================================================
     # HELPER FUNCTIONS
@@ -671,39 +790,20 @@ class VoIPSmartController(app_manager.RyuApp):
         matching_keys = [k for k in self.last_bytes.keys() if k.startswith(prefix)]
         
         if not matching_keys:
-            return True  # No flows = silent
-        
-        for key in matching_keys:
-            # Cek timestamp data
-            if current_time - self.last_bytes_timestamp.get(key, 0) > 5:
-                continue  # Data terlalu tua
-            
-            curr_bytes, _ = self.last_bytes[key]
-            
-            # Ambil dari cache untuk comparison
-            cache_key = f"silence_check_{key}"
-            prev_bytes = getattr(self, '_silence_cache', {}).get(cache_key, -1)
-            
-            if not hasattr(self, '_silence_cache'):
-                self._silence_cache = {}
-            self._silence_cache[cache_key] = curr_bytes
-            
-            # Jika ada perbedaan, berarti masih ada traffic
-            if curr_bytes != prev_bytes:
-                return False
-        
-        return True
-    
-    def _are_spines_silent(self, dpids_list, src, dst):
-        """Check multiple spines for silence"""
-        if not dpids_list:
+            # No flow entries at all -> silent
             return True
         
-        for dpid in dpids_list:
-            if not self._check_is_traffic_silent(dpid, src, dst):
+        # If there are flows, check if any has been updated in the last 3 seconds
+        for key in matching_keys:
+            last_update = self.last_bytes_timestamp.get(key, 0)
+            if current_time - last_update <= 3:
+                # Data is fresh (within 3 seconds) -> not silent
                 return False
         
+        # All flows are stale (older than 3 seconds) -> silent
         return True
+    
+    
     
     def _log_event(self, event_type, description, trigger_value):
         """Log event ke database"""
