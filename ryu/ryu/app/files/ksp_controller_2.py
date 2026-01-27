@@ -652,11 +652,25 @@ class VoIPSmartController(app_manager.RyuApp):
                 dst_mac = self.ip_to_mac.get(dst_ip, None)
                 
                 # Insert to DB (only if there's actual delta - FIX: prevents cumulative counts)
-                if delta_bytes > 0:
-                    self._insert_flow_stats(dpid, src_ip, dst_ip, match, 
-                                           delta_bytes, delta_packets, 
-                                           src_mac, dst_mac, time_diff)
-                    
+                # INSERT SEMUA FLOW H1 -> H2 (TERMESUK LEAF / DPID 5)
+                # === JALUR 1: VOIP H1 -> H2 (WAJIB MASUK, MESKI delta_bytes=0) ===
+                if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
+                    self._insert_flow_stats(
+                        dpid, src_ip, dst_ip, match,
+                        delta_bytes, delta_packets,
+                        src_mac, dst_mac,
+                        time_diff
+                    )
+
+                # === JALUR 2: TRAFFIC LAIN (H3, BURSTY, DLL) ===
+                elif delta_bytes > 0:
+                    self._insert_flow_stats(
+                        dpid, src_ip, dst_ip, match,
+                        delta_bytes, delta_packets,
+                        src_mac, dst_mac,
+                        time_diff
+                    )
+
         except Exception as e:
             self.logger.error(f"Flow stats error: {e}")
         finally:
