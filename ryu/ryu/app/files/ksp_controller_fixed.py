@@ -616,17 +616,27 @@ class VoIPSmartController(app_manager.RyuApp):
                 # Create unique flow key
                 flow_key = (dpid, src_ip, dst_ip)
                 
-                # Calculate delta
+                # Calculate delta for BYTES
                 current_bytes = stat.byte_count
-                last_bytes = self.last_bytes.get(flow_key, 0)
+                last_bytes = self.last_bytes.get(flow_key, current_bytes)  # FIX: Initialize to current on first seen
                 last_ts = self.last_bytes_timestamp.get(flow_key, current_time)
                 
                 delta_bytes = max(0, current_bytes - last_bytes)
                 time_diff = max(0.1, current_time - last_ts)
                 
+                # Calculate delta for PACKETS (FIX #2: Track packets properly)
+                current_packets = stat.packet_count
+                last_packets = getattr(self, 'last_packets', {}).get(flow_key, current_packets)
+                delta_packets = max(0, current_packets - last_packets)
+                
                 # Update tracking
                 self.last_bytes[flow_key] = current_bytes
                 self.last_bytes_timestamp[flow_key] = current_time
+                
+                # Track packets too (FIX #2)
+                if not hasattr(self, 'last_packets'):
+                    self.last_packets = {}
+                self.last_packets[flow_key] = current_packets
                 
                 # Calculate bps
                 bps = (delta_bytes * 8) / time_diff
@@ -637,10 +647,15 @@ class VoIPSmartController(app_manager.RyuApp):
                         self.spine_traffic[dpid] = bps
                         self.spine_traffic_last_update[dpid] = current_time
                 
-                # Insert to DB (only if significant traffic)
-                if delta_bytes > 100:
-                    self._insert_flow_stats(dpid, src_ip, dst_ip, match, delta_bytes, 
-                                           stat.packet_count - 0, 1.0)
+                # FIX #3: Resolve MACs from IP cache
+                src_mac = self.ip_to_mac.get(src_ip, None)
+                dst_mac = self.ip_to_mac.get(dst_ip, None)
+                
+                # Insert to DB (only if there's actual delta - FIX: prevents cumulative counts)
+                if delta_bytes > 0:
+                    self._insert_flow_stats(dpid, src_ip, dst_ip, match, 
+                                           delta_bytes, delta_packets, 
+                                           src_mac, dst_mac, time_diff)
                     
         except Exception as e:
             self.logger.error(f"Flow stats error: {e}")
@@ -652,6 +667,11 @@ class VoIPSmartController(app_manager.RyuApp):
         while True:
             hub.sleep(1)
             
+            # Debug: Log active datapaths every 10 seconds
+            if int(time.time()) % 10 == 0:
+                dpids = sorted(self.datapaths.keys())
+                self.logger.debug(f"📊 Monitoring DPIDs: {dpids}")
+            
             for dp in self.datapaths.values():
                 self._request_stats(dp)
 
@@ -661,7 +681,8 @@ class VoIPSmartController(app_manager.RyuApp):
         req = parser.OFPFlowStatsRequest(datapath)
         datapath.send_msg(req)
 
-    def _insert_flow_stats(self, dpid, src_ip, dst_ip, match, delta_bytes, delta_packets, duration):
+    def _insert_flow_stats(self, dpid, src_ip, dst_ip, match, delta_bytes, delta_packets, 
+                           src_mac, dst_mac, duration):
         """Insert flow statistics ke database"""
         conn = self.get_db_connection()
         if not conn:
@@ -677,13 +698,13 @@ class VoIPSmartController(app_manager.RyuApp):
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 datetime.now(), dpid, src_ip, dst_ip,
-                match.get('eth_src'), match.get('eth_dst'),
+                src_mac, dst_mac,  # FIX: Use resolved MACs
                 match.get('ip_proto', 17),
                 match.get('tcp_src') or match.get('udp_src') or 0,
                 match.get('tcp_dst') or match.get('udp_dst') or 0,
                 delta_bytes, delta_bytes,
-                delta_packets, delta_packets,
-                1.0,
+                delta_packets, delta_packets,  # FIX: Use actual delta_packets
+                duration,  # FIX: Use actual time_diff
                 'voip' if src_ip == '10.0.0.1' else 'bursty'
             ))
             conn.commit()
