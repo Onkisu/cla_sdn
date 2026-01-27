@@ -136,6 +136,10 @@ class VoIPSmartController(app_manager.RyuApp):
             'congestion': False,
             'current_spine': self.current_spine
         })
+        
+        # Install default H1->H2 flows after topology is discovered
+        self.default_flows_installed = False
+        hub.spawn_after(8, self._install_default_h1_h2_flows)
 
     def connect_database_pool(self):
         """Gunakan connection pooling untuk efisiensi"""
@@ -466,6 +470,37 @@ class VoIPSmartController(app_manager.RyuApp):
                     self.last_bytes.pop(key, None)
                     self.last_bytes_timestamp.pop(key, None)
 
+    def _install_default_h1_h2_flows(self):
+        """Install default H1->H2 flows via Spine 2 (default path) at startup"""
+        self.logger.info("🔧 Installing DEFAULT H1->H2 flows (Spine 2)...")
+        
+        # Wait for datapaths to be ready
+        max_wait = 10
+        waited = 0
+        while waited < max_wait:
+            if 2 in self.datapaths and 4 in self.datapaths:
+                break
+            hub.sleep(1)
+            waited += 1
+        
+        if 2 not in self.datapaths or 4 not in self.datapaths:
+            self.logger.error("❌ Cannot install default flows - datapaths not ready")
+            return
+        
+        # Install on Spine 2 (default spine)
+        success = self._install_h1_h2_flow_on_spine(2)
+        if success:
+            self.logger.info("✅ Spine 2 flow installed")
+        
+        # Install on Leaf 1 (point to Spine 2)
+        success = self._update_leaf1_output_port(2)
+        if success:
+            self.logger.info("✅ Leaf 1 routing installed (→ Spine 2)")
+        
+        self.default_flows_installed = True
+        self.logger.info("🟢 Default H1->H2 path established (via Spine 2)")
+
+
     # =================================================================
     # TOPOLOGY DISCOVERY
     # =================================================================
@@ -727,7 +762,27 @@ class VoIPSmartController(app_manager.RyuApp):
             src_ip = ip_pkt.src
             dst_ip = ip_pkt.dst
             
-            # H3 -> H2: Always use Spine 2 (port 3 on Leaf 3)
+            # H1 -> H2: Use current_spine (default: Spine 2, atau spine lain saat reroute)
+            if dpid == 4 and src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
+                # Port mapping: port 1->Spine1, port 2->Spine2, port 3->Spine3
+                spine_to_port = {1: 1, 2: 2, 3: 3}
+                out_port = spine_to_port.get(self.current_spine, 2)
+                
+                actions = [parser.OFPActionOutput(out_port)]
+                match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
+                
+                self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id, idle_timeout=0)
+                
+                data = None
+                if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+                    data = msg.data
+                
+                out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                        in_port=in_port, actions=actions, data=data)
+                datapath.send_msg(out)
+                return
+            
+            # H3 -> H2: Always use Spine 2 (port 2 on Leaf 3)
             if dpid == 6 and src_ip == '10.0.0.3':
                 actions = [parser.OFPActionOutput(2)]  # Port to Spine 2
                 match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
