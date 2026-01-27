@@ -140,8 +140,7 @@ class VoIPSmartController(app_manager.RyuApp):
         # Install default H1->H2 flows after topology is discovered
         self.default_flows_installed = False
         hub.spawn_after(8, self._install_default_h1_h2_flows)
-        hub.spawn_after(8, self._install_leaf2_default_flow)
-
+        
     def connect_database_pool(self):
         """Gunakan connection pooling untuk efisiensi"""
         try:
@@ -166,36 +165,6 @@ class VoIPSmartController(app_manager.RyuApp):
         """Kembalikan koneksi ke pool"""
         if self.db_pool and conn:
             self.db_pool.putconn(conn)
-
-
-    def _install_leaf2_default_flow(self):
-        if 5 not in self.datapaths:
-            self.logger.warning("DPID 5 not ready")
-            return
-
-        dp = self.datapaths[5]
-        parser = dp.ofproto_parser
-        ofproto = dp.ofproto
-
-        match = parser.OFPMatch(
-            eth_type=0x0800,
-            ipv4_dst='10.0.0.2'
-        )
-
-        actions = [parser.OFPActionOutput(1)]  # port ke H2 (sesuaikan topo)
-        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-
-        mod = parser.OFPFlowMod(
-            datapath=dp,
-            priority=PRIORITY_USER,
-            match=match,
-            instructions=inst,
-            idle_timeout=0,
-            hard_timeout=0
-        )
-
-        dp.send_msg(mod)
-        self.logger.info("✅ Default IPv4 flow installed on Leaf 2 (DPID 5)")
 
     # =================================================================
     # ATOMIC BREAK-BEFORE-MAKE IMPLEMENTATION
@@ -882,6 +851,39 @@ class VoIPSmartController(app_manager.RyuApp):
                 datapath.send_msg(out)
                 return
         
+
+        # FIX: Tambahkan logic untuk DPID 5 (Leaf 2) agar menggunakan Match IP
+        if dpid == 5 and ip_pkt:
+            src_ip = ip_pkt.src
+            dst_ip = ip_pkt.dst
+            
+            # Jika traffic menuju H2 (Host lokal di Leaf 2)
+            if dst_ip == '10.0.0.2':
+                # Port 2 mengarah ke H2 (Asumsi topologi: h2 terhubung ke port host)
+                # Anda perlu memastikan port host di Leaf 2 (biasanya port selain ke spine)
+                # Berdasarkan packet_in, kita bisa menggunakan logic mac_to_port atau hardcode jika tahu
+                
+                if dst in self.mac_to_port[dpid]:
+                    out_port = self.mac_to_port[dpid][dst]
+                else:
+                    out_port = ofproto.OFPP_FLOOD # Fallback
+                
+                if out_port != ofproto.OFPP_FLOOD:
+                    actions = [parser.OFPActionOutput(out_port)]
+                    # PENTING: Gunakan Match IP agar stats terekam
+                    match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
+                    
+                    self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id, idle_timeout=60)
+                    
+                    data = None
+                    if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+                        data = msg.data
+                    
+                    out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                            in_port=in_port, actions=actions, data=data)
+                    datapath.send_msg(out)
+                    return
+                    
         # Standard switching logic
         if dst in self.mac_to_port[dpid]:
             out_port = self.mac_to_port[dpid][dst]
