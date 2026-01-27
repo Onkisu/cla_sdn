@@ -140,6 +140,7 @@ class VoIPSmartController(app_manager.RyuApp):
         # Install default H1->H2 flows after topology is discovered
         self.default_flows_installed = False
         hub.spawn_after(8, self._install_default_h1_h2_flows)
+        hub.spawn_after(8, self._install_leaf2_default_flow)
 
     def connect_database_pool(self):
         """Gunakan connection pooling untuk efisiensi"""
@@ -165,6 +166,36 @@ class VoIPSmartController(app_manager.RyuApp):
         """Kembalikan koneksi ke pool"""
         if self.db_pool and conn:
             self.db_pool.putconn(conn)
+
+
+    def _install_leaf2_default_flow(self):
+        if 5 not in self.datapaths:
+            self.logger.warning("DPID 5 not ready")
+            return
+
+        dp = self.datapaths[5]
+        parser = dp.ofproto_parser
+        ofproto = dp.ofproto
+
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ipv4_dst='10.0.0.2'
+        )
+
+        actions = [parser.OFPActionOutput(1)]  # port ke H2 (sesuaikan topo)
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+
+        mod = parser.OFPFlowMod(
+            datapath=dp,
+            priority=PRIORITY_USER,
+            match=match,
+            instructions=inst,
+            idle_timeout=0,
+            hard_timeout=0
+        )
+
+        dp.send_msg(mod)
+        self.logger.info("✅ Default IPv4 flow installed on Leaf 2 (DPID 5)")
 
     # =================================================================
     # ATOMIC BREAK-BEFORE-MAKE IMPLEMENTATION
@@ -816,7 +847,7 @@ class VoIPSmartController(app_manager.RyuApp):
                                         in_port=in_port, actions=actions, data=data)
                 datapath.send_msg(out)
                 return
-            
+
             # H3 -> H2: Always use Spine 2 (port 2 on Leaf 3)
             if dpid == 6 and src_ip == '10.0.0.3':
                 actions = [parser.OFPActionOutput(2)]  # Port to Spine 2
