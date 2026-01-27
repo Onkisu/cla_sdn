@@ -7,7 +7,6 @@ from datetime import timedelta
 import time
 import warnings
 
-# Matikan warning pandas agar log bersih
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # =========================
@@ -16,207 +15,209 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 DB_URI = "postgresql://dev_one:hijack332.@127.0.0.1:5432/development"
 TABLE_FORECAST = "forecast_1h"
 
-# Konfigurasi Target
 TARGET = "throughput_bps"
-BURST_THRESHOLD_BPS = 120000 
-PREDICTION_HORIZON_SEC = 10 
-TRAIN_INTERVAL_SEC = 1800  # Train ulang setiap 30 menit
+BURST_THRESHOLD_BPS = 120000
+PREDICTION_HORIZON_SEC = 10
 
-# Global Variables (Menyimpan Model di RAM)
+TRAIN_INTERVAL_SEC = 1800        # 30 menit
+MIN_HISTORY_SEC = 3600           # ≥ 1 jam
+
 TRAINED_MODEL = None
 LAST_TRAIN_TIME = 0
 
 engine = create_engine(DB_URI)
 
 # =========================
-# 1. FETCH DATA (Flexible)
+# FETCH DATA
 # =========================
 def get_data(hours=1):
-    """
-    Mengambil data traffic.
-    - hours=6 untuk Training (agar pola siklus 30 menit terlihat)
-    - hours=1.5 untuk Prediction (agar query super cepat)
-    """
     query = f"""
-        with x as (
-            SELECT 
-                date_trunc('second', timestamp) as detik, 
-                dpid, 
-                max(bytes_tx) as total_bytes
+        WITH x AS (
+            SELECT
+                date_trunc('second', timestamp) AS detik,
+                dpid,
+                MAX(bytes_tx) AS total_bytes
             FROM traffic.flow_stats_
             WHERE timestamp >= NOW() - INTERVAL '{hours} hour'
             GROUP BY detik, dpid
         )
-        SELECT 
-            detik as ts, 
-            total_bytes * 8 as throughput_bps 
-        FROM x 
-        WHERE dpid = 5 
-        
+        SELECT detik AS ts, total_bytes * 8 AS throughput_bps
+        FROM x
+        WHERE dpid = 5
         ORDER BY ts ASC
     """
-
-    try:
-        df = pd.read_sql(query, engine)
-    except Exception as e:
-        print(f"❌ DB Error: {e}")
+    df = pd.read_sql(query, engine)
+    if df.empty:
         return None
-
-    if df.empty: return None
 
     df['ts'] = pd.to_datetime(df['ts'])
     df = df.set_index('ts')
-
-    # Resample ke 1 detik, isi bolong dengan nilai sebelumnya (ffill)
     df = df.resample('1s').max().ffill().fillna(0)
-    
     return df
 
 # =========================
-# 2. FEATURE ENGINEERING
+# FEATURE ENGINEERING (PURE LEARNING)
 # =========================
 def create_features(df, for_training=False):
-    data = df.copy()
+    d = df.copy()
 
-    # 1. Labeli State: 0 = Normal/Sepi, 1 = Burst
-    data['is_burst'] = (data[TARGET] > BURST_THRESHOLD_BPS).astype(int)
+    # burst state
+    d['is_burst'] = (d[TARGET] > BURST_THRESHOLD_BPS).astype(int)
 
-    # 2. Hitung "Consecutive Steady Seconds" (Fitur KUNCI)
-    group_id = data['is_burst'].cumsum()
-    data['consecutive_steady_sec'] = data.groupby(group_id).cumcount()
-    data.loc[data['is_burst'] == 1, 'consecutive_steady_sec'] = 0
+    # time since last burst
+    grp = d['is_burst'].cumsum()
+    d['consecutive_steady_sec'] = d.groupby(grp).cumcount()
+    d.loc[d['is_burst'] == 1, 'consecutive_steady_sec'] = 0
 
-    # 3. Rolling Statistics
-    data['roll_mean_30s'] = data[TARGET].rolling(window=30).mean()
-    data['roll_std_30s'] = data[TARGET].rolling(window=30).std()
-    
-    # 4. Lag Features
+    # non-linear temporal encoding (NO cycle knowledge)
+    d['steady_norm'] = d['consecutive_steady_sec'] / (d['consecutive_steady_sec'].max() + 1)
+    d['steady_sq'] = d['consecutive_steady_sec'] ** 2
+
+    # burst memory
+    d['burst_rate_5m'] = d['is_burst'].rolling(300).mean()
+    d['burst_rate_15m'] = d['is_burst'].rolling(900).mean()
+
+    # rolling stats
+    d['roll_mean_30s'] = d[TARGET].rolling(30).mean()
+    d['roll_std_30s'] = d[TARGET].rolling(30).std()
+
+    # lag
     for l in [1, 5, 10]:
-        data[f'lag_{l}'] = data[TARGET].shift(l)
+        d[f'lag_{l}'] = d[TARGET].shift(l)
 
-    # 5. Target Variable
     if for_training:
-        data['target_future'] = data[TARGET].shift(-PREDICTION_HORIZON_SEC)
-        data = data.dropna()
+        # EVENT TARGET (BUKAN REGRESSION)
+        d['burst_future'] = (
+            d[TARGET].shift(-PREDICTION_HORIZON_SEC) > BURST_THRESHOLD_BPS
+        ).astype(int)
+        d = d.dropna()
     else:
-        data = data.dropna(subset=['roll_mean_30s', 'lag_10'])
+        d = d.dropna(subset=['roll_mean_30s', 'lag_10'])
 
-    return data
+    return d
 
 # =========================
-# 3. TRAINING ROUTINE (Background Process)
+# TRAINING
 # =========================
 def train_model():
     global TRAINED_MODEL, LAST_TRAIN_TIME
-    
-    print("\n🧠 Starting Model Training (Wait)...")
+
+    print("\n🧠 Training Model...")
     start_t = time.time()
-    
-    # Ambil data 6 jam
+
     df = get_data(hours=6)
-    if df is None or len(df) < 1000:
-        print("⚠️ Not enough data to train.")
+    if df is None:
+        print("⚠️ No data.")
         return
 
-    # Buat Fitur
+    history_sec = (df.index.max() - df.index.min()).total_seconds()
+    if history_sec < MIN_HISTORY_SEC:
+        print("⏳ Waiting for ≥ 1 hour history...")
+        return
+
     df_train = create_features(df, for_training=True)
-    
+
     features = [
-        'consecutive_steady_sec', 
-        'throughput_bps', 
-        'roll_mean_30s', 
-        'roll_std_30s', 
+        'consecutive_steady_sec',
+        'steady_norm',
+        'steady_sq',
+        'burst_rate_5m',
+        'burst_rate_15m',
+        'roll_mean_30s',
+        'roll_std_30s',
         'lag_1', 'lag_5'
     ]
-    
-    X = df_train[features]
-    y = df_train['target_future']
 
-    # Latih Model
-    model = xgb.XGBRegressor(
-        n_estimators=500, max_depth=7, learning_rate=0.03,
-        n_jobs=-1, random_state=42
+    X = df_train[features]
+    y = df_train['burst_future']
+
+    model = xgb.XGBClassifier(
+        n_estimators=400,
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        eval_metric='logloss',
+        random_state=42,
+        n_jobs=-1
     )
+
     model.fit(X, y)
-    
+
     TRAINED_MODEL = model
     LAST_TRAIN_TIME = time.time()
-    
-    duration = time.time() - start_t
-    print(f"✅ Training Done in {duration:.2f}s. Next training in 30 mins.")
+
+    print(f"✅ Training done in {time.time() - start_t:.1f}s")
 
 # =========================
-# 4. PREDICTION ROUTINE (Fast Process)
+# PREDICTION
 # =========================
 def run_prediction():
     global TRAINED_MODEL
-    
-    if TRAINED_MODEL is None: return 
+    if TRAINED_MODEL is None:
+        return
 
-    # Ambil data pendek (1.5 jam)
-    df = get_data(hours=1.5) 
-    if df is None: return
+    df = get_data(hours=1.5)
+    if df is None:
+        return
 
     df_feat = create_features(df, for_training=False)
-    if df_feat.empty: return
-    
-    # Ambil data DETIK INI (Baris Terakhir)
-    last_row = df_feat.iloc[[-1]]
-    
+    if df_feat.empty:
+        return
+
+    last = df_feat.iloc[[-1]]
+
     features = [
-        'consecutive_steady_sec', 
-        'throughput_bps', 
-        'roll_mean_30s', 
-        'roll_std_30s', 
+        'consecutive_steady_sec',
+        'steady_norm',
+        'steady_sq',
+        'burst_rate_5m',
+        'burst_rate_15m',
+        'roll_mean_30s',
+        'roll_std_30s',
         'lag_1', 'lag_5'
     ]
-    
-    # Prediksi
-    pred_val = TRAINED_MODEL.predict(last_row[features])[0]
-    
-    # --- UPDATE LOGIC DISINI ---
-    ts_now = pd.Timestamp.now() # Waktu Dibuat (Created At)
-    ts_future = ts_now + timedelta(seconds=PREDICTION_HORIZON_SEC) # Waktu Prediksi (Target Time)
-    
-    # Log ke Layar
-    steady_sec = last_row['consecutive_steady_sec'].values[0]
-    status = "⚠️ DANGER" if pred_val > BURST_THRESHOLD_BPS else "SAFE"
-    
-    print(f"[{ts_now.strftime('%H:%M:%S')}] Steady: {steady_sec:.0f}s | Pred (+10s): {pred_val:,.0f} bps [{status}]", end='\r')
 
-    # Simpan ke Database dengan 2 timestamp
+    prob = TRAINED_MODEL.predict_proba(last[features])[0][1]
+
+    ts_now = pd.Timestamp.now()
+    ts_future = ts_now + timedelta(seconds=PREDICTION_HORIZON_SEC)
+
+    steady = last['consecutive_steady_sec'].values[0]
+    status = "⚠️ DANGER" if prob > 0.7 else "SAFE"
+
+    print(
+        f"[{ts_now.strftime('%H:%M:%S')}] "
+        f"Steady={steady:.0f}s | "
+        f"P(burst+10s)={prob:.2f} [{status}]",
+        end='\r'
+    )
+
     try:
-        res_df = pd.DataFrame([{
-            'ts_created': ts_now,   # <--- Kolom Baru: Kapan prediksi dibuat
-            'ts': ts_future,        # <--- Kolom Lama: Untuk jam berapa prediksi ini
-            'y_pred': pred_val
-        }])
-        res_df.to_sql(TABLE_FORECAST, engine, if_exists='append', index=False)
-    except Exception as e:
-        # Pass jika error minor, print jika perlu debug
-        pass 
+        pd.DataFrame([{
+            'ts_created': ts_now,
+            'ts': ts_future,
+            'y_pred': prob
+        }]).to_sql(TABLE_FORECAST, engine, if_exists='append', index=False)
+    except:
+        pass
 
 # =========================
 # MAIN LOOP
 # =========================
 if __name__ == "__main__":
-    print("🚀 Starting Optimized Forecast Monitor...")
-    
+    print("🚀 Forecast Monitor (PURE LEARNING, FIXED)")
+
     try:
         while True:
-            loop_start = time.time()
-            
-            # 1. Cek apakah waktunya Training Ulang
+            t0 = time.time()
+
             if TRAINED_MODEL is None or (time.time() - LAST_TRAIN_TIME > TRAIN_INTERVAL_SEC):
                 train_model()
-            
-            # 2. Jalankan Prediksi
+
             run_prediction()
-            
-            # 3. Sleep Cerdas
-            elapsed = time.time() - loop_start
-            sleep_time = max(0, 5.0 - elapsed)
-            time.sleep(sleep_time)
-            
+
+            time.sleep(max(0, 5 - (time.time() - t0)))
+
     except KeyboardInterrupt:
-        print("\n🛑 Stopped by user.")
+        print("\n🛑 Stopped.")
