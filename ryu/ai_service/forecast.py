@@ -11,7 +11,7 @@ import time
 # =========================
 DB_URI = "postgresql://dev_one:hijack332.@103.181.142.165:5432/development"
 TABLE_FLOW = "traffic.flow_stats_"
-TABLE_FORECAST = "forecast_burst_event"
+TABLE_FORECAST = "forecast_1h"
 
 TARGET = "throughput_bps"
 BURST_THRESHOLD_BPS = 250_000
