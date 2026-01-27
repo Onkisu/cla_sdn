@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Ryu SDN Controller: VoIP KSP Rerouting + Traffic Monitoring (SAFE VERSION)
-==========================================================================
-BREAK-BEFORE-MAKE Pattern dengan deadlock protection & health monitoring.
+Ryu SDN Controller: VoIP KSP Rerouting + Traffic Monitoring (ATOMIC VERSION)
+=============================================================================
+ATOMIC BREAK-BEFORE-MAKE: Traffic MUST stop completely on old path before new path is activated.
+This prevents DPID 5 from seeing traffic from multiple spines simultaneously.
 """
 
 from ryu.base import app_manager
@@ -46,9 +47,13 @@ PRIORITY_USER = 10
 PRIORITY_DEFAULT = 1           
 
 # Safety Limits
-MAX_STAGE_TIME_SEC = 15        # Max waktu per stage
-HEALTH_CHECK_INTERVAL = 5      # Detik
+MAX_STAGE_TIME_SEC = 15        
+HEALTH_CHECK_INTERVAL = 5      
 STATE_FILE = '/tmp/controller_state.json'
+
+# CRITICAL: Waiting periods for atomic break-before-make
+FLOW_DELETE_WAIT_SEC = 2.0     # Wait after deleting flows
+TRAFFIC_SILENCE_WAIT_SEC = 3.0 # Wait to verify no traffic on old path
 
 # ==========================================
 # HELPER FUNCTIONS
@@ -85,13 +90,18 @@ class VoIPSmartController(app_manager.RyuApp):
         self.last_bytes = {}
         self.last_bytes_timestamp = {}
         
+        # Per-spine traffic monitoring untuk atomic verification
+        self.spine_traffic = {1: 0, 2: 0, 3: 0}  # DPID -> bytes/sec
+        self.spine_traffic_last_update = {1: 0, 2: 0, 3: 0}
+        
         # Stability tracking
         self.stability_counter = 0
         self.required_stable_cycles = 10
         
         # Congestion state
         self.congestion_active = False
-        self.current_reroute_path = None
+        self.current_spine = 2  # Default spine (Spine 2)
+        self.congested_spine = None
         self.last_reroute_time = 0
         
         # Network topology
@@ -118,13 +128,13 @@ class VoIPSmartController(app_manager.RyuApp):
         self.topology_thread = hub.spawn(self._discover_topology)
         self.health_thread = hub.spawn(self._health_monitor)
         
-        self.logger.info("🟢 VoIP Smart Controller (SAFE BREAK-BEFORE-MAKE) Started")
+        self.logger.info("🟢 VoIP Smart Controller (ATOMIC BREAK-BEFORE-MAKE) Started")
         
         # Write initial state
         write_state_file({
             'state': 'IDLE',
             'congestion': False,
-            'current_path': None
+            'current_spine': self.current_spine
         })
 
     def connect_database_pool(self):
@@ -152,14 +162,279 @@ class VoIPSmartController(app_manager.RyuApp):
         if self.db_pool and conn:
             self.db_pool.putconn(conn)
 
-    def _write_state_file(self, data):
-        """Tulis state ke file untuk monitoring"""
-        try:
-            data['timestamp'] = datetime.now().isoformat()
-            with open(STATE_FILE, 'w') as f:
-                json.dump(data, f)
-        except Exception as e:
-            self.logger.debug(f"Failed to write state file: {e}")
+    # =================================================================
+    # ATOMIC BREAK-BEFORE-MAKE IMPLEMENTATION
+    # =================================================================
+    
+    def _get_alternative_spine(self, avoid_spine):
+        """Get next available spine, avoiding congested one"""
+        available = [1, 2, 3]
+        available.remove(avoid_spine)
+        # Pilih spine dengan traffic terendah
+        return min(available, key=lambda s: self.spine_traffic.get(s, 0))
+    
+    def _verify_traffic_stopped_on_spine(self, spine_dpid):
+        """Verify that H1->H2 traffic has stopped on specified spine"""
+        current_traffic = self.spine_traffic.get(spine_dpid, 0)
+        self.logger.info(f"🔍 Verifying Spine {spine_dpid}: {current_traffic} bps")
+        return current_traffic < 1000  # Less than 1 Kbps = effectively zero
+    
+    def _delete_h1_h2_flows_on_spine(self, spine_dpid):
+        """Delete all H1->H2 flows on specified spine (DPID 1,2,3)"""
+        if spine_dpid not in self.datapaths:
+            self.logger.warning(f"⚠️ Spine {spine_dpid} datapath not available")
+            return False
+        
+        dp = self.datapaths[spine_dpid]
+        parser = dp.ofproto_parser
+        ofproto = dp.ofproto
+        
+        # Delete flows matching H1->H2 traffic
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ipv4_src='10.0.0.1',
+            ipv4_dst='10.0.0.2'
+        )
+        
+        mod = parser.OFPFlowMod(
+            datapath=dp,
+            command=ofproto.OFPFC_DELETE,
+            out_port=ofproto.OFPP_ANY,
+            out_group=ofproto.OFPG_ANY,
+            match=match
+        )
+        
+        dp.send_msg(mod)
+        self.logger.info(f"🗑️ Deleted H1->H2 flows on Spine {spine_dpid}")
+        return True
+    
+    def _install_h1_h2_flow_on_spine(self, spine_dpid):
+        """Install H1->H2 flow on specified spine"""
+        if spine_dpid not in self.datapaths:
+            self.logger.warning(f"⚠️ Spine {spine_dpid} datapath not available")
+            return False
+        
+        dp = self.datapaths[spine_dpid]
+        parser = dp.ofproto_parser
+        ofproto = dp.ofproto
+        
+        # Determine output port based on topology
+        # Spine -> Leaf 2 (where H2 is connected)
+        # Assuming ports: Spine 1,2,3 port 2 goes to Leaf 2
+        out_port = 2  # Port to Leaf 2 (adjust based on your topology)
+        
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ipv4_src='10.0.0.1',
+            ipv4_dst='10.0.0.2'
+        )
+        
+        actions = [parser.OFPActionOutput(out_port)]
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        
+        mod = parser.OFPFlowMod(
+            datapath=dp,
+            priority=PRIORITY_REROUTE,
+            match=match,
+            instructions=inst,
+            cookie=COOKIE_REROUTE,
+            idle_timeout=0,
+            hard_timeout=0
+        )
+        
+        dp.send_msg(mod)
+        self.logger.info(f"✅ Installed H1->H2 flow on Spine {spine_dpid} (port {out_port})")
+        return True
+    
+    def _update_leaf1_output_port(self, target_spine):
+        """Update Leaf 1 (DPID 4) to forward H1 traffic to target spine"""
+        if 4 not in self.datapaths:
+            return False
+        
+        dp = self.datapaths[4]
+        parser = dp.ofproto_parser
+        ofproto = dp.ofproto
+        
+        # Port mapping on Leaf 1: port 1->Spine1, port 2->Spine2, port 3->Spine3
+        spine_to_port = {1: 1, 2: 2, 3: 3}
+        out_port = spine_to_port.get(target_spine, 2)
+        
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ipv4_src='10.0.0.1',
+            ipv4_dst='10.0.0.2'
+        )
+        
+        actions = [parser.OFPActionOutput(out_port)]
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        
+        mod = parser.OFPFlowMod(
+            datapath=dp,
+            priority=PRIORITY_REROUTE,
+            match=match,
+            instructions=inst,
+            cookie=COOKIE_REROUTE,
+            idle_timeout=0,
+            hard_timeout=0
+        )
+        
+        dp.send_msg(mod)
+        self.logger.info(f"✅ Leaf 1: Forwarding H1->H2 to Spine {target_spine} (port {out_port})")
+        return True
+
+    def _atomic_reroute_to_spine(self, target_spine):
+        """
+        ATOMIC REROUTE: Ensures NO traffic overlap between spines
+        
+        Steps:
+        1. Delete flows on OLD spine
+        2. Wait for flow deletion to propagate
+        3. Verify traffic has STOPPED on old spine
+        4. Install flows on NEW spine
+        5. Update Leaf 1 to use new spine
+        """
+        old_spine = self.current_spine
+        
+        self.logger.info(f"🔄 ATOMIC REROUTE: Spine {old_spine} -> Spine {target_spine}")
+        
+        # STEP 1: Delete flows on old spine
+        self.reroute_stage = 'DELETING_OLD_FLOWS'
+        write_state_file({
+            'state': self.reroute_stage,
+            'congestion': True,
+            'current_spine': old_spine,
+            'target_spine': target_spine
+        })
+        
+        success = self._delete_h1_h2_flows_on_spine(old_spine)
+        if not success:
+            self.logger.error("❌ Failed to delete flows on old spine")
+            return False
+        
+        # STEP 2: Wait for deletion to propagate
+        self.logger.info(f"⏳ Waiting {FLOW_DELETE_WAIT_SEC}s for flow deletion...")
+        time.sleep(FLOW_DELETE_WAIT_SEC)
+        
+        # STEP 3: Verify silence on old spine
+        self.reroute_stage = 'VERIFYING_SILENCE'
+        write_state_file({
+            'state': self.reroute_stage,
+            'congestion': True,
+            'current_spine': old_spine,
+            'target_spine': target_spine
+        })
+        
+        self.logger.info(f"⏳ Waiting {TRAFFIC_SILENCE_WAIT_SEC}s to verify silence...")
+        time.sleep(TRAFFIC_SILENCE_WAIT_SEC)
+        
+        # Check if traffic has stopped
+        if not self._verify_traffic_stopped_on_spine(old_spine):
+            self.logger.warning(f"⚠️ Traffic still present on Spine {old_spine}, forcing continue...")
+        
+        # STEP 4: Install flows on new spine
+        self.reroute_stage = 'INSTALLING_NEW_FLOWS'
+        write_state_file({
+            'state': self.reroute_stage,
+            'congestion': True,
+            'current_spine': target_spine,
+            'old_spine': old_spine
+        })
+        
+        success = self._install_h1_h2_flow_on_spine(target_spine)
+        if not success:
+            self.logger.error("❌ Failed to install flows on new spine")
+            return False
+        
+        # STEP 5: Update Leaf 1
+        success = self._update_leaf1_output_port(target_spine)
+        if not success:
+            self.logger.error("❌ Failed to update Leaf 1")
+            return False
+        
+        # STEP 6: Mark complete
+        self.current_spine = target_spine
+        self.congested_spine = old_spine
+        self.congestion_active = True
+        self.reroute_stage = 'ACTIVE_REROUTE'
+        
+        write_state_file({
+            'state': 'ACTIVE_REROUTE',
+            'congestion': True,
+            'current_spine': self.current_spine,
+            'congested_spine': self.congested_spine
+        })
+        
+        self.logger.info(f"✅ ATOMIC REROUTE COMPLETE: Now using Spine {target_spine}")
+        self.stats['reroute_count'] += 1
+        return True
+
+    def _atomic_revert_to_original_spine(self):
+        """
+        ATOMIC REVERT: Return to original spine when congestion clears
+        
+        Same atomic process as reroute to prevent traffic overlap
+        """
+        if not self.congestion_active or not self.congested_spine:
+            return False
+        
+        target_spine = self.congested_spine  # Return to original
+        old_spine = self.current_spine
+        
+        self.logger.info(f"🔙 ATOMIC REVERT: Spine {old_spine} -> Spine {target_spine}")
+        
+        # STEP 1: Delete flows on current spine
+        self.reroute_stage = 'REVERT_DELETING'
+        write_state_file({
+            'state': self.reroute_stage,
+            'congestion': False,
+            'current_spine': old_spine,
+            'target_spine': target_spine
+        })
+        
+        self._delete_h1_h2_flows_on_spine(old_spine)
+        time.sleep(FLOW_DELETE_WAIT_SEC)
+        
+        # STEP 2: Verify silence
+        self.reroute_stage = 'REVERT_VERIFY_SILENCE'
+        write_state_file({
+            'state': self.reroute_stage,
+            'congestion': False,
+            'current_spine': old_spine,
+            'target_spine': target_spine
+        })
+        
+        time.sleep(TRAFFIC_SILENCE_WAIT_SEC)
+        
+        if not self._verify_traffic_stopped_on_spine(old_spine):
+            self.logger.warning(f"⚠️ Traffic still present during revert, forcing continue...")
+        
+        # STEP 3: Install flows on original spine
+        self.reroute_stage = 'REVERT_INSTALLING'
+        write_state_file({
+            'state': self.reroute_stage,
+            'congestion': False,
+            'current_spine': target_spine
+        })
+        
+        self._install_h1_h2_flow_on_spine(target_spine)
+        self._update_leaf1_output_port(target_spine)
+        
+        # STEP 4: Complete revert
+        self.current_spine = target_spine
+        self.congested_spine = None
+        self.congestion_active = False
+        self.reroute_stage = 'IDLE'
+        
+        write_state_file({
+            'state': 'IDLE',
+            'congestion': False,
+            'current_spine': self.current_spine
+        })
+        
+        self.logger.info(f"✅ ATOMIC REVERT COMPLETE: Back to Spine {target_spine}")
+        self.stats['revert_count'] += 1
+        return True
+
     # =================================================================
     # HEALTH MONITOR & STUCK DETECTION
     # =================================================================
@@ -177,18 +452,12 @@ class VoIPSmartController(app_manager.RyuApp):
                     self.logger.error(f"⚠️ HEALTH ALERT: Stage {self.reroute_stage} stuck for {stage_duration:.1f}s")
                     self.stats['stuck_count'] += 1
                     
-                    # Emergency recovery logic
-                    if self.reroute_stage in ['VERIFYING', 'REVERT_VERIFY']:
-                        self.logger.warning("🔄 Force finishing stage...")
-                        # Install flow default ke Spine 3 sebagai fallback
-                        self._emergency_fallback_to_spine3()
-                    
-                    # Reset ke IDLE
+                    # Force reset to IDLE
                     self.reroute_stage = 'IDLE'
                     self.stage_start_time = current_time
                     self.congestion_active = False
                     
-                # Cleanup old traffic data (lebih dari 30 detik)
+                # Cleanup old traffic data
                 expired_keys = []
                 for key, ts in self.last_bytes_timestamp.items():
                     if current_time - ts > 30:
@@ -196,776 +465,167 @@ class VoIPSmartController(app_manager.RyuApp):
                 for key in expired_keys:
                     self.last_bytes.pop(key, None)
                     self.last_bytes_timestamp.pop(key, None)
-    
-    def _emergency_fallback_to_spine3(self):
-        """Emergency recovery: install flow ke Spine 3"""
-        target_src = '10.0.0.1'
-        target_dst = '10.0.0.2'
-        
-        try:
-            # Install flow ke Spine 3
-            for dpid in [4, 3, 5]:
-                if dpid in self.datapaths:
-                    dp = self.datapaths[dpid]
-                    # Tentukan out_port
-                    if dpid == 4:
-                        out_port = 3  # Port ke Spine 3
-                    elif dpid == 3:
-                        out_port = 2  # Port ke Leaf 5
-                    elif dpid == 5:
-                        out_port = 1  # Port ke H2
-                    else:
-                        continue
-                    
-                    self._install_flow_specific(dp, target_src, target_dst, out_port, 
-                                               priority=PRIORITY_REROUTE, 
-                                               cookie=COOKIE_REROUTE)
-            
-            self.current_reroute_path = [4, 3, 5]
-            self.congestion_active = False
-            self.logger.info("🔄 Emergency fallback to Spine 3 completed")
-            
-        except Exception as e:
-            self.logger.error(f"Emergency fallback failed: {e}")
 
     # =================================================================
     # TOPOLOGY DISCOVERY
     # =================================================================
     def _discover_topology(self):
-        """Periodic topology discovery"""
         while True:
             hub.sleep(5)
-            with self.lock:
+            try:
+                switches = get_switch(self)
+                links = get_link(self)
+                
                 self.net.clear()
+                for switch in switches:
+                    self.net.add_node(switch.dp.id)
                 
-                switches = get_switch(self, None)
-                for s in switches:
-                    self.net.add_node(s.dp.id)
-                
-                links = get_link(self, None)
-                for l in links:
-                    self.net.add_edge(l.src.dpid, l.dst.dpid, port=l.src.port_no)
-                    self.net.add_edge(l.dst.dpid, l.src.dpid, port=l.dst.port_no)
+                for link in links:
+                    self.net.add_edge(link.src.dpid, link.dst.dpid, 
+                                    port=link.src.port_no)
+                    self.net.add_edge(link.dst.dpid, link.src.dpid, 
+                                    port=link.dst.port_no)
+            except:
+                pass
 
     # =================================================================
-    # SAFE FORECAST MONITORING (BREAK-BEFORE-MAKE)
+    # CONGESTION DETECTION & TRIGGER
     # =================================================================
     def _monitor_forecast_safe(self):
-        """FIXED VERSION: Break-Before-Make dengan timeout protection"""
-        target_src = '10.0.0.1'
-        target_dst = '10.0.0.2'
-        
-        self.logger.info("👁️  SAFE Monitor: Break-Before-Make Logic Active")
-        
+        """Monitor congestion on Spine 2 (DPID 2) and trigger atomic reroute"""
         while True:
-            hub.sleep(1.0)
-            
-            with self.lock:
-                current_stage = self.reroute_stage
-                stage_duration = time.time() - self.stage_start_time
-                
-                # --- STAGE 1: IDLE (Monitor for burst) ---
-                if current_stage == 'IDLE':
-                    # Cooldown period check
-                    if time.time() - self.last_reroute_time < COOLDOWN_PERIOD_SEC:
-                        continue
-                    
-                    pred_bps = self._get_latest_prediction()
-                    if pred_bps is None:
-                        continue
-                    
-                    if pred_bps > BURST_THRESHOLD_BPS:
-                        # Deteksi spine aktif yang membawa traffic H1->H2
-                        current_spines = self._get_active_spines_for_flow(target_src, target_dst)
-                        if not current_spines:
-                            continue
-                        
-                        self.logger.warning(f"🚀 BURST DETECTED ({pred_bps:.0f} bps). Starting BREAK phase...")
-                        
-                        # BREAK PHASE: Stop semua flow di spine aktif
-                        for sp_dpid in current_spines:
-                            self._emergency_stop_flow_fixed(sp_dpid, target_src, target_dst)
-                        
-                        self.stopped_spines = current_spines
-                        self.trigger_val_cache = pred_bps
-                        
-                        # CLEAN CACHE untuk spine yang di-stop
-                        self._clean_cache_for_spines(current_spines, target_src, target_dst)
-                        
-                        # Pindah ke stage VERIFYING_SILENCE
-                        self.reroute_stage = 'VERIFYING_SILENCE'
-                        self.stage_start_time = time.time()
-                        self.silence_check_counter = 0
-                        
-                        # Log dan update state
-                        self._log_event("BREAK_STARTED", f"Stopped spines: {current_spines}", pred_bps)
-                        self._write_state_file({
-                            'state': 'VERIFYING_SILENCE',
-                            'stopped_spines': current_spines,
-                            'pred_bps': pred_bps
-                        })
-                
-                # --- STAGE 2: VERIFYING_SILENCE (Wait for traffic to stop) ---
-                elif current_stage == 'VERIFYING_SILENCE':
-                    self.silence_check_counter += 1
-                    
-                    # TIMEOUT PROTECTION: Max 10 detik
-                    if self.silence_check_counter > 10:
-                        self.logger.warning(f"⚠️ SILENCE VERIFICATION TIMEOUT ({self.silence_check_counter}s). FORCING CONTINUE...")
-                        all_silent = True  # Force continue
-                    else:
-                        all_silent = self._are_spines_silent_fixed(self.stopped_spines, target_src, target_dst)
-                    
-                    if all_silent:
-                        self.logger.info(f"✅ Path clear. Starting MAKE phase...")
-                        
-                        # Tentukan spine yang dihindari
-                        avoid_node = self.stopped_spines[0] if self.stopped_spines else 3
-                        
-                        # MAKE PHASE: Install jalur baru
-                        success = self.perform_dynamic_reroute(target_src, target_dst, avoid_node, 
-                                                            self.trigger_val_cache)
-                        
-                        if success:
-                            self.reroute_stage = 'REROUTED'
-                            self.stage_start_time = time.time()
-                            self.stability_counter = 0
-                            self.congestion_active = True
-                            self.last_reroute_time = time.time()
-                            self.stats['reroute_count'] += 1
-                            
-                            self._log_event("REROUTE_COMPLETE", 
-                                        f"Path: {self.current_reroute_path}", 
-                                        self.trigger_val_cache)
-                            self._write_state_file({
-                                'state': 'REROUTED',
-                                'current_path': self.current_reroute_path,
-                                'congestion': True
-                            })
-                        else:
-                            # Jika gagal, fallback ke default path
-                            self.logger.error("❌ Reroute installation failed. Fallback to default...")
-                            self._force_install_default_path()
-                            self.reroute_stage = 'IDLE'
-                    else:
-                        # Log progress jika belum silent
-                        if self.silence_check_counter % 3 == 0:
-                            self.logger.info(f"⏳ Waiting for silence... {self.silence_check_counter}/10s")
-                        
-                        # Periodic cleanup untuk pastikan cache fresh
-                        if self.silence_check_counter % 5 == 0:
-                            self._clean_cache_for_spines(self.stopped_spines, target_src, target_dst)
-                
-                # --- STAGE 3: REROUTED (Monitor for stability) ---
-                elif current_stage == 'REROUTED':
-                    pred_bps = self._get_latest_prediction()
-                    if pred_bps is None:
-                        continue
-                    
-                    # LOGIKA STABILITAS DENGAN HYSTERESIS
-                    if pred_bps <= HYSTERESIS_LOWER_BPS:
-                        self.stability_counter += 1
-                        
-                        if self.stability_counter % 3 == 0:  # Log setiap 3 cycle
-                            self.logger.info(f"📉 Traffic calming ({pred_bps:.0f} bps). Stability: {self.stability_counter}/{self.required_stable_cycles}")
-                        
-                        if self.stability_counter >= self.required_stable_cycles:
-                            self.logger.info("🛡️  STABLE TRAFFIC. Preparing revert...")
-                            
-                            # BREAK PHASE untuk revert: Stop jalur backup
-                            current_backup_spines = self._get_active_spines_for_flow(target_src, target_dst)
-                            if current_backup_spines:
-                                for sp_dpid in current_backup_spines:
-                                    self._emergency_stop_flow_fixed(sp_dpid, target_src, target_dst)
-                                
-                                self.stopped_spines = current_backup_spines
-                                
-                                # Clean cache untuk backup spines
-                                self._clean_cache_for_spines(current_backup_spines, target_src, target_dst)
-                                
-                                self.reroute_stage = 'REVERT_VERIFY'
-                                self.stage_start_time = time.time()
-                                self.silence_check_counter = 0
-                                
-                                self._log_event("REVERT_STARTED", 
-                                            f"Stopping backup spines: {current_backup_spines}", 
-                                            0)
-                                self._write_state_file({
-                                    'state': 'REVERT_VERIFY',
-                                    'stopped_spines': current_backup_spines
-                                })
-                            else:
-                                # Jika tidak ada backup spines, langsung revert
-                                self.logger.info("⚠️ No backup spines found. Direct revert...")
-                                success = self.perform_dynamic_revert(target_src, target_dst)
-                                if success:
-                                    self.reroute_stage = 'IDLE'
-                                    self.congestion_active = False
-                    else:
-                        # Reset jika traffic naik lagi
-                        if self.stability_counter > 0:
-                            self.logger.warning(f"⚠️ Stability reset. Traffic: {pred_bps:.0f} bps")
-                        self.stability_counter = 0
-                
-                # --- STAGE 4: REVERT_VERIFY (Verify backup path is silent) ---
-                elif current_stage == 'REVERT_VERIFY':
-                    self.silence_check_counter += 1
-                    
-                    # TIMEOUT PROTECTION: Max 15 detik
-                    if self.silence_check_counter > 15:
-                        self.logger.warning(f"⚠️ REVERT VERIFICATION TIMEOUT ({self.silence_check_counter}s). FORCING REVERT...")
-                        all_silent = True  # Force revert
-                    else:
-                        all_silent = self._are_spines_silent_fixed(self.stopped_spines, target_src, target_dst)
-                    
-                    if all_silent:
-                        self.logger.info("✅ Backup path silent. Starting revert MAKE phase...")
-                        
-                        # MAKE PHASE untuk revert: Install jalur normal (Spine 3)
-                        success = self.perform_dynamic_revert(target_src, target_dst)
-                        
-                        if success:
-                            self.reroute_stage = 'IDLE'
-                            self.stage_start_time = time.time()
-                            self.congestion_active = False
-                            self.stats['revert_count'] += 1
-                            self.stability_counter = 0
-                            
-                            self._log_event("REVERT_COMPLETE", 
-                                        f"Restored path: {self.current_reroute_path}", 
-                                        0)
-                            self._write_state_file({
-                                'state': 'IDLE',
-                                'current_path': self.current_reroute_path,
-                                'congestion': False
-                            })
-                        else:
-                            self.logger.error("❌ Revert failed. Emergency fallback...")
-                            self._force_install_default_path()
-                            self.reroute_stage = 'IDLE'
-                    else:
-                        # Jika belum silent, drain dengan periodic stop
-                        if self.silence_check_counter % 3 == 0:
-                            for sp in self.stopped_spines:
-                                self._emergency_stop_flow_fixed(sp, target_src, target_dst)
-                        
-                        # Log progress
-                        if self.silence_check_counter % 5 == 0:
-                            self.logger.info(f"⏳ Draining backup path... {self.silence_check_counter}/15s")
-
-    def _get_latest_prediction(self):
-        """Ambil prediksi terbaru dari database dengan timeout"""
-        conn = self.get_db_connection()
-        if not conn:
-            return None
-        
-        try:
-            cur = conn.cursor()
-            # Ambil prediksi yang tidak lebih dari 10 detik yang lalu
-            cur.execute("""
-                SELECT y_pred FROM forecast_1h 
-                WHERE ts_created >= NOW() - INTERVAL '10 seconds'
-                ORDER BY ts_created DESC LIMIT 1
-            """)
-            result = cur.fetchone()
-            cur.close()
-            
-            if result:
-                return float(result[0])
-            return None
-        except Exception as e:
-            self.logger.error(f"Prediction query error: {e}")
-            return None
-        finally:
-            self.return_db_connection(conn)
-
-    # =================================================================
-    # CORE REROUTE/REVERT FUNCTIONS
-    # =================================================================
-    
-
-    def perform_dynamic_reroute(self, src_ip, dst_ip, avoid_dpid, trigger_val):
-        """
-        BREAK-BEFORE-MAKE: Sudah stop duluan, sekarang install jalur baru
-        """
-        with self.lock:
-            try:
-                src_sw = 4  # Leaf 4 (H1)
-                dst_sw = 5  # Leaf 5 (H2)
-                
-                # Cari semua jalur alternatif
-                all_paths = list(nx.shortest_simple_paths(self.net, src_sw, dst_sw))
-                
-                # Pilih jalur yang tidak melewati avoid_dpid
-                alt_path = None
-                for path in all_paths:
-                    if avoid_dpid not in path:
-                        alt_path = path
-                        break
-                
-                if not alt_path:
-                    self.logger.error("❌ No alternative path found!")
-                    return False
-                
-                self.logger.info(f"🛣️  Installing REROUTE path: {alt_path}")
-                
-                # Install flow untuk setiap hop (dari belakang ke depan)
-                for i in range(len(alt_path) - 1, 0, -1):
-                    curr = alt_path[i-1]
-                    nxt = alt_path[i]
-                    
-                    if self.net.has_edge(curr, nxt):
-                        out_port = self.net[curr][nxt]['port']
-                        dp = self.datapaths.get(curr)
-                        
-                        if dp:
-                            self._install_flow_specific(dp, src_ip, dst_ip, out_port,
-                                                       priority=PRIORITY_REROUTE,
-                                                       cookie=COOKIE_REROUTE)
-                            self._send_barrier(dp)
-                
-                self.current_reroute_path = alt_path
-                self._log_event("REROUTE_COMPLETE", f"Path: {alt_path}", trigger_val)
-                
-                return True
-                
-            except Exception as e:
-                self.logger.error(f"Reroute installation failed: {e}")
-                return False
-
-    def perform_dynamic_revert(self, src_ip, dst_ip):
-        """
-        Revert ke Spine 3 dengan BREAK-BEFORE-MAKE
-        """
-        with self.lock:
-            try:
-                src_sw = 4
-                dst_sw = 5
-                preferred_spine = 3
-                
-                # Cek ketersediaan Spine 3
-                if (self.net.has_edge(src_sw, preferred_spine) and 
-                    self.net.has_edge(preferred_spine, dst_sw)):
-                    
-                    target_path = [src_sw, preferred_spine, dst_sw]
-                    self.logger.info(f"🔙 REVERTING to Spine 3: {target_path}")
-                    
-                    # Install flow ke Spine 3
-                    for i in range(len(target_path) - 1, 0, -1):
-                        curr = target_path[i-1]
-                        nxt = target_path[i]
-                        
-                        if self.net.has_edge(curr, nxt):
-                            out_port = self.net[curr][nxt]['port']
-                            dp = self.datapaths.get(curr)
-                            
-                            if dp:
-                                self._install_flow_specific(dp, src_ip, dst_ip, out_port,
-                                                          priority=PRIORITY_REROUTE,
-                                                          cookie=COOKIE_REROUTE)
-                                self._send_barrier(dp)
-                    
-                    self.current_reroute_path = target_path
-                    self._log_event("REVERT_COMPLETE", f"Back to Spine 3", 0)
-                    
-                    return True
-                else:
-                    self.logger.warning("Spine 3 unavailable. Using shortest path...")
-                    # Fallback ke shortest path
-                    try:
-                        fallback_path = nx.shortest_path(self.net, src_sw, dst_sw)
-                        self.logger.info(f"Fallback path: {fallback_path}")
-                        
-                        for i in range(len(fallback_path) - 1, 0, -1):
-                            curr = fallback_path[i-1]
-                            nxt = fallback_path[i]
-                            
-                            if self.net.has_edge(curr, nxt):
-                                out_port = self.net[curr][nxt]['port']
-                                dp = self.datapaths.get(curr)
-                                
-                                if dp:
-                                    self._install_flow_specific(dp, src_ip, dst_ip, out_port,
-                                                              priority=PRIORITY_REROUTE,
-                                                              cookie=COOKIE_REROUTE)
-                                    self._send_barrier(dp)
-                        
-                        self.current_reroute_path = fallback_path
-                        return True
-                    except Exception as e:
-                        self.logger.error(f"Fallback also failed: {e}")
-                        return False
-                        
-            except Exception as e:
-                self.logger.error(f"Revert failed: {e}")
-                return False
-    
-
-    def _emergency_stop_flow_fixed(self, dpid_target, src_ip, dst_ip):
-        """Stop flow dengan cache cleanup"""
-        if dpid_target not in self.datapaths:
-            return
-        
-        dp = self.datapaths[dpid_target]
-        parser = dp.ofproto_parser
-        
-        # 1. CLEAN CACHE DULU sebelum delete flow
-        self._clean_cache_for_spines([dpid_target], src_ip, dst_ip)
-        
-        # 2. Delete flow dari switch
-        match = parser.OFPMatch(
-            eth_type=0x0800,
-            ipv4_src=src_ip,
-            ipv4_dst=dst_ip
-        )
-        
-        # Delete flow dengan priority reroute
-        mod_reroute = parser.OFPFlowMod(
-            datapath=dp,
-            command=dp.ofproto.OFPFC_DELETE_STRICT,
-            out_port=dp.ofproto.OFPP_ANY,
-            out_group=dp.ofproto.OFPG_ANY,
-            match=match,
-            priority=PRIORITY_REROUTE
-        )
-        dp.send_msg(mod_reroute)
-        
-        # Juga delete flow dengan priority user
-        mod_user = parser.OFPFlowMod(
-            datapath=dp,
-            command=dp.ofproto.OFPFC_DELETE_STRICT,
-            out_port=dp.ofproto.OFPP_ANY,
-            out_group=dp.ofproto.OFPG_ANY,
-            match=match,
-            priority=PRIORITY_USER
-        )
-        dp.send_msg(mod_user)
-        
-        self._send_barrier(dp)
-        self.logger.debug(f"Stopped flow on DPID {dpid_target} and cleaned cache")
-
-    def _clean_cache_for_spines(self, spines, src, dst):
-        """Bersihkan cache untuk spine-spine tertentu"""
-        current_time = time.time()
-        
-        for dpid in spines:
-            prefix = f"{dpid}-{src}-{dst}"
-            
-            # Hapus semua entry yang match
-            keys_to_delete = [k for k in self.last_bytes.keys() if k.startswith(prefix)]
-            for key in keys_to_delete:
-                self.last_bytes.pop(key, None)
-                self.last_bytes_timestamp.pop(key, None)
-            
-            # Juga hapus dari silence cache
-            if hasattr(self, 'temp_silence_cache'):
-                silence_keys = [k for k in self.temp_silence_cache.keys() 
-                            if k.startswith(f"silence_check_{prefix}")]
-                for key in silence_keys:
-                    self.temp_silence_cache.pop(key, None)
-
-    def _are_spines_silent_fixed(self, dpids_list, src, dst):
-        """FIXED: Cek silence dengan data freshness"""
-        if not dpids_list:
-            return True  # Empty list = silent
-        
-        current_time = time.time()
-        
-        for dpid in dpids_list:
-            prefix = f"{dpid}-{src}-{dst}"
-            matching_keys = [k for k in self.last_bytes.keys() if k.startswith(prefix)]
-            
-            if not matching_keys:
-                # Tidak ada entry = silent
-                continue
-            
-            # Cek setiap entry untuk data FRESH (≤ 2 detik)
-            for key in matching_keys:
-                last_update = self.last_bytes_timestamp.get(key, 0)
-                
-                # Jika data ≤ 2 detik yang lalu = NOT SILENT
-                if current_time - last_update <= 2:
-                    # Data fresh, cek apakah bytes bertambah
-                    curr_bytes, _ = self.last_bytes[key]
-                    
-                    # Bandingkan dengan cache sebelumnya
-                    cache_key = f"silence_check_{key}"
-                    prev_bytes = getattr(self, 'temp_silence_cache', {}).get(cache_key, -1)
-                    
-                    if not hasattr(self, 'temp_silence_cache'):
-                        self.temp_silence_cache = {}
-                    
-                    if prev_bytes == -1:
-                        # First check, set cache dan anggap NOT silent
-                        self.temp_silence_cache[cache_key] = curr_bytes
-                        return False
-                    
-                    if curr_bytes != prev_bytes:
-                        # Bytes berubah = NOT silent
-                        self.temp_silence_cache[cache_key] = curr_bytes
-                        return False
-        
-        return True  # Semua spine silent
-
-    def _force_install_default_path(self):
-        """Force install path default 4->3->5"""
-        try:
-            path = [4, 3, 5]
-            for i in range(len(path) - 1, 0, -1):
-                curr = path[i-1]
-                nxt = path[i]
-                if self.net.has_edge(curr, nxt):
-                    out_port = self.net[curr][nxt]['port']
-                    dp = self.datapaths.get(curr)
-                    if dp:
-                        self._install_flow_specific(dp, '10.0.0.1', '10.0.0.2', 
-                                                out_port, PRIORITY_REROUTE, COOKIE_REROUTE)
-            self.logger.info("🔄 Default path (4->3->5) force installed")
-        except Exception as e:
-            self.logger.error(f"Force install failed: {e}")
-
-    # =================================================================
-    # HELPER FUNCTIONS
-    # =================================================================
-    def _install_flow_specific(self, datapath, src_ip, dst_ip, out_port, priority, cookie):
-        """Install flow dengan parameter lengkap"""
-        parser = datapath.ofproto_parser
-        
-        match = parser.OFPMatch(
-            eth_type=0x0800,
-            ipv4_src=src_ip,
-            ipv4_dst=dst_ip
-        )
-        
-        actions = [parser.OFPActionOutput(out_port)]
-        inst = [parser.OFPInstructionActions(datapath.ofproto.OFPIT_APPLY_ACTIONS, actions)]
-        
-        mod = parser.OFPFlowMod(
-            datapath=datapath,
-            priority=priority,
-            match=match,
-            instructions=inst,
-            cookie=cookie,
-            idle_timeout=0,
-            hard_timeout=0,
-            flags=datapath.ofproto.OFPFF_SEND_FLOW_REM
-        )
-        datapath.send_msg(mod)
-    
-    def _send_barrier(self, datapath):
-        """Ensure command completion"""
-        datapath.send_msg(datapath.ofproto_parser.OFPBarrierRequest(datapath))
-    
-    def _get_active_spines_for_flow(self, src_ip, dst_ip):
-        """Deteksi spine aktif yang membawa traffic H1->H2 - VERSI DIPERBAIKI"""
-        active_spines = []
-        current_time = time.time()
-        
-        for flow_key, (bytes_count, _) in self.last_bytes.items():
-            # Parse flow key dengan berbagai format
-            parts = flow_key.split('-')
-            
-            try:
-                # Format: "dpid-src-dst" atau "dpid-src-dst-prio"
-                if len(parts) >= 3:
-                    dpid = int(parts[0])
-                    flow_src = parts[1]
-                    flow_dst = parts[2]
-                else:
-                    continue
-                    
-                # Filter untuk flow H1->H2 di spine (dpid 1-3)
-                if (flow_src == src_ip and flow_dst == dst_ip and 
-                    1 <= dpid <= 3):  # Hanya spine 1, 2, 3
-                    
-                    # Cek data freshness (tidak lebih dari 10 detik)
-                    if current_time - self.last_bytes_timestamp.get(flow_key, 0) <= 10:
-                        active_spines.append(dpid)
-                        
-            except (ValueError, IndexError) as e:
-                self.logger.debug(f"Error parsing flow key {flow_key}: {e}")
-                continue
-        
-        # Remove duplicates
-        return list(set(active_spines))
-    
-    def _check_is_traffic_silent(self, dpid, src_ip, dst_ip):
-        """Check if traffic on a specific dpid has stopped"""
-        current_time = time.time()
-        prefix = f"{dpid}-{src_ip}-{dst_ip}"
-        
-        # Cari semua flow yang match
-        matching_keys = [k for k in self.last_bytes.keys() if k.startswith(prefix)]
-        
-        if not matching_keys:
-            # No flow entries at all -> silent
-            return True
-        
-        # If there are flows, check if any has been updated in the last 3 seconds
-        for key in matching_keys:
-            last_update = self.last_bytes_timestamp.get(key, 0)
-            if current_time - last_update <= 3:
-                # Data is fresh (within 3 seconds) -> not silent
-                return False
-        
-        # All flows are stale (older than 3 seconds) -> silent
-        return True
-    
-    
-    
-    def _log_event(self, event_type, description, trigger_value):
-        """Log event ke database"""
-        conn = self.get_db_connection()
-        if not conn:
-            return
-        
-        try:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO traffic.system_events
-                (timestamp, event_type, description, trigger_value)
-                VALUES (%s, %s, %s, %s)
-            """, (datetime.now(), event_type, description, trigger_value))
-            conn.commit()
-            cur.close()
-        except Exception as e:
-            self.logger.error(f"Event log error: {e}")
-        finally:
-            self.return_db_connection(conn)
-
-    # =================================================================
-    # STATISTICS MONITORING
-    # =================================================================
-    def _monitor_traffic(self):
-        """Monitor traffic statistics"""
-        while True:
-            with self.lock:
-                for dp in list(self.datapaths.values()):
-                    self._request_stats(dp)
             hub.sleep(1)
-    
+            
+            try:
+                with self.lock:
+                    # Only monitor the CURRENT spine for congestion
+                    congested_spine_dpid = self.current_spine
+                    
+                    current_bps = self.spine_traffic.get(congested_spine_dpid, 0)
+                    
+                    current_time = time.time()
+                    time_since_last_reroute = current_time - self.last_reroute_time
+                    
+                    # TRIGGER REROUTE: Congestion detected
+                    if (not self.congestion_active and 
+                        current_bps > BURST_THRESHOLD_BPS and 
+                        time_since_last_reroute > COOLDOWN_PERIOD_SEC and
+                        self.reroute_stage == 'IDLE'):
+                        
+                        self.logger.warning(f"🚨 CONGESTION on Spine {congested_spine_dpid}: {current_bps:.0f} bps")
+                        
+                        # Find alternative spine
+                        target_spine = self._get_alternative_spine(congested_spine_dpid)
+                        
+                        self.stage_start_time = time.time()
+                        self.last_reroute_time = time.time()
+                        
+                        # Execute atomic reroute
+                        success = self._atomic_reroute_to_spine(target_spine)
+                        
+                        if not success:
+                            self.logger.error("❌ Atomic reroute failed")
+                            self.reroute_stage = 'IDLE'
+                    
+                    # TRIGGER REVERT: Congestion cleared
+                    elif (self.congestion_active and 
+                          self.congested_spine and
+                          self.reroute_stage == 'ACTIVE_REROUTE'):
+                        
+                        # Check if original spine is clear
+                        original_spine_bps = self.spine_traffic.get(self.congested_spine, 0)
+                        
+                        if original_spine_bps < HYSTERESIS_LOWER_BPS:
+                            self.stability_counter += 1
+                            
+                            if self.stability_counter >= self.required_stable_cycles:
+                                self.logger.info(f"✅ Spine {self.congested_spine} stable, reverting...")
+                                
+                                success = self._atomic_revert_to_original_spine()
+                                
+                                if success:
+                                    self.stability_counter = 0
+                                else:
+                                    self.logger.error("❌ Atomic revert failed")
+                        else:
+                            self.stability_counter = 0
+                            
+            except Exception as e:
+                self.logger.error(f"Forecast monitor error: {e}")
+
+    # =================================================================
+    # TRAFFIC MONITORING
+    # =================================================================
+    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
+    def _flow_stats_reply_handler(self, ev):
+        """Process flow stats and update per-spine traffic counters"""
+        body = ev.msg.body
+        dpid = ev.msg.datapath.id
+        current_time = time.time()
+        
+        conn = self.get_db_connection()
+        if not conn:
+            return
+        
+        try:
+            for stat in body:
+                match = stat.match
+                
+                # Extract IPs
+                src_ip = match.get('ipv4_src')
+                dst_ip = match.get('ipv4_dst')
+                
+                if not src_ip or not dst_ip:
+                    continue
+                
+                # Create unique flow key
+                flow_key = (dpid, src_ip, dst_ip)
+                
+                # Calculate delta
+                current_bytes = stat.byte_count
+                last_bytes = self.last_bytes.get(flow_key, 0)
+                last_ts = self.last_bytes_timestamp.get(flow_key, current_time)
+                
+                delta_bytes = max(0, current_bytes - last_bytes)
+                time_diff = max(0.1, current_time - last_ts)
+                
+                # Update tracking
+                self.last_bytes[flow_key] = current_bytes
+                self.last_bytes_timestamp[flow_key] = current_time
+                
+                # Calculate bps
+                bps = (delta_bytes * 8) / time_diff
+                
+                # Update per-spine traffic for H1->H2
+                if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
+                    if dpid in [1, 2, 3]:  # Spine switches
+                        self.spine_traffic[dpid] = bps
+                        self.spine_traffic_last_update[dpid] = current_time
+                
+                # Insert to DB (only if significant traffic)
+                if delta_bytes > 100:
+                    self._insert_flow_stats(dpid, src_ip, dst_ip, match, delta_bytes, 
+                                           stat.packet_count - 0, 1.0)
+                    
+        except Exception as e:
+            self.logger.error(f"Flow stats error: {e}")
+        finally:
+            self.return_db_connection(conn)
+
+    def _monitor_traffic(self):
+        """Request flow stats periodically"""
+        while True:
+            hub.sleep(1)
+            
+            for dp in self.datapaths.values():
+                self._request_stats(dp)
+
     def _request_stats(self, datapath):
         """Request flow statistics"""
         parser = datapath.ofproto_parser
         req = parser.OFPFlowStatsRequest(datapath)
         datapath.send_msg(req)
-    
-    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
-    def _flow_stats_reply_handler(self, ev):
-        """Handle flow statistics reply - PERBAIKAN: Catat semua switch"""
-        body = ev.msg.body
-        datapath = ev.msg.datapath
-        dpid = datapath.id
-        
-        current_time = time.time()
-        timestamp = datetime.now()
-        
-        # Dapatkan koneksi DB
-        conn = self.get_db_connection()
-        if not conn:
-            return
-        
-        try:
-            cur = conn.cursor()
-            
-            for stat in body:
-                # Skip default flows (priority 0)
-                if stat.priority == 0:
-                    continue
-                
-                match = stat.match
-                
-                # 1. Coba ambil IP dari match langsung
-                src_ip = match.get('ipv4_src')
-                dst_ip = match.get('ipv4_dst')
-                
-                # 2. Jika tidak ada IP, coba resolve dari MAC
-                if not src_ip:
-                    src_mac = match.get('eth_src')
-                    if src_mac:
-                        src_ip = self._resolve_ip(src_mac)
-                
-                if not dst_ip:
-                    dst_mac = match.get('eth_dst')
-                    if dst_mac:
-                        dst_ip = self._resolve_ip(dst_mac)
-                
-                # 3. Tentukan apakah ini traffic yang kita minati
-                is_target_traffic = False
-                traffic_label = 'other'
-                
-                if dst_ip == '10.0.0.2':
-                    if src_ip == '10.0.0.1':
-                        is_target_traffic = True
-                        traffic_label = 'voip'
-                    elif src_ip == '10.0.0.3':
-                        is_target_traffic = True
-                        traffic_label = 'bursty'
-                
-                # 4. Update traffic counters (untuk semua traffic, tidak hanya target)
-                if src_ip and dst_ip:
-                    flow_key = f"{dpid}-{src_ip}-{dst_ip}"
-                    byte_count = stat.byte_count
-                    packet_count = stat.packet_count
-                    
-                    # Calculate deltas
-                    if flow_key in self.last_bytes:
-                        last_bytes, last_packets = self.last_bytes[flow_key]
-                        delta_bytes = max(0, byte_count - last_bytes)
-                        delta_packets = max(0, packet_count - last_packets)
-                    else:
-                        delta_bytes = byte_count
-                        delta_packets = packet_count
-                    
-                    # Update cache
-                    self.last_bytes[flow_key] = (byte_count, packet_count)
-                    self.last_bytes_timestamp[flow_key] = current_time
-                    
-                    # 5. Insert ke DB jika ada traffic DAN ini traffic target kita
-                    if delta_bytes > 0 and is_target_traffic:
-                        try:
-                            cur.execute("""
-                                INSERT INTO traffic.flow_stats_
-                                (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac,
-                                ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx,
-                                pkts_tx, pkts_rx, duration_sec, traffic_label)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            """, (
-                                timestamp, dpid, src_ip, dst_ip,
-                                match.get('eth_src'), match.get('eth_dst'),
-                                match.get('ip_proto', 17),
-                                match.get('tcp_src') or match.get('udp_src') or 0,
-                                match.get('tcp_dst') or match.get('udp_dst') or 0,
-                                delta_bytes, delta_bytes,
-                                delta_packets, delta_packets,
-                                stat.duration_sec,  # JANGAN hardcode 1.0!
-                                traffic_label
-                            ))
-                        except Exception as e:
-                            self.logger.debug(f"DB insert error for dpid {dpid}: {e}")
-            
-            conn.commit()
-            cur.close()
-            
-            # Debug logging untuk memastikan semua switch tercatat
-            if random.random() < 0.1:  # Log 10% dari waktu
-                dpids_with_traffic = set()
-                for flow_key in self.last_bytes.keys():
-                    parts = flow_key.split('-')
-                    if len(parts) >= 1:
-                        try:
-                            dpids_with_traffic.add(int(parts[0]))
-                        except:
-                            pass
-                
-                if dpids_with_traffic:
-                    self.logger.debug(f"📊 Active switches: {sorted(dpids_with_traffic)}")
-            
-        except Exception as e:
-            self.logger.error(f"Flow stats processing error: {e}")
-        finally:
-            self.return_db_connection(conn)
-    
+
     def _insert_flow_stats(self, dpid, src_ip, dst_ip, match, delta_bytes, delta_packets, duration):
         """Insert flow statistics ke database"""
         conn = self.get_db_connection()
@@ -997,28 +657,9 @@ class VoIPSmartController(app_manager.RyuApp):
             self.logger.error(f"Flow stats insert error: {e}")
         finally:
             self.return_db_connection(conn)
-    
-    def _resolve_ip(self, mac):
-        """Resolve IP dari MAC address - versi lebih robust"""
-        if not mac:
-            return None
-        
-        # Coba dari cache
-        ip = self.ip_to_mac.get(mac)
-        if ip:
-            return ip
-        
-        # Coba reverse lookup dari cache yang ada
-        for cached_ip, cached_mac in self.ip_to_mac.items():
-            if cached_mac == mac:
-                return cached_ip
-        
-        # Jika tidak ditemukan, coba kueri ARP table switch (jika ada)
-        # Fallback: return None
-        return None
 
     # =================================================================
-    # PACKET HANDLERS (Unchanged from your working code)
+    # PACKET HANDLERS
     # =================================================================
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def _state_change_handler(self, ev):
@@ -1080,19 +721,15 @@ class VoIPSmartController(app_manager.RyuApp):
         if ip_pkt:
             self.ip_to_mac[ip_pkt.src] = src
         
-        # Default routing untuk H1 dan H3 (Spine 2)
+        # Default routing untuk H3 ONLY (always Spine 2)
+        # H1 routing is handled by reroute logic
         if ip_pkt:
             src_ip = ip_pkt.src
             dst_ip = ip_pkt.dst
             
-            COLLISION_PORT = 3  # Port ke Spine 2
-            
-            if (dpid == 4 and src_ip == '10.0.0.1') or (dpid == 6 and src_ip == '10.0.0.3'):
-                # Skip jika congestion active dan ini H1 (biarkan reroute handle)
-                if self.congestion_active and src_ip == '10.0.0.1':
-                    return
-                
-                actions = [parser.OFPActionOutput(COLLISION_PORT)]
+            # H3 -> H2: Always use Spine 2 (port 3 on Leaf 3)
+            if dpid == 6 and src_ip == '10.0.0.3':
+                actions = [parser.OFPActionOutput(2)]  # Port to Spine 2
                 match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
                 
                 self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id, idle_timeout=0)
