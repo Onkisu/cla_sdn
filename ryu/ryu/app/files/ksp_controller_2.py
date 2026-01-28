@@ -182,8 +182,7 @@ class VoIPForecastController(app_manager.RyuApp):
             # Get latest forecast for DPID 5 (Leaf 2 - where H2 is connected)
             cur.execute("""
                 SELECT y_pred, ts_created
-                FROM traffic.forecast_1h
-                WHERE dpid = 5
+                FROM forecast_1h
                 ORDER BY ts_created DESC
                 LIMIT 1
             """)
