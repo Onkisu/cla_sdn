@@ -200,7 +200,7 @@ class VoIPForecastController(app_manager.RyuApp):
                 return {
                     'predicted_bps': y_pred_bps,
                     'timestamp': ts_created,
-                    'age_seconds': (datetime.now() - ts_created).total_seconds()
+                    'age_seconds': (datetime.now(ts_created.tzinfo) - ts_created).total_seconds()
                 }
             
             return None
