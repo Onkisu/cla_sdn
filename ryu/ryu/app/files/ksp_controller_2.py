@@ -121,7 +121,7 @@ class VoIPForecastController(app_manager.RyuApp):
         
         # Threads
         self.monitor_thread = hub.spawn(self._monitor_traffic)
-        hub.spawn_after(10, self._start_forecast) 
+        hub.spawn_after(15, self._start_forecast)  # Tunggu lebih lama, pastikan default flows selesai
         self.topology_thread = hub.spawn(self._discover_topology)
         
         self.logger.info("🟢 VoIP Forecast Controller Started")
@@ -136,14 +136,24 @@ class VoIPForecastController(app_manager.RyuApp):
         
         # Install default flows
         self.default_flows_installed = False
-        hub.spawn_after(3, self._install_default_flows)  # Install SEBELUM forecast monitor jalan
+        hub.spawn_after(2, self._install_default_flows)
         
 
     def _start_forecast(self):
+        # Wait for default flows to be installed
+        max_wait = 20
+        waited = 0
+        while not self.default_flows_installed and waited < max_wait:
+            hub.sleep(1)
+            waited += 1
+        
+        if not self.default_flows_installed:
+            self.logger.warning("⚠️ Starting forecast without default flows!")
+        
         self.forecast_thread = hub.spawn(self._forecast_monitor)
         self.logger.info("📊 Forecast monitor started")
 
-        
+
     def connect_database_pool(self):
         """Create database connection pool"""
         try:
@@ -625,6 +635,7 @@ class VoIPForecastController(app_manager.RyuApp):
         
         self.default_flows_installed = True
         self.logger.info("🟢 Default paths established (both via Spine 2)")
+
     
     def _install_h3_h2_permanent_flow(self):
         """
