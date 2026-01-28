@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Ryu SDN Controller: VoIP KSP Rerouting + Traffic Monitoring (ATOMIC VERSION)
+Ryu SDN Controller: VoIP QoS with FORECAST-BASED Rerouting
 =============================================================================
-ATOMIC BREAK-BEFORE-MAKE: Traffic MUST stop completely on old path before new path is activated.
-This prevents DPID 5 from seeing traffic from multiple spines simultaneously.
+FORECAST MODE: Read y_pred from forecast_1h table to predict congestion
+PROACTIVE: Reroute H1->H2 BEFORE burst happens
+CLEAN DELETION: Remove ALL flows to prevent counter accumulation
+H3 ISOLATION: H3 always uses Spine 2, never rerouted
 """
 
 from ryu.base import app_manager
@@ -17,12 +19,10 @@ from ryu.topology import event, api
 from ryu.topology.api import get_switch, get_link
 import networkx as nx
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 import time
 import json
-import random
-import os
 
 # ==========================================
 # CONFIGURATION
@@ -35,35 +35,31 @@ DB_CONFIG = {
     'port': 5432
 }
 
-# Threshold Congestion
-BURST_THRESHOLD_BPS = 120000 
-HYSTERESIS_LOWER_BPS = 88000   
-COOLDOWN_PERIOD_SEC = 20       
+# Forecast Configuration
+FORECAST_CHECK_INTERVAL = 3         # Check forecast setiap 3 detik
+FORECAST_THRESHOLD_BPS = 100000     # 100 Kbps threshold untuk reroute
+FORECAST_LEAD_TIME_SEC = 10         # Reroute 10 detik sebelum predicted congestion
+REVERT_THRESHOLD_BPS = 70000        # Revert jika forecast < 70 Kbps
 
-# Constants for Industrial Flow Management
+# Stability
+STABILITY_CYCLES_REQUIRED = 8       # Butuh 8 cycle stabil sebelum revert
+
+# OpenFlow
 COOKIE_REROUTE = 0xDEADBEEF    
 PRIORITY_REROUTE = 30000       
 PRIORITY_USER = 10             
 PRIORITY_DEFAULT = 1           
 
-# Safety Limits
-MAX_STAGE_TIME_SEC = 15        
-HEALTH_CHECK_INTERVAL = 5      
+# Timing
+FLOW_DELETE_WAIT_SEC = 1.5
+TRAFFIC_SETTLE_WAIT_SEC = 2.0
 STATE_FILE = '/tmp/controller_state.json'
-
-# CRITICAL: Waiting periods for atomic break-before-make
-FLOW_DELETE_WAIT_SEC = 2.0     # Wait after deleting flows
-TRAFFIC_SILENCE_WAIT_SEC = 3.0 # Wait to verify no traffic on old path
 
 # ==========================================
 # HELPER FUNCTIONS
 # ==========================================
-def safe_division(numerator, denominator):
-    """Mencegah division by zero"""
-    return numerator / denominator if denominator != 0 else 0
-
 def write_state_file(state_data):
-    """Tulis state controller ke file untuk monitoring external"""
+    """Write controller state to file for external monitoring"""
     try:
         state_data['timestamp'] = datetime.now().isoformat()
         with open(STATE_FILE, 'w') as f:
@@ -71,38 +67,39 @@ def write_state_file(state_data):
     except:
         pass
 
-class VoIPSmartController(app_manager.RyuApp):
+class VoIPForecastController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
-        super(VoIPSmartController, self).__init__(*args, **kwargs)
+        super(VoIPForecastController, self).__init__(*args, **kwargs)
         
-        # Thread safety lock
+        # Thread safety
         self.lock = threading.RLock()
         
         # State Management
         self.reroute_stage = 'IDLE'
         self.stage_start_time = time.time()
-        self.stopped_spines = []
-        self.trigger_val_cache = 0
         
-        # Traffic counters dengan expiration
+        # Traffic counters - CRITICAL: Reset on reroute
         self.last_bytes = {}
         self.last_bytes_timestamp = {}
+        self.last_packets = {}
         
-        # Per-spine traffic monitoring untuk atomic verification
-        self.spine_traffic = {1: 0, 2: 0, 3: 0}  # DPID -> bytes/sec
-        self.spine_traffic_last_update = {1: 0, 2: 0, 3: 0}
+        # Per-spine traffic monitoring
+        self.spine_traffic = {1: 0, 2: 0, 3: 0}
         
         # Stability tracking
         self.stability_counter = 0
-        self.required_stable_cycles = 10
         
         # Congestion state
         self.congestion_active = False
-        self.current_spine = 2  # Default spine (Spine 2)
-        self.congested_spine = None
+        self.current_spine = 2          # START: Both H1 and H3 via Spine 2
+        self.original_spine = 2         # Store original for revert
         self.last_reroute_time = 0
+        
+        # Forecast tracking
+        self.last_forecast_value = 0
+        self.last_forecast_time = None
         
         # Network topology
         self.datapaths = {}
@@ -110,122 +107,269 @@ class VoIPSmartController(app_manager.RyuApp):
         self.ip_to_mac = {}
         self.net = nx.DiGraph()
         
-        # Connection pooling
+        # Database
         self.db_pool = None
         self.connect_database_pool()
         
-        # Health monitoring
+        # Stats
         self.stats = {
-            'reroute_count': 0,
-            'revert_count': 0,
-            'stuck_count': 0,
-            'last_health_check': time.time()
+            'forecast_reroute': 0,
+            'forecast_revert': 0,
+            'total_reroutes': 0,
+            'total_reverts': 0
         }
         
         # Threads
         self.monitor_thread = hub.spawn(self._monitor_traffic)
-        self.forecast_thread = hub.spawn(self._monitor_forecast_safe)
+        self.forecast_thread = hub.spawn(self._forecast_monitor)
         self.topology_thread = hub.spawn(self._discover_topology)
-        self.health_thread = hub.spawn(self._health_monitor)
         
-        self.logger.info("🟢 VoIP Smart Controller (ATOMIC BREAK-BEFORE-MAKE) Started")
+        self.logger.info("🟢 VoIP Forecast Controller Started")
+        self.logger.info("📊 Forecast source: forecast_1h.y_pred (DPID 5)")
         
-        # Write initial state
         write_state_file({
             'state': 'IDLE',
             'congestion': False,
-            'current_spine': self.current_spine
+            'current_spine': self.current_spine,
+            'forecast_mode': True
         })
         
-        # Install default H1->H2 flows after topology is discovered
+        # Install default flows
         self.default_flows_installed = False
-        hub.spawn_after(8, self._install_default_h1_h2_flows)
+        hub.spawn_after(8, self._install_default_flows)
         
     def connect_database_pool(self):
-        """Gunakan connection pooling untuk efisiensi"""
+        """Create database connection pool"""
         try:
             from psycopg2 import pool
             self.db_pool = pool.SimpleConnectionPool(1, 5, **DB_CONFIG)
-            self.logger.info("✅ Database pool created (min=1, max=5)")
+            self.logger.info("✅ Database pool created")
         except Exception as e:
-            self.logger.warning(f"DB Pool Error: {e}")
+            self.logger.warning(f"⚠️ DB Pool Error: {e}")
             self.db_pool = None
     
     def get_db_connection(self):
-        """Dapatkan koneksi dari pool"""
+        """Get connection from pool"""
         if not self.db_pool:
             return None
         try:
             return self.db_pool.getconn()
         except Exception as e:
-            self.logger.error(f"DB Connection Error: {e}")
+            self.logger.error(f"❌ DB Connection Error: {e}")
             return None
     
     def return_db_connection(self, conn):
-        """Kembalikan koneksi ke pool"""
+        """Return connection to pool"""
         if self.db_pool and conn:
             self.db_pool.putconn(conn)
 
     # =================================================================
-    # ATOMIC BREAK-BEFORE-MAKE IMPLEMENTATION
+    # FORECAST MECHANISM - Read from forecast_1h table
+    # =================================================================
+    
+    def _get_latest_forecast(self):
+        """
+        Get latest forecast from forecast_1h table
+        Returns: predicted throughput (bps) for DPID 5
+        """
+        conn = self.get_db_connection()
+        if not conn:
+            return None
+        
+        try:
+            cur = conn.cursor()
+            
+            # Get latest forecast for DPID 5 (Leaf 2 - where H2 is connected)
+            cur.execute("""
+                SELECT y_pred, ts_created
+                FROM traffic.forecast_1h
+                WHERE dpid = 5
+                ORDER BY ts_created DESC
+                LIMIT 1
+            """)
+            
+            result = cur.fetchone()
+            cur.close()
+            
+            if result:
+                y_pred_kbps = result[0]  # Assuming y_pred is in Kbps
+                ts_created = result[1]
+                
+                # Convert to bps
+                y_pred_bps = y_pred_kbps * 1000
+                
+                return {
+                    'predicted_bps': y_pred_bps,
+                    'timestamp': ts_created,
+                    'age_seconds': (datetime.now() - ts_created).total_seconds()
+                }
+            
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"❌ Forecast query error: {e}")
+            return None
+        finally:
+            self.return_db_connection(conn)
+    
+    def _forecast_monitor(self):
+        """
+        Monitor forecast and trigger proactive rerouting
+        """
+        while True:
+            hub.sleep(FORECAST_CHECK_INTERVAL)
+            
+            try:
+                with self.lock:
+                    # Skip if not in stable state
+                    if self.reroute_stage not in ['IDLE', 'ACTIVE_REROUTE']:
+                        continue
+                    
+                    forecast = self._get_latest_forecast()
+                    
+                    if not forecast:
+                        continue
+                    
+                    predicted_bps = forecast['predicted_bps']
+                    forecast_age = forecast['age_seconds']
+                    
+                    # Only use recent forecasts (< 60 seconds old)
+                    if forecast_age > 60:
+                        self.logger.debug(f"⏰ Forecast too old ({forecast_age:.0f}s), skipping")
+                        continue
+                    
+                    self.last_forecast_value = predicted_bps
+                    self.last_forecast_time = forecast['timestamp']
+                    
+                    # Log forecast value
+                    if int(time.time()) % 10 == 0:  # Every 10 seconds
+                        self.logger.info(f"📊 Forecast: {predicted_bps:.0f} bps (age: {forecast_age:.1f}s)")
+                    
+                    # === TRIGGER PROACTIVE REROUTE ===
+                    if (not self.congestion_active and 
+                        self.reroute_stage == 'IDLE' and
+                        predicted_bps > FORECAST_THRESHOLD_BPS):
+                        
+                        self.logger.warning(f"🔮 FORECAST ALERT: Predicted {predicted_bps:.0f} bps > {FORECAST_THRESHOLD_BPS} bps")
+                        self.logger.info(f"🚀 PROACTIVE REROUTE: Moving H1->H2 from Spine {self.current_spine}")
+                        
+                        # Select alternative spine
+                        target_spine = self._get_alternative_spine(self.current_spine)
+                        
+                        self.stage_start_time = time.time()
+                        self.last_reroute_time = time.time()
+                        self.stats['forecast_reroute'] += 1
+                        
+                        success = self._atomic_reroute_to_spine(target_spine)
+                        
+                        if not success:
+                            self.logger.error("❌ Proactive reroute failed")
+                            self.reroute_stage = 'IDLE'
+                    
+                    # === TRIGGER REVERT ===
+                    elif (self.congestion_active and 
+                          self.reroute_stage == 'ACTIVE_REROUTE' and
+                          predicted_bps < REVERT_THRESHOLD_BPS):
+                        
+                        self.stability_counter += 1
+                        
+                        self.logger.debug(f"✓ Stability check {self.stability_counter}/{STABILITY_CYCLES_REQUIRED} (forecast: {predicted_bps:.0f} bps)")
+                        
+                        if self.stability_counter >= STABILITY_CYCLES_REQUIRED:
+                            self.logger.info(f"✅ Forecast stable below {REVERT_THRESHOLD_BPS} bps, reverting...")
+                            
+                            self.stats['forecast_revert'] += 1
+                            success = self._atomic_revert_to_original_spine()
+                            
+                            if success:
+                                self.stability_counter = 0
+                            else:
+                                self.logger.error("❌ Revert failed")
+                    else:
+                        # Reset stability counter if forecast goes back up
+                        if self.congestion_active and predicted_bps >= REVERT_THRESHOLD_BPS:
+                            self.stability_counter = 0
+                            
+            except Exception as e:
+                self.logger.error(f"❌ Forecast monitor error: {e}")
+
+    # =================================================================
+    # COMPLETE FLOW DELETION - Prevents Counter Accumulation
     # =================================================================
     
     def _get_alternative_spine(self, avoid_spine):
-        """Get next available spine, avoiding congested one"""
+        """Get alternative spine (avoiding current one)"""
         available = [1, 2, 3]
         available.remove(avoid_spine)
-        # Pilih spine dengan traffic terendah
+        # Choose spine with lowest traffic
         return min(available, key=lambda s: self.spine_traffic.get(s, 0))
     
-    def _verify_traffic_stopped_on_spine(self, spine_dpid):
-        """Verify that H1->H2 traffic has stopped on specified spine"""
-        current_traffic = self.spine_traffic.get(spine_dpid, 0)
-        self.logger.info(f"🔍 Verifying Spine {spine_dpid}: {current_traffic} bps")
-        return current_traffic < 1000  # Less than 1 Kbps = effectively zero
-    
-    def _delete_h1_h2_flows_on_spine(self, spine_dpid):
-        """Delete all H1->H2 flows on specified spine (DPID 1,2,3)"""
-        if spine_dpid not in self.datapaths:
-            self.logger.warning(f"⚠️ Spine {spine_dpid} datapath not available")
-            return False
+    def _delete_all_h1_h2_flows(self):
+        """
+        DELETE ALL H1->H2 flows from ALL switches
+        CRITICAL: This prevents byte counter accumulation
+        """
+        self.logger.info("🗑️ DELETING ALL H1->H2 flows from ALL switches...")
         
-        dp = self.datapaths[spine_dpid]
-        parser = dp.ofproto_parser
-        ofproto = dp.ofproto
+        # Clean ALL switches that might have H1->H2 flows
+        switches_to_clean = [1, 2, 3, 4, 5]  # Spines + Leaf 1 + Leaf 2
         
-        # Delete flows matching H1->H2 traffic
-        match = parser.OFPMatch(
-            eth_type=0x0800,
-            ipv4_src='10.0.0.1',
-            ipv4_dst='10.0.0.2'
-        )
+        deleted_count = 0
         
-        mod = parser.OFPFlowMod(
-            datapath=dp,
-            command=ofproto.OFPFC_DELETE,
-            out_port=ofproto.OFPP_ANY,
-            out_group=ofproto.OFPG_ANY,
-            match=match
-        )
+        for dpid in switches_to_clean:
+            if dpid not in self.datapaths:
+                continue
+            
+            dp = self.datapaths[dpid]
+            parser = dp.ofproto_parser
+            ofproto = dp.ofproto
+            
+            # Delete H1->H2 flows with IP match
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src='10.0.0.1',
+                ipv4_dst='10.0.0.2'
+            )
+            
+            mod = parser.OFPFlowMod(
+                datapath=dp,
+                command=ofproto.OFPFC_DELETE,
+                out_port=ofproto.OFPP_ANY,
+                out_group=ofproto.OFPG_ANY,
+                match=match
+            )
+            
+            dp.send_msg(mod)
+            deleted_count += 1
+            self.logger.info(f"  ✓ DPID {dpid}: Deleted H1->H2 flows")
         
-        dp.send_msg(mod)
-        self.logger.info(f"🗑️ Deleted H1->H2 flows on Spine {spine_dpid}")
-        return True
+        # CRITICAL: Reset ALL traffic counters for H1->H2
+        keys_to_reset = []
+        for key in list(self.last_bytes.keys()):
+            dpid, src_ip, dst_ip = key
+            if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
+                keys_to_reset.append(key)
+        
+        for key in keys_to_reset:
+            self.last_bytes.pop(key, None)
+            self.last_bytes_timestamp.pop(key, None)
+            self.last_packets.pop(key, None)
+        
+        self.logger.info(f"  ✓ Reset {len(keys_to_reset)} traffic counters")
+        self.logger.info(f"🗑️ Complete: Deleted flows from {deleted_count} switches")
     
     def _install_h1_h2_flow_on_spine(self, spine_dpid):
         """Install H1->H2 flow on specified spine"""
         if spine_dpid not in self.datapaths:
-            self.logger.warning(f"⚠️ Spine {spine_dpid} datapath not available")
+            self.logger.warning(f"⚠️ Spine {spine_dpid} not available")
             return False
         
         dp = self.datapaths[spine_dpid]
         parser = dp.ofproto_parser
         ofproto = dp.ofproto
         
-        # Determine output port based on topology
-        # Spine -> Leaf 2 (where H2 is connected)
-        # Assuming ports: Spine 1,2,3 port 2 goes to Leaf 2
-        out_port = 2  # Port to Leaf 2 (adjust based on your topology)
+        # Output port to Leaf 2 (where H2 is)
+        out_port = 2
         
         match = parser.OFPMatch(
             eth_type=0x0800,
@@ -247,19 +391,20 @@ class VoIPSmartController(app_manager.RyuApp):
         )
         
         dp.send_msg(mod)
-        self.logger.info(f"✅ Installed H1->H2 flow on Spine {spine_dpid} (port {out_port})")
+        self.logger.info(f"✅ Spine {spine_dpid}: Installed H1->H2 flow (port {out_port})")
         return True
     
     def _update_leaf1_output_port(self, target_spine):
-        """Update Leaf 1 (DPID 4) to forward H1 traffic to target spine"""
+        """Update Leaf 1 to forward H1->H2 to target spine"""
         if 4 not in self.datapaths:
+            self.logger.warning("⚠️ Leaf 1 (DPID 4) not available")
             return False
         
         dp = self.datapaths[4]
         parser = dp.ofproto_parser
         ofproto = dp.ofproto
         
-        # Port mapping on Leaf 1: port 1->Spine1, port 2->Spine2, port 3->Spine3
+        # Port mapping: 1->Spine1, 2->Spine2, 3->Spine3
         spine_to_port = {1: 1, 2: 2, 3: 3}
         out_port = spine_to_port.get(target_spine, 2)
         
@@ -283,151 +428,136 @@ class VoIPSmartController(app_manager.RyuApp):
         )
         
         dp.send_msg(mod)
-        self.logger.info(f"✅ Leaf 1: Forwarding H1->H2 to Spine {target_spine} (port {out_port})")
+        self.logger.info(f"✅ Leaf 1: Routing H1->H2 via Spine {target_spine} (port {out_port})")
         return True
 
     def _atomic_reroute_to_spine(self, target_spine):
         """
-        ATOMIC REROUTE: Ensures NO traffic overlap between spines
+        ATOMIC REROUTE with complete cleanup
         
         Steps:
-        1. Delete flows on OLD spine
-        2. Wait for flow deletion to propagate
-        3. Verify traffic has STOPPED on old spine
-        4. Install flows on NEW spine
-        5. Update Leaf 1 to use new spine
+        1. DELETE ALL H1->H2 flows from ALL switches
+        2. Wait for deletion to propagate
+        3. Wait for traffic to settle
+        4. Install NEW flows on target spine
+        5. Update Leaf 1 routing
         """
         old_spine = self.current_spine
         
-        self.logger.info(f"🔄 ATOMIC REROUTE: Spine {old_spine} -> Spine {target_spine}")
+        self.logger.info(f"🔄 ATOMIC REROUTE: Spine {old_spine} → Spine {target_spine}")
         
-        # STEP 1: Delete flows on old spine
-        self.reroute_stage = 'DELETING_OLD_FLOWS'
+        # STEP 1: Complete cleanup
+        self.reroute_stage = 'DELETING_ALL_FLOWS'
         write_state_file({
             'state': self.reroute_stage,
             'congestion': True,
-            'current_spine': old_spine,
+            'old_spine': old_spine,
             'target_spine': target_spine
         })
         
-        success = self._delete_h1_h2_flows_on_spine(old_spine)
-        if not success:
-            self.logger.error("❌ Failed to delete flows on old spine")
-            return False
+        self._delete_all_h1_h2_flows()
         
-        # STEP 2: Wait for deletion to propagate
+        # STEP 2: Wait for OpenFlow deletion
         self.logger.info(f"⏳ Waiting {FLOW_DELETE_WAIT_SEC}s for flow deletion...")
         time.sleep(FLOW_DELETE_WAIT_SEC)
         
-        # STEP 3: Verify silence on old spine
-        self.reroute_stage = 'VERIFYING_SILENCE'
+        # STEP 3: Wait for traffic to settle
+        self.reroute_stage = 'WAITING_SETTLE'
+        write_state_file({
+            'state': self.reroute_stage,
+            'congestion': True
+        })
+        
+        self.logger.info(f"⏳ Waiting {TRAFFIC_SETTLE_WAIT_SEC}s for traffic to settle...")
+        time.sleep(TRAFFIC_SETTLE_WAIT_SEC)
+        
+        # STEP 4: Install new path
+        self.reroute_stage = 'INSTALLING_NEW_PATH'
         write_state_file({
             'state': self.reroute_stage,
             'congestion': True,
-            'current_spine': old_spine,
             'target_spine': target_spine
         })
         
-        self.logger.info(f"⏳ Waiting {TRAFFIC_SILENCE_WAIT_SEC}s to verify silence...")
-        time.sleep(TRAFFIC_SILENCE_WAIT_SEC)
-        
-        # Check if traffic has stopped
-        if not self._verify_traffic_stopped_on_spine(old_spine):
-            self.logger.warning(f"⚠️ Traffic still present on Spine {old_spine}, forcing continue...")
-        
-        # STEP 4: Install flows on new spine
-        self.reroute_stage = 'INSTALLING_NEW_FLOWS'
-        write_state_file({
-            'state': self.reroute_stage,
-            'congestion': True,
-            'current_spine': target_spine,
-            'old_spine': old_spine
-        })
-        
+        # Install on target spine
         success = self._install_h1_h2_flow_on_spine(target_spine)
         if not success:
-            self.logger.error("❌ Failed to install flows on new spine")
+            self.logger.error("❌ Failed to install on target spine")
+            self.reroute_stage = 'IDLE'
             return False
         
         # STEP 5: Update Leaf 1
         success = self._update_leaf1_output_port(target_spine)
         if not success:
             self.logger.error("❌ Failed to update Leaf 1")
+            self.reroute_stage = 'IDLE'
             return False
         
-        # STEP 6: Mark complete
+        # STEP 6: Complete
         self.current_spine = target_spine
-        self.congested_spine = old_spine
+        self.original_spine = old_spine
         self.congestion_active = True
         self.reroute_stage = 'ACTIVE_REROUTE'
+        self.stats['total_reroutes'] += 1
         
         write_state_file({
             'state': 'ACTIVE_REROUTE',
             'congestion': True,
             'current_spine': self.current_spine,
-            'congested_spine': self.congested_spine
+            'original_spine': self.original_spine
         })
         
-        self.logger.info(f"✅ ATOMIC REROUTE COMPLETE: Now using Spine {target_spine}")
-        self.stats['reroute_count'] += 1
+        self.logger.info(f"✅ REROUTE COMPLETE: H1->H2 now via Spine {target_spine}")
         return True
 
     def _atomic_revert_to_original_spine(self):
-        """
-        ATOMIC REVERT: Return to original spine when congestion clears
-        
-        Same atomic process as reroute to prevent traffic overlap
-        """
-        if not self.congestion_active or not self.congested_spine:
+        """Revert to original spine when forecast clears"""
+        if not self.congestion_active or not self.original_spine:
+            self.logger.warning("⚠️ Cannot revert: not in rerouted state")
             return False
         
-        target_spine = self.congested_spine  # Return to original
+        target_spine = self.original_spine
         old_spine = self.current_spine
         
-        self.logger.info(f"🔙 ATOMIC REVERT: Spine {old_spine} -> Spine {target_spine}")
+        self.logger.info(f"🔙 REVERTING: Spine {old_spine} → Spine {target_spine}")
         
-        # STEP 1: Delete flows on current spine
+        # STEP 1: Complete cleanup
         self.reroute_stage = 'REVERT_DELETING'
         write_state_file({
             'state': self.reroute_stage,
             'congestion': False,
-            'current_spine': old_spine,
             'target_spine': target_spine
         })
         
-        self._delete_h1_h2_flows_on_spine(old_spine)
+        self._delete_all_h1_h2_flows()
         time.sleep(FLOW_DELETE_WAIT_SEC)
         
-        # STEP 2: Verify silence
-        self.reroute_stage = 'REVERT_VERIFY_SILENCE'
+        # STEP 2: Settle
+        self.reroute_stage = 'REVERT_SETTLE'
         write_state_file({
             'state': self.reroute_stage,
-            'congestion': False,
-            'current_spine': old_spine,
-            'target_spine': target_spine
+            'congestion': False
         })
         
-        time.sleep(TRAFFIC_SILENCE_WAIT_SEC)
+        time.sleep(TRAFFIC_SETTLE_WAIT_SEC)
         
-        if not self._verify_traffic_stopped_on_spine(old_spine):
-            self.logger.warning(f"⚠️ Traffic still present during revert, forcing continue...")
-        
-        # STEP 3: Install flows on original spine
+        # STEP 3: Install on original
         self.reroute_stage = 'REVERT_INSTALLING'
         write_state_file({
             'state': self.reroute_stage,
             'congestion': False,
-            'current_spine': target_spine
+            'target_spine': target_spine
         })
         
         self._install_h1_h2_flow_on_spine(target_spine)
         self._update_leaf1_output_port(target_spine)
         
-        # STEP 4: Complete revert
+        # STEP 4: Complete
         self.current_spine = target_spine
-        self.congested_spine = None
+        self.original_spine = target_spine
         self.congestion_active = False
         self.reroute_stage = 'IDLE'
+        self.stats['total_reverts'] += 1
         
         write_state_file({
             'state': 'IDLE',
@@ -435,76 +565,15 @@ class VoIPSmartController(app_manager.RyuApp):
             'current_spine': self.current_spine
         })
         
-        self.logger.info(f"✅ ATOMIC REVERT COMPLETE: Back to Spine {target_spine}")
-        self.stats['revert_count'] += 1
+        self.logger.info(f"✅ REVERT COMPLETE: H1->H2 back to Spine {target_spine}")
         return True
 
     # =================================================================
-    # HEALTH MONITOR & STUCK DETECTION
+    # TOPOLOGY & INITIALIZATION
     # =================================================================
-    def _health_monitor(self):
-        """Deteksi dan recover dari stuck state"""
-        while True:
-            hub.sleep(HEALTH_CHECK_INTERVAL)
-            
-            with self.lock:
-                current_time = time.time()
-                stage_duration = current_time - self.stage_start_time
-                
-                # Jika stage terlalu lama, force recover
-                if stage_duration > MAX_STAGE_TIME_SEC and self.reroute_stage != 'IDLE':
-                    self.logger.error(f"⚠️ HEALTH ALERT: Stage {self.reroute_stage} stuck for {stage_duration:.1f}s")
-                    self.stats['stuck_count'] += 1
-                    
-                    # Force reset to IDLE
-                    self.reroute_stage = 'IDLE'
-                    self.stage_start_time = current_time
-                    self.congestion_active = False
-                    
-                # Cleanup old traffic data
-                expired_keys = []
-                for key, ts in self.last_bytes_timestamp.items():
-                    if current_time - ts > 30:
-                        expired_keys.append(key)
-                for key in expired_keys:
-                    self.last_bytes.pop(key, None)
-                    self.last_bytes_timestamp.pop(key, None)
-
-    def _install_default_h1_h2_flows(self):
-        """Install default H1->H2 flows via Spine 2 (default path) at startup"""
-        self.logger.info("🔧 Installing DEFAULT H1->H2 flows (Spine 2)...")
-        
-        # Wait for datapaths to be ready
-        max_wait = 10
-        waited = 0
-        while waited < max_wait:
-            if 2 in self.datapaths and 4 in self.datapaths:
-                break
-            hub.sleep(1)
-            waited += 1
-        
-        if 2 not in self.datapaths or 4 not in self.datapaths:
-            self.logger.error("❌ Cannot install default flows - datapaths not ready")
-            return
-        
-        # Install on Spine 2 (default spine)
-        success = self._install_h1_h2_flow_on_spine(2)
-        if success:
-            self.logger.info("✅ Spine 2 flow installed")
-        
-        # Install on Leaf 1 (point to Spine 2)
-        success = self._update_leaf1_output_port(2)
-        if success:
-            self.logger.info("✅ Leaf 1 routing installed (→ Spine 2)")
-        
-        self.default_flows_installed = True
-        self.logger.info("🟢 Default H1->H2 path established (via Spine 2)")
-
-
-    # =================================================================
-    # TOPOLOGY DISCOVERY
-    # =================================================================
+    
     def _discover_topology(self):
+        """Discover network topology periodically"""
         while True:
             hub.sleep(5)
             try:
@@ -516,84 +585,112 @@ class VoIPSmartController(app_manager.RyuApp):
                     self.net.add_node(switch.dp.id)
                 
                 for link in links:
-                    self.net.add_edge(link.src.dpid, link.dst.dpid, 
-                                    port=link.src.port_no)
-                    self.net.add_edge(link.dst.dpid, link.src.dpid, 
-                                    port=link.dst.port_no)
+                    self.net.add_edge(link.src.dpid, link.dst.dpid, port=link.src.port_no)
+                    self.net.add_edge(link.dst.dpid, link.src.dpid, port=link.dst.port_no)
             except:
                 pass
 
-    # =================================================================
-    # CONGESTION DETECTION & TRIGGER
-    # =================================================================
-    def _monitor_forecast_safe(self):
-        """Monitor congestion on Spine 2 (DPID 2) and trigger atomic reroute"""
-        while True:
+    def _install_default_flows(self):
+        """
+        Install default flows at startup
+        BOTH H1 and H3 start via Spine 2
+        """
+        self.logger.info("🔧 Installing DEFAULT flows...")
+        
+        # Wait for datapaths
+        max_wait = 12
+        waited = 0
+        while waited < max_wait:
+            if all(dpid in self.datapaths for dpid in [2, 4, 6]):
+                break
             hub.sleep(1)
+            waited += 1
+        
+        if not all(dpid in self.datapaths for dpid in [2, 4, 6]):
+            self.logger.error("❌ Not all datapaths ready")
+            return
+        
+        # === H1->H2: Via Spine 2 (default, can be rerouted) ===
+        self._install_h1_h2_flow_on_spine(2)
+        self._update_leaf1_output_port(2)
+        self.logger.info("✅ H1->H2 path: Leaf1 → Spine2 → Leaf2")
+        
+        # === H3->H2: PERMANENTLY via Spine 2 (NEVER reroute) ===
+        self._install_h3_h2_permanent_flow()
+        self.logger.info("✅ H3->H2 path: Leaf3 → Spine2 → Leaf2 (PERMANENT)")
+        
+        self.default_flows_installed = True
+        self.logger.info("🟢 Default paths established (both via Spine 2)")
+    
+    def _install_h3_h2_permanent_flow(self):
+        """
+        Install H3->H2 flow PERMANENTLY on Spine 2 and Leaf 3
+        This flow is NEVER deleted or rerouted
+        """
+        # Leaf 3 (DPID 6): H3->H2 → Spine 2
+        if 6 in self.datapaths:
+            dp = self.datapaths[6]
+            parser = dp.ofproto_parser
+            ofproto = dp.ofproto
             
-            try:
-                with self.lock:
-                    # Only monitor the CURRENT spine for congestion
-                    congested_spine_dpid = self.current_spine
-                    
-                    current_bps = self.spine_traffic.get(congested_spine_dpid, 0)
-                    
-                    current_time = time.time()
-                    time_since_last_reroute = current_time - self.last_reroute_time
-                    
-                    # TRIGGER REROUTE: Congestion detected
-                    if (not self.congestion_active and 
-                        current_bps > BURST_THRESHOLD_BPS and 
-                        time_since_last_reroute > COOLDOWN_PERIOD_SEC and
-                        self.reroute_stage == 'IDLE'):
-                        
-                        self.logger.warning(f"🚨 CONGESTION on Spine {congested_spine_dpid}: {current_bps:.0f} bps")
-                        
-                        # Find alternative spine
-                        target_spine = self._get_alternative_spine(congested_spine_dpid)
-                        
-                        self.stage_start_time = time.time()
-                        self.last_reroute_time = time.time()
-                        
-                        # Execute atomic reroute
-                        success = self._atomic_reroute_to_spine(target_spine)
-                        
-                        if not success:
-                            self.logger.error("❌ Atomic reroute failed")
-                            self.reroute_stage = 'IDLE'
-                    
-                    # TRIGGER REVERT: Congestion cleared
-                    elif (self.congestion_active and 
-                          self.congested_spine and
-                          self.reroute_stage == 'ACTIVE_REROUTE'):
-                        
-                        # Check if original spine is clear
-                        original_spine_bps = self.spine_traffic.get(self.congested_spine, 0)
-                        
-                        if original_spine_bps < HYSTERESIS_LOWER_BPS:
-                            self.stability_counter += 1
-                            
-                            if self.stability_counter >= self.required_stable_cycles:
-                                self.logger.info(f"✅ Spine {self.congested_spine} stable, reverting...")
-                                
-                                success = self._atomic_revert_to_original_spine()
-                                
-                                if success:
-                                    self.stability_counter = 0
-                                else:
-                                    self.logger.error("❌ Atomic revert failed")
-                        else:
-                            self.stability_counter = 0
-                            
-            except Exception as e:
-                self.logger.error(f"Forecast monitor error: {e}")
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src='10.0.0.3',
+                ipv4_dst='10.0.0.2'
+            )
+            
+            actions = [parser.OFPActionOutput(2)]  # Port 2 to Spine 2
+            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+            
+            mod = parser.OFPFlowMod(
+                datapath=dp,
+                priority=PRIORITY_REROUTE + 100,  # Higher priority to prevent override
+                match=match,
+                instructions=inst,
+                idle_timeout=0,
+                hard_timeout=0
+            )
+            
+            dp.send_msg(mod)
+            self.logger.info("✅ Leaf 3: H3->H2 → Spine 2 (port 2) [PERMANENT]")
+        
+        # Spine 2: H3->H2 → Leaf 2
+        if 2 in self.datapaths:
+            dp = self.datapaths[2]
+            parser = dp.ofproto_parser
+            ofproto = dp.ofproto
+            
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src='10.0.0.3',
+                ipv4_dst='10.0.0.2'
+            )
+            
+            actions = [parser.OFPActionOutput(2)]  # Port 2 to Leaf 2
+            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+            
+            mod = parser.OFPFlowMod(
+                datapath=dp,
+                priority=PRIORITY_REROUTE + 100,  # Higher priority
+                match=match,
+                instructions=inst,
+                idle_timeout=0,
+                hard_timeout=0
+            )
+            
+            dp.send_msg(mod)
+            self.logger.info("✅ Spine 2: H3->H2 → Leaf 2 (port 2) [PERMANENT]")
 
     # =================================================================
     # TRAFFIC MONITORING
     # =================================================================
+    
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
-        """Process flow stats and update per-spine traffic counters"""
+        """
+        Process flow stats with proper delta calculation
+        CRITICAL: Deltas prevent counter accumulation
+        """
         body = ev.msg.body
         dpid = ev.msg.datapath.id
         current_time = time.time()
@@ -606,73 +703,62 @@ class VoIPSmartController(app_manager.RyuApp):
             for stat in body:
                 match = stat.match
                 
-                # Extract IPs
                 src_ip = match.get('ipv4_src')
                 dst_ip = match.get('ipv4_dst')
                 
                 if not src_ip or not dst_ip:
                     continue
                 
-                # Create unique flow key
                 flow_key = (dpid, src_ip, dst_ip)
                 
-                # Calculate delta for BYTES
+                # Current values
                 current_bytes = stat.byte_count
-                last_bytes = self.last_bytes.get(flow_key, current_bytes)  # FIX: Initialize to current on first seen
+                current_packets = stat.packet_count
+                
+                # Get last values (initialize to current on first observation)
+                last_bytes = self.last_bytes.get(flow_key, current_bytes)
+                last_packets = self.last_packets.get(flow_key, current_packets)
                 last_ts = self.last_bytes_timestamp.get(flow_key, current_time)
                 
+                # Calculate deltas (PREVENTS ACCUMULATION)
                 delta_bytes = max(0, current_bytes - last_bytes)
-                time_diff = max(0.1, current_time - last_ts)
-                
-                # Calculate delta for PACKETS (FIX #2: Track packets properly)
-                current_packets = stat.packet_count
-                last_packets = getattr(self, 'last_packets', {}).get(flow_key, current_packets)
                 delta_packets = max(0, current_packets - last_packets)
+                time_diff = max(0.1, current_time - last_ts)
                 
                 # Update tracking
                 self.last_bytes[flow_key] = current_bytes
-                self.last_bytes_timestamp[flow_key] = current_time
-                
-                # Track packets too (FIX #2)
-                if not hasattr(self, 'last_packets'):
-                    self.last_packets = {}
                 self.last_packets[flow_key] = current_packets
+                self.last_bytes_timestamp[flow_key] = current_time
                 
                 # Calculate bps
                 bps = (delta_bytes * 8) / time_diff
                 
-                # Update per-spine traffic for H1->H2
-                if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
-                    if dpid in [1, 2, 3]:  # Spine switches
-                        self.spine_traffic[dpid] = bps
-                        self.spine_traffic_last_update[dpid] = current_time
+                # Update spine traffic for H1->H2
+                if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and dpid in [1, 2, 3]:
+                    self.spine_traffic[dpid] = bps
                 
-                # FIX #3: Resolve MACs from IP cache
-                src_mac = self.ip_to_mac.get(src_ip, None)
-                dst_mac = self.ip_to_mac.get(dst_ip, None)
+                # Resolve MACs
+                src_mac = self.ip_to_mac.get(src_ip)
+                dst_mac = self.ip_to_mac.get(dst_ip)
                 
-                # Insert to DB (only if there's actual delta - FIX: prevents cumulative counts)
-                # INSERT SEMUA FLOW H1 -> H2 (TERMESUK LEAF / DPID 5)
-                # === JALUR 1: VOIP H1 -> H2 (WAJIB MASUK, MESKI delta_bytes=0) ===
+                # Insert to DB
+                # H1->H2: Always insert (for monitoring)
                 if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
                     self._insert_flow_stats(
                         dpid, src_ip, dst_ip, match,
                         delta_bytes, delta_packets,
-                        src_mac, dst_mac,
-                        time_diff
+                        src_mac, dst_mac, time_diff
                     )
-
-                # === JALUR 2: TRAFFIC LAIN (H3, BURSTY, DLL) ===
+                # Other traffic: Only if there's actual traffic
                 elif delta_bytes > 0:
                     self._insert_flow_stats(
                         dpid, src_ip, dst_ip, match,
                         delta_bytes, delta_packets,
-                        src_mac, dst_mac,
-                        time_diff
+                        src_mac, dst_mac, time_diff
                     )
-
+        
         except Exception as e:
-            self.logger.error(f"Flow stats error: {e}")
+            self.logger.error(f"❌ Flow stats error: {e}")
         finally:
             self.return_db_connection(conn)
 
@@ -680,12 +766,6 @@ class VoIPSmartController(app_manager.RyuApp):
         """Request flow stats periodically"""
         while True:
             hub.sleep(1)
-            
-            # Debug: Log active datapaths every 10 seconds
-            if int(time.time()) % 10 == 0:
-                dpids = sorted(self.datapaths.keys())
-                self.logger.debug(f"📊 Monitoring DPIDs: {dpids}")
-            
             for dp in self.datapaths.values():
                 self._request_stats(dp)
 
@@ -697,7 +777,7 @@ class VoIPSmartController(app_manager.RyuApp):
 
     def _insert_flow_stats(self, dpid, src_ip, dst_ip, match, delta_bytes, delta_packets, 
                            src_mac, dst_mac, duration):
-        """Insert flow statistics ke database"""
+        """Insert flow stats to database"""
         conn = self.get_db_connection()
         if not conn:
             return
@@ -712,58 +792,72 @@ class VoIPSmartController(app_manager.RyuApp):
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 datetime.now(), dpid, src_ip, dst_ip,
-                src_mac, dst_mac,  # FIX: Use resolved MACs
+                src_mac, dst_mac,
                 match.get('ip_proto', 17),
                 match.get('tcp_src') or match.get('udp_src') or 0,
                 match.get('tcp_dst') or match.get('udp_dst') or 0,
                 delta_bytes, delta_bytes,
-                delta_packets, delta_packets,  # FIX: Use actual delta_packets
-                duration,  # FIX: Use actual time_diff
+                delta_packets, delta_packets,
+                duration,
                 'voip' if src_ip == '10.0.0.1' else 'bursty'
             ))
             conn.commit()
             cur.close()
         except Exception as e:
-            self.logger.error(f"Flow stats insert error: {e}")
+            self.logger.error(f"❌ DB insert error: {e}")
         finally:
             self.return_db_connection(conn)
 
     # =================================================================
     # PACKET HANDLERS
     # =================================================================
+    
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def _state_change_handler(self, ev):
         datapath = ev.datapath
         if ev.state == MAIN_DISPATCHER:
             if datapath.id not in self.datapaths:
                 self.datapaths[datapath.id] = datapath
+                self.logger.info(f"🔌 Switch connected: DPID {datapath.id}")
         elif ev.state == DEAD_DISPATCHER:
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
+                self.logger.warning(f"🔌 Switch disconnected: DPID {datapath.id}")
     
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
+        """Handle switch connection"""
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
+        
+        # Install table-miss flow
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
     
     def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=0):
+        """Add flow to switch"""
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        
         if buffer_id:
-            mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id, priority=priority, 
-                                   match=match, instructions=inst, idle_timeout=idle_timeout)
+            mod = parser.OFPFlowMod(
+                datapath=datapath, buffer_id=buffer_id, priority=priority, 
+                match=match, instructions=inst, idle_timeout=idle_timeout
+            )
         else:
-            mod = parser.OFPFlowMod(datapath=datapath, priority=priority, match=match, 
-                                   instructions=inst, idle_timeout=idle_timeout)
+            mod = parser.OFPFlowMod(
+                datapath=datapath, priority=priority, match=match, 
+                instructions=inst, idle_timeout=idle_timeout
+            )
+        
         datapath.send_msg(mod)
     
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
+        """Handle packet-in events"""
         msg = ev.msg
         datapath = msg.datapath
         ofproto = datapath.ofproto
@@ -774,8 +868,11 @@ class VoIPSmartController(app_manager.RyuApp):
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
         
-        if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
-        if eth.ethertype == ether_types.ETH_TYPE_IPV6: return
+        # Ignore LLDP and IPv6
+        if eth.ethertype == ether_types.ETH_TYPE_LLDP:
+            return
+        if eth.ethertype == ether_types.ETH_TYPE_IPV6:
+            return
         
         dst = eth.dst
         src = eth.src
@@ -784,93 +881,76 @@ class VoIPSmartController(app_manager.RyuApp):
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
         
-        # Protocol extraction
+        # Extract protocols
         arp_pkt = pkt.get_protocol(arp.arp)
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         
         if ip_pkt:
             self.ip_to_mac[ip_pkt.src] = src
         
-        # Default routing untuk H3 ONLY (always Spine 2)
-        # H1 routing is handled by reroute logic
-        if ip_pkt:
+        # === SPECIAL HANDLING FOR H1->H2 (Leaf 1 - DPID 4) ===
+        if ip_pkt and dpid == 4:
             src_ip = ip_pkt.src
             dst_ip = ip_pkt.dst
             
-            # H1 -> H2: Use current_spine (default: Spine 2, atau spine lain saat reroute)
-            if dpid == 4 and src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
-                # Port mapping: port 1->Spine1, port 2->Spine2, port 3->Spine3
+            if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
+                # Route via current_spine
                 spine_to_port = {1: 1, 2: 2, 3: 3}
                 out_port = spine_to_port.get(self.current_spine, 2)
                 
                 actions = [parser.OFPActionOutput(out_port)]
                 match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
                 
-                self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id, idle_timeout=0)
+                self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
                 
                 data = None
                 if msg.buffer_id == ofproto.OFP_NO_BUFFER:
                     data = msg.data
                 
-                out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                        in_port=in_port, actions=actions, data=data)
-                datapath.send_msg(out)
-                return
-
-            # H3 -> H2: Always use Spine 2 (port 2 on Leaf 3)
-            if dpid == 6 and src_ip == '10.0.0.3':
-                actions = [parser.OFPActionOutput(2)]  # Port to Spine 2
-                match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
-                
-                self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id, idle_timeout=0)
-                
-                data = None
-                if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-                    data = msg.data
-                
-                out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                        in_port=in_port, actions=actions, data=data)
+                out = parser.OFPPacketOut(
+                    datapath=datapath, buffer_id=msg.buffer_id,
+                    in_port=in_port, actions=actions, data=data
+                )
                 datapath.send_msg(out)
                 return
         
-        # ARP handling
-        if arp_pkt:
-            self.ip_to_mac[arp_pkt.src_ip] = arp_pkt.src_mac
-            if arp_pkt.opcode == arp.ARP_REQUEST and arp_pkt.dst_ip in self.ip_to_mac:
-                target_mac = self.ip_to_mac[arp_pkt.dst_ip]
-                e = ethernet.ethernet(dst=src, src=target_mac, ethertype=ether_types.ETH_TYPE_ARP)
-                a = arp.arp(opcode=arp.ARP_REPLY, src_mac=target_mac, src_ip=arp_pkt.dst_ip, 
-                           dst_mac=src, dst_ip=arp_pkt.src_ip)
-                p = packet.Packet()
-                p.add_protocol(e)
-                p.add_protocol(a)
-                p.serialize()
-                actions = [parser.OFPActionOutput(in_port)]
-                out = parser.OFPPacketOut(datapath=datapath, buffer_id=ofproto.OFP_NO_BUFFER, 
-                                         in_port=ofproto.OFPP_CONTROLLER, actions=actions, data=p.data)
-                datapath.send_msg(out)
-                return
-        
-
-        # FIX: Tambahkan logic untuk DPID 5 (Leaf 2) agar menggunakan Match IP
-        if dpid == 5 and ip_pkt:
+        # === SPECIAL HANDLING FOR H3->H2 (Leaf 3 - DPID 6) ===
+        if ip_pkt and dpid == 6:
             src_ip = ip_pkt.src
             dst_ip = ip_pkt.dst
             
-            # Jika traffic menuju H2 (Host lokal di Leaf 2)
-            if dst_ip == '10.0.0.2':
-                # Port 2 mengarah ke H2 (Asumsi topologi: h2 terhubung ke port host)
-                # Anda perlu memastikan port host di Leaf 2 (biasanya port selain ke spine)
-                # Berdasarkan packet_in, kita bisa menggunakan logic mac_to_port atau hardcode jika tahu
+            if src_ip == '10.0.0.3' and dst_ip == '10.0.0.2':
+                # ALWAYS port 2 (Spine 2)
+                actions = [parser.OFPActionOutput(2)]
+                match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
                 
+                self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
+                
+                data = None
+                if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+                    data = msg.data
+                
+                out = parser.OFPPacketOut(
+                    datapath=datapath, buffer_id=msg.buffer_id,
+                    in_port=in_port, actions=actions, data=data
+                )
+                datapath.send_msg(out)
+                return
+        
+        # === SPECIAL HANDLING FOR Leaf 2 (DPID 5) - DESTINATION ===
+        if ip_pkt and dpid == 5:
+            src_ip = ip_pkt.src
+            dst_ip = ip_pkt.dst
+            
+            if dst_ip == '10.0.0.2':
                 if dst in self.mac_to_port[dpid]:
                     out_port = self.mac_to_port[dpid][dst]
                 else:
-                    out_port = ofproto.OFPP_FLOOD # Fallback
+                    out_port = ofproto.OFPP_FLOOD
                 
                 if out_port != ofproto.OFPP_FLOOD:
                     actions = [parser.OFPActionOutput(out_port)]
-                    # PENTING: Gunakan Match IP agar stats terekam
+                    # Use IP match for stats tracking
                     match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
                     
                     self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id, idle_timeout=60)
@@ -879,12 +959,42 @@ class VoIPSmartController(app_manager.RyuApp):
                     if msg.buffer_id == ofproto.OFP_NO_BUFFER:
                         data = msg.data
                     
-                    out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                            in_port=in_port, actions=actions, data=data)
+                    out = parser.OFPPacketOut(
+                        datapath=datapath, buffer_id=msg.buffer_id,
+                        in_port=in_port, actions=actions, data=data
+                    )
                     datapath.send_msg(out)
                     return
-                    
-        # Standard switching logic
+        
+        # === ARP HANDLING ===
+        if arp_pkt:
+            self.ip_to_mac[arp_pkt.src_ip] = arp_pkt.src_mac
+            
+            if arp_pkt.opcode == arp.ARP_REQUEST and arp_pkt.dst_ip in self.ip_to_mac:
+                target_mac = self.ip_to_mac[arp_pkt.dst_ip]
+                
+                e = ethernet.ethernet(
+                    dst=src, src=target_mac, ethertype=ether_types.ETH_TYPE_ARP
+                )
+                a = arp.arp(
+                    opcode=arp.ARP_REPLY, src_mac=target_mac, src_ip=arp_pkt.dst_ip, 
+                    dst_mac=src, dst_ip=arp_pkt.src_ip
+                )
+                
+                p = packet.Packet()
+                p.add_protocol(e)
+                p.add_protocol(a)
+                p.serialize()
+                
+                actions = [parser.OFPActionOutput(in_port)]
+                out = parser.OFPPacketOut(
+                    datapath=datapath, buffer_id=ofproto.OFP_NO_BUFFER, 
+                    in_port=ofproto.OFPP_CONTROLLER, actions=actions, data=p.data
+                )
+                datapath.send_msg(out)
+                return
+        
+        # === STANDARD SWITCHING LOGIC ===
         if dst in self.mac_to_port[dpid]:
             out_port = self.mac_to_port[dpid][dst]
         else:
@@ -896,18 +1006,20 @@ class VoIPSmartController(app_manager.RyuApp):
         
         if out_port == ofproto.OFPP_FLOOD:
             if is_leaf:
-                if in_port <= 3:
-                    actions.append(parser.OFPActionOutput(4))
-                    actions.append(parser.OFPActionOutput(5))
-                else:
+                # Flood to host ports and uplinks
+                if in_port <= 3:  # From spine
+                    actions.append(parser.OFPActionOutput(4))  # To host
+                    actions.append(parser.OFPActionOutput(5))  # To host (if exists)
+                else:  # From host
                     actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD))
             elif is_spine:
                 actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD))
         else:
             actions = [parser.OFPActionOutput(out_port)]
         
+        # Install flow if not flooding
         if out_port != ofproto.OFPP_FLOOD:
-            # FIX: Force Match IP untuk SEMUA switch (termasuk Spine) agar terekam DB
+            # Use IP match for stats if IP packet
             if ip_pkt:
                 match = parser.OFPMatch(
                     in_port=in_port, 
@@ -918,13 +1030,16 @@ class VoIPSmartController(app_manager.RyuApp):
                 )
             else:
                 match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-
+            
             self.add_flow(datapath, PRIORITY_DEFAULT, match, actions, msg.buffer_id, idle_timeout=60)
         
+        # Send packet out
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
         
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id, 
-                                 in_port=in_port, actions=actions, data=data)
+        out = parser.OFPPacketOut(
+            datapath=datapath, buffer_id=msg.buffer_id, 
+            in_port=in_port, actions=actions, data=data
+        )
         datapath.send_msg(out)
