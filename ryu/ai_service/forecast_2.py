@@ -16,7 +16,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # CONFIG
 # =========================
 DB_URI = "postgresql://dev_one:hijack332.@127.0.0.1:5432/development"
-TABLE_FORECAST = "forecast_1h"
+TABLE_FORECAST = "traffic.forecast_1h"
 
 # Konfigurasi Target
 TARGET = "throughput_bps"
