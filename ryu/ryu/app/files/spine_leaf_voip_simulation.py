@@ -134,8 +134,8 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
         info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
 
-        dst_host.cmd("pkill -9 ITGRecv")
-        dst_host.cmd(f"ITGRecv -l {logfile} &")
+        dst_host.cmdPrint("pkill -9 ITGRecv 2>/dev/null || true")
+        dst_host.sendCmd(f"ITGRecv -l {logfile}")
         time.sleep(1)
 
         info("*** Starting ITGSend (STEADY)\n")
