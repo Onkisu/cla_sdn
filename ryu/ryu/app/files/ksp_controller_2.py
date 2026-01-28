@@ -245,8 +245,7 @@ class VoIPForecastController(app_manager.RyuApp):
                         self.logger.info(f"📊 Forecast: {predicted_bps:.0f} bps (age: {forecast_age:.1f}s)")
                     
                     # === TRIGGER PROACTIVE REROUTE ===
-                    if (not self.congestion_active and 
-                        self.reroute_stage == 'IDLE' and
+                    if ( self.reroute_stage == 'IDLE' and
                         predicted_bps > FORECAST_THRESHOLD_BPS):
                         
                         self.logger.warning(f"🔮 FORECAST ALERT: Predicted {predicted_bps:.0f} bps > {FORECAST_THRESHOLD_BPS} bps")
