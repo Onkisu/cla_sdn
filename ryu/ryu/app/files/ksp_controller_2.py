@@ -121,7 +121,7 @@ class VoIPForecastController(app_manager.RyuApp):
         
         # Threads
         self.monitor_thread = hub.spawn(self._monitor_traffic)
-        self.forecast_thread = hub.spawn(self._forecast_monitor)
+        hub.spawn_after(10, self._start_forecast) 
         self.topology_thread = hub.spawn(self._discover_topology)
         
         self.logger.info("🟢 VoIP Forecast Controller Started")
@@ -136,7 +136,13 @@ class VoIPForecastController(app_manager.RyuApp):
         
         # Install default flows
         self.default_flows_installed = False
-        hub.spawn_after(8, self._install_default_flows)
+        hub.spawn_after(3, self._install_default_flows)  # Install SEBELUM forecast monitor jalan
+        
+
+    def _start_forecast(self):
+        self.forecast_thread = hub.spawn(self._forecast_monitor)
+        self.logger.info("📊 Forecast monitor started")
+
         
     def connect_database_pool(self):
         """Create database connection pool"""
