@@ -129,28 +129,45 @@ def save_itg_session_to_db(log_file="/tmp/recv_steady.log"):
         
 def keep_steady_traffic(src_host, dst_host, dst_ip):
     for i in itertools.count(1):
-        session_ts = int(time.time())
-        logfile = f"/tmp/recv_steady_{session_ts}.log"
-
-        info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
-
-        dst_host.cmdPrint("pkill -9 ITGRecv 2>/dev/null || true")
-        dst_host.sendCmd(f"ITGRecv -l {logfile}")
-        time.sleep(1)
-
-        info("*** Starting ITGSend (STEADY)\n")
-        src_host.cmd(
-            f'ITGSend -T UDP -a {dst_ip} '
-            f'-c {PKT_SIZE} -C {STEADY_RATE} '
-            f'-t {STEADY_DURATION_MS} -l /dev/null'
-        )
-
         try:
-            save_itg_session_to_db(logfile)
-        except Exception as e:
-            info(f"!!! DB SAVE FAILED: {e}\n")
+            # Check if hosts still alive
+            if not hasattr(dst_host, 'shell') or dst_host.shell is None:
+                info("*** Host disconnected\n")
+                break
+                
+            session_ts = int(time.time())
+            logfile = f"/tmp/recv_steady_{session_ts}.log"
 
-        time.sleep(RESTART_DELAY)
+            info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
+
+            # Kill existing ITGRecv (non-blocking)
+            try:
+                dst_host.cmd("pkill -9 ITGRecv 2>/dev/null")
+            except:
+                pass
+            time.sleep(0.5)
+            
+            # Start ITGRecv
+            dst_host.cmd(f"ITGRecv -l {logfile} &")
+            time.sleep(1)
+
+            info("*** Starting ITGSend (STEADY)\n")
+            src_host.cmd(
+                f'ITGSend -T UDP -a {dst_ip} '
+                f'-c {PKT_SIZE} -C {STEADY_RATE} '
+                f'-t {STEADY_DURATION_MS} -l /dev/null'
+            )
+
+            try:
+                save_itg_session_to_db(logfile)
+            except Exception as e:
+                info(f"!!! DB SAVE FAILED: {e}\n")
+
+            time.sleep(RESTART_DELAY)
+            
+        except Exception as e:
+            info(f"*** Traffic loop error: {e}\n")
+            break
 
 
 def run():
