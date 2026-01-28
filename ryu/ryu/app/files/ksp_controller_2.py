@@ -907,7 +907,18 @@ class VoIPSmartController(app_manager.RyuApp):
             actions = [parser.OFPActionOutput(out_port)]
         
         if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+            # FIX: Force Match IP untuk SEMUA switch (termasuk Spine) agar terekam DB
+            if ip_pkt:
+                match = parser.OFPMatch(
+                    in_port=in_port, 
+                    eth_dst=dst, 
+                    eth_type=0x0800, 
+                    ipv4_src=ip_pkt.src, 
+                    ipv4_dst=ip_pkt.dst
+                )
+            else:
+                match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+
             self.add_flow(datapath, PRIORITY_DEFAULT, match, actions, msg.buffer_id, idle_timeout=60)
         
         data = None
