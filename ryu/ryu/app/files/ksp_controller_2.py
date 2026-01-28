@@ -210,8 +210,8 @@ class VoIPForecastController(app_manager.RyuApp):
                 y_pred_kbps = result[0]  # Assuming y_pred is in Kbps
                 ts_created = result[1]
                 
-                # Convert to bps
-                y_pred_bps = y_pred_kbps * 1000
+            
+                
                 
                 return {
                     'predicted_bps': y_pred_bps,
