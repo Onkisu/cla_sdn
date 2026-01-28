@@ -459,7 +459,7 @@ class VoIPForecastController(app_manager.RyuApp):
         
         # STEP 2: Wait for OpenFlow deletion
         self.logger.info(f"⏳ Waiting {FLOW_DELETE_WAIT_SEC}s for flow deletion...")
-        time.sleep(FLOW_DELETE_WAIT_SEC)
+        hub.sleep(FLOW_DELETE_WAIT_SEC)
         
         # STEP 3: Wait for traffic to settle
         self.reroute_stage = 'WAITING_SETTLE'
@@ -469,7 +469,7 @@ class VoIPForecastController(app_manager.RyuApp):
         })
         
         self.logger.info(f"⏳ Waiting {TRAFFIC_SETTLE_WAIT_SEC}s for traffic to settle...")
-        time.sleep(TRAFFIC_SETTLE_WAIT_SEC)
+        hub.sleep(TRAFFIC_SETTLE_WAIT_SEC)
         
         # STEP 4: Install new path
         self.reroute_stage = 'INSTALLING_NEW_PATH'
@@ -530,7 +530,7 @@ class VoIPForecastController(app_manager.RyuApp):
         })
         
         self._delete_all_h1_h2_flows()
-        time.sleep(FLOW_DELETE_WAIT_SEC)
+        hub.sleep(FLOW_DELETE_WAIT_SEC)
         
         # STEP 2: Settle
         self.reroute_stage = 'REVERT_SETTLE'
@@ -539,7 +539,7 @@ class VoIPForecastController(app_manager.RyuApp):
             'congestion': False
         })
         
-        time.sleep(TRAFFIC_SETTLE_WAIT_SEC)
+        hub.sleep(TRAFFIC_SETTLE_WAIT_SEC)
         
         # STEP 3: Install on original
         self.reroute_stage = 'REVERT_INSTALLING'
