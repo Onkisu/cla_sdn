@@ -393,41 +393,6 @@ class VoIPForecastController(app_manager.RyuApp):
         dp.send_msg(mod)
         self.logger.info(f"🗑️ Deleted H1->H2 flows on Spine {spine_dpid}")
     
-    def _install_h1_h2_flow_on_spine(self, spine_dpid):
-        """Install H1->H2 flow on specified spine"""
-        if spine_dpid not in self.datapaths:
-            self.logger.warning(f"⚠️ Spine {spine_dpid} not available")
-            return False
-        
-        dp = self.datapaths[spine_dpid]
-        parser = dp.ofproto_parser
-        ofproto = dp.ofproto
-        
-        # Output port to Leaf 2 (where H2 is)
-        out_port = 2
-        
-        match = parser.OFPMatch(
-            eth_type=0x0800,
-            ipv4_src='10.0.0.1',
-            ipv4_dst='10.0.0.2'
-        )
-        
-        actions = [parser.OFPActionOutput(out_port)]
-        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-        
-        mod = parser.OFPFlowMod(
-            datapath=dp,
-            priority=PRIORITY_REROUTE,
-            match=match,
-            instructions=inst,
-            cookie=COOKIE_REROUTE,
-            idle_timeout=0,
-            hard_timeout=0
-        )
-        
-        dp.send_msg(mod)
-        self.logger.info(f"✅ Spine {spine_dpid}: Installed H1->H2 flow (port {out_port})")
-        return True
     
     def _update_leaf1_output_port(self, target_spine):
         """Update Leaf 1 to forward H1->H2 to target spine"""
@@ -468,45 +433,19 @@ class VoIPForecastController(app_manager.RyuApp):
 
     def _atomic_reroute_to_spine(self, target_spine):
         """
-        ATOMIC REROUTE with complete cleanup
+        MAKE-BEFORE-BREAK REROUTE: Zero packet loss
         
         Steps:
-        1. DELETE ALL H1->H2 flows from ALL switches
-        2. Wait for deletion to propagate
-        3. Wait for traffic to settle
-        4. Install NEW flows on target spine
-        5. Update Leaf 1 routing
+        1. Install NEW flows on target spine
+        2. Update Leaf 1 routing
+        3. Brief overlap (0.5s)
+        4. Delete OLD flows on old spine
         """
         old_spine = self.current_spine
         
-        self.logger.info(f"🔄 ATOMIC REROUTE: Spine {old_spine} → Spine {target_spine}")
+        self.logger.info(f"🔄 MAKE-BEFORE-BREAK REROUTE: Spine {old_spine} → Spine {target_spine}")
         
-        # STEP 1: Complete cleanup
-        self.reroute_stage = 'DELETING_ALL_FLOWS'
-        write_state_file({
-            'state': self.reroute_stage,
-            'congestion': True,
-            'old_spine': old_spine,
-            'target_spine': target_spine
-        })
-        
-        self._delete_all_h1_h2_flows()
-        
-        # STEP 2: Wait for OpenFlow deletion
-        self.logger.info(f"⏳ Waiting {FLOW_DELETE_WAIT_SEC}s for flow deletion...")
-        hub.sleep(FLOW_DELETE_WAIT_SEC)
-        
-        # STEP 3: Wait for traffic to settle
-        self.reroute_stage = 'WAITING_SETTLE'
-        write_state_file({
-            'state': self.reroute_stage,
-            'congestion': True
-        })
-        
-        self.logger.info(f"⏳ Waiting {TRAFFIC_SETTLE_WAIT_SEC}s for traffic to settle...")
-        hub.sleep(TRAFFIC_SETTLE_WAIT_SEC)
-        
-        # STEP 4: Install new path
+        # STEP 1: Install NEW path first
         self.reroute_stage = 'INSTALLING_NEW_PATH'
         write_state_file({
             'state': self.reroute_stage,
@@ -514,21 +453,46 @@ class VoIPForecastController(app_manager.RyuApp):
             'target_spine': target_spine
         })
         
-        # Install on target spine
         success = self._install_h1_h2_flow_on_spine(target_spine)
         if not success:
-            self.logger.error("❌ Failed to install on target spine")
+            self.logger.error("❌ Failed to install on new spine")
             self.reroute_stage = 'IDLE'
             return False
         
-        # STEP 5: Update Leaf 1
         success = self._update_leaf1_output_port(target_spine)
         if not success:
             self.logger.error("❌ Failed to update Leaf 1")
             self.reroute_stage = 'IDLE'
             return False
         
-        # STEP 6: Complete
+        self.logger.info("✅ New path installed")
+        
+        # STEP 2: Brief overlap to allow traffic to switch
+        self.reroute_stage = 'TRAFFIC_SWITCHING'
+        write_state_file({
+            'state': self.reroute_stage,
+            'congestion': True,
+            'old_spine': old_spine,
+            'new_spine': target_spine
+        })
+        
+        self.logger.info("⏳ Waiting 0.5s for traffic to switch...")
+        hub.sleep(0.5)
+        
+        # STEP 3: Delete OLD flows
+        self.reroute_stage = 'DELETING_OLD_FLOWS'
+        write_state_file({
+            'state': self.reroute_stage,
+            'congestion': True,
+            'old_spine': old_spine
+        })
+        
+        self._delete_h1_h2_flows_on_spine(old_spine)
+        
+        self.logger.info("⏳ Waiting 0.3s for deletion to propagate...")
+        hub.sleep(0.3)
+        
+        # STEP 4: Complete
         self.current_spine = target_spine
         self.original_spine = old_spine
         self.congestion_active = True
@@ -542,7 +506,7 @@ class VoIPForecastController(app_manager.RyuApp):
             'original_spine': self.original_spine
         })
         
-        self.logger.info(f"✅ REROUTE COMPLETE: H1->H2 now via Spine {target_spine}")
+        self.logger.info(f"✅ REROUTE COMPLETE: H1->H2 now via Spine {target_spine} (make-before-break)")
         return True
 
     def _atomic_revert_to_original_spine(self):
