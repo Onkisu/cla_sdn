@@ -393,6 +393,42 @@ class VoIPForecastController(app_manager.RyuApp):
         dp.send_msg(mod)
         self.logger.info(f"🗑️ Deleted H1->H2 flows on Spine {spine_dpid}")
     
+    def _install_h1_h2_flow_on_spine(self, spine_dpid):
+        """Install H1->H2 flow on specified spine"""
+        if spine_dpid not in self.datapaths:
+            self.logger.warning(f"⚠️ Spine {spine_dpid} not available")
+            return False
+        
+        dp = self.datapaths[spine_dpid]
+        parser = dp.ofproto_parser
+        ofproto = dp.ofproto
+        
+        # Output port to Leaf 2 (where H2 is)
+        out_port = 2
+        
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ipv4_src='10.0.0.1',
+            ipv4_dst='10.0.0.2'
+        )
+        
+        actions = [parser.OFPActionOutput(out_port)]
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        
+        mod = parser.OFPFlowMod(
+            datapath=dp,
+            priority=PRIORITY_REROUTE,
+            match=match,
+            instructions=inst,
+            cookie=COOKIE_REROUTE,
+            idle_timeout=0,
+            hard_timeout=0
+        )
+        
+        dp.send_msg(mod)
+        self.logger.info(f"✅ Spine {spine_dpid}: Installed H1->H2 flow (port {out_port})")
+        return True
+    
     
     def _update_leaf1_output_port(self, target_spine):
         """Update Leaf 1 to forward H1->H2 to target spine"""
@@ -615,7 +651,6 @@ class VoIPForecastController(app_manager.RyuApp):
         self.default_flows_installed = True
         self.logger.info("🟢 Default paths established (both via Spine 2)")
 
-    
     def _install_h3_h2_permanent_flow(self):
         """
         Install H3->H2 flow PERMANENTLY on Spine 2 and Leaf 3
