@@ -51,8 +51,8 @@ PRIORITY_USER = 10
 PRIORITY_DEFAULT = 1           
 
 # Timing
-FLOW_DELETE_WAIT_SEC = 1.5
-TRAFFIC_SETTLE_WAIT_SEC = 2.0
+FLOW_DELETE_WAIT_SEC = 0.8
+TRAFFIC_SETTLE_WAIT_SEC = 1.2
 STATE_FILE = '/tmp/controller_state.json'
 
 # ==========================================
