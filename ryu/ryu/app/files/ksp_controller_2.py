@@ -51,8 +51,8 @@ PRIORITY_USER = 10
 PRIORITY_DEFAULT = 1           
 
 # Timing
-FLOW_DELETE_WAIT_SEC = 2.5  # Cukup untuk 5 switches selesai delete
-TRAFFIC_SETTLE_WAIT_SEC = 2.0  # Cukup untuk packet in-flight habis
+FLOW_DELETE_WAIT_SEC = 0.5 
+TRAFFIC_SETTLE_WAIT_SEC = 0.5 
 STATE_FILE = '/tmp/controller_state.json'
 
 # ==========================================
@@ -227,6 +227,59 @@ class VoIPForecastController(app_manager.RyuApp):
         finally:
             self.return_db_connection(conn)
     
+
+    def _atomic_revert_to_original_spine(self):
+        """
+        MAKE-BEFORE-BREAK REVERT: Return to original spine with zero loss
+        """
+        if not self.congestion_active or not self.original_spine:
+            self.logger.warning("⚠️ Cannot revert: not in rerouted state")
+            return False
+        
+        target_spine = self.original_spine
+        old_spine = self.current_spine
+        
+        self.logger.info(f"🔙 MAKE-BEFORE-BREAK REVERT: Spine {old_spine} → Spine {target_spine}")
+        
+        # STEP 1: Install on original spine
+        self.reroute_stage = 'REVERT_INSTALLING'
+        write_state_file({
+            'state': self.reroute_stage,
+            'congestion': False,
+            'target_spine': target_spine
+        })
+        
+        self._install_h1_h2_flow_on_spine(target_spine)
+        self._update_leaf1_output_port(target_spine)
+        
+        self.logger.info("✅ Original path installed")
+        
+        # STEP 2: Brief overlap
+        hub.sleep(0.5)
+        
+        # STEP 3: Delete from current spine
+        self.reroute_stage = 'REVERT_DELETING'
+        
+        self._delete_h1_h2_flows_on_spine(old_spine)
+        
+        hub.sleep(0.3)
+        
+        # STEP 4: Complete
+        self.current_spine = target_spine
+        self.original_spine = target_spine
+        self.congestion_active = False
+        self.reroute_stage = 'IDLE'
+        self.stats['total_reverts'] += 1
+        
+        write_state_file({
+            'state': 'IDLE',
+            'congestion': False,
+            'current_spine': self.current_spine
+        })
+        
+        self.logger.info(f"✅ REVERT COMPLETE: H1->H2 back to Spine {target_spine} (make-before-break)")
+        return True
+
     def _forecast_monitor(self):
         """
         Monitor forecast and trigger proactive rerouting
@@ -319,15 +372,10 @@ class VoIPForecastController(app_manager.RyuApp):
         return min(available, key=lambda s: self.spine_traffic.get(s, 0))
     
     def _delete_all_h1_h2_flows(self):
-        """
-        DELETE ALL H1->H2 flows from ALL switches
-        CRITICAL: This prevents byte counter accumulation
-        """
+        """Delete ALL H1->H2 flows from ALL switches (for complete cleanup)"""
         self.logger.info("🗑️ DELETING ALL H1->H2 flows from ALL switches...")
         
-        # Clean ALL switches that might have H1->H2 flows
-        switches_to_clean = [1, 2, 3, 4, 5]  # Spines + Leaf 1 + Leaf 2
-        
+        switches_to_clean = [1, 2, 3, 4, 5]
         deleted_count = 0
         
         for dpid in switches_to_clean:
@@ -338,7 +386,6 @@ class VoIPForecastController(app_manager.RyuApp):
             parser = dp.ofproto_parser
             ofproto = dp.ofproto
             
-            # Delete H1->H2 flows with IP match
             match = parser.OFPMatch(
                 eth_type=0x0800,
                 ipv4_src='10.0.0.1',
@@ -354,14 +401,10 @@ class VoIPForecastController(app_manager.RyuApp):
             )
             
             dp.send_msg(mod)
-            # CRITICAL: Wait for deletion to complete
-            barrier = parser.OFPBarrierRequest(dp)
-            dp.send_msg(barrier)
-
             deleted_count += 1
             self.logger.info(f"  ✓ DPID {dpid}: Deleted H1->H2 flows")
         
-        # CRITICAL: Reset ALL traffic counters for H1->H2
+        # Reset counters
         keys_to_reset = []
         for key in list(self.last_bytes.keys()):
             dpid, src_ip, dst_ip = key
@@ -375,6 +418,32 @@ class VoIPForecastController(app_manager.RyuApp):
         
         self.logger.info(f"  ✓ Reset {len(keys_to_reset)} traffic counters")
         self.logger.info(f"🗑️ Complete: Deleted flows from {deleted_count} switches")
+
+    def _delete_h1_h2_flows_on_spine(self, spine_dpid):
+        """Delete H1->H2 flows on SPECIFIC spine only (for make-before-break)"""
+        if spine_dpid not in self.datapaths:
+            return
+        
+        dp = self.datapaths[spine_dpid]
+        parser = dp.ofproto_parser
+        ofproto = dp.ofproto
+        
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ipv4_src='10.0.0.1',
+            ipv4_dst='10.0.0.2'
+        )
+        
+        mod = parser.OFPFlowMod(
+            datapath=dp,
+            command=ofproto.OFPFC_DELETE,
+            out_port=ofproto.OFPP_ANY,
+            out_group=ofproto.OFPG_ANY,
+            match=match
+        )
+        
+        dp.send_msg(mod)
+        self.logger.info(f"🗑️ Deleted H1->H2 flows on Spine {spine_dpid}")
     
     def _install_h1_h2_flow_on_spine(self, spine_dpid):
         """Install H1->H2 flow on specified spine"""
