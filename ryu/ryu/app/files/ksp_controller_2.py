@@ -51,8 +51,8 @@ PRIORITY_USER = 10
 PRIORITY_DEFAULT = 1           
 
 # Timing
-FLOW_DELETE_WAIT_SEC = 1.5
-TRAFFIC_SETTLE_WAIT_SEC = 1.0
+FLOW_DELETE_WAIT_SEC = 2.5  # Cukup untuk 5 switches selesai delete
+TRAFFIC_SETTLE_WAIT_SEC = 2.0  # Cukup untuk packet in-flight habis
 STATE_FILE = '/tmp/controller_state.json'
 
 # ==========================================
