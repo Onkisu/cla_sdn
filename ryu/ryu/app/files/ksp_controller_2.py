@@ -228,58 +228,6 @@ class VoIPForecastController(app_manager.RyuApp):
             self.return_db_connection(conn)
     
 
-    def _atomic_revert_to_original_spine(self):
-        """
-        MAKE-BEFORE-BREAK REVERT: Return to original spine with zero loss
-        """
-        if not self.congestion_active or not self.original_spine:
-            self.logger.warning("⚠️ Cannot revert: not in rerouted state")
-            return False
-        
-        target_spine = self.original_spine
-        old_spine = self.current_spine
-        
-        self.logger.info(f"🔙 MAKE-BEFORE-BREAK REVERT: Spine {old_spine} → Spine {target_spine}")
-        
-        # STEP 1: Install on original spine
-        self.reroute_stage = 'REVERT_INSTALLING'
-        write_state_file({
-            'state': self.reroute_stage,
-            'congestion': False,
-            'target_spine': target_spine
-        })
-        
-        self._install_h1_h2_flow_on_spine(target_spine)
-        self._update_leaf1_output_port(target_spine)
-        
-        self.logger.info("✅ Original path installed")
-        
-        # STEP 2: Brief overlap
-        hub.sleep(0.5)
-        
-        # STEP 3: Delete from current spine
-        self.reroute_stage = 'REVERT_DELETING'
-        
-        self._delete_h1_h2_flows_on_spine(old_spine)
-        
-        hub.sleep(0.3)
-        
-        # STEP 4: Complete
-        self.current_spine = target_spine
-        self.original_spine = target_spine
-        self.congestion_active = False
-        self.reroute_stage = 'IDLE'
-        self.stats['total_reverts'] += 1
-        
-        write_state_file({
-            'state': 'IDLE',
-            'congestion': False,
-            'current_spine': self.current_spine
-        })
-        
-        self.logger.info(f"✅ REVERT COMPLETE: H1->H2 back to Spine {target_spine} (make-before-break)")
-        return True
-
     def _forecast_monitor(self):
         """
         Monitor forecast and trigger proactive rerouting
@@ -598,7 +546,9 @@ class VoIPForecastController(app_manager.RyuApp):
         return True
 
     def _atomic_revert_to_original_spine(self):
-        """Revert to original spine when forecast clears"""
+        """
+        MAKE-BEFORE-BREAK REVERT: Return to original spine with zero loss
+        """
         if not self.congestion_active or not self.original_spine:
             self.logger.warning("⚠️ Cannot revert: not in rerouted state")
             return False
@@ -606,29 +556,9 @@ class VoIPForecastController(app_manager.RyuApp):
         target_spine = self.original_spine
         old_spine = self.current_spine
         
-        self.logger.info(f"🔙 REVERTING: Spine {old_spine} → Spine {target_spine}")
+        self.logger.info(f"🔙 MAKE-BEFORE-BREAK REVERT: Spine {old_spine} → Spine {target_spine}")
         
-        # STEP 1: Complete cleanup
-        self.reroute_stage = 'REVERT_DELETING'
-        write_state_file({
-            'state': self.reroute_stage,
-            'congestion': False,
-            'target_spine': target_spine
-        })
-        
-        self._delete_all_h1_h2_flows()
-        hub.sleep(FLOW_DELETE_WAIT_SEC)
-        
-        # STEP 2: Settle
-        self.reroute_stage = 'REVERT_SETTLE'
-        write_state_file({
-            'state': self.reroute_stage,
-            'congestion': False
-        })
-        
-        hub.sleep(TRAFFIC_SETTLE_WAIT_SEC)
-        
-        # STEP 3: Install on original
+        # STEP 1: Install on original spine
         self.reroute_stage = 'REVERT_INSTALLING'
         write_state_file({
             'state': self.reroute_stage,
@@ -638,6 +568,18 @@ class VoIPForecastController(app_manager.RyuApp):
         
         self._install_h1_h2_flow_on_spine(target_spine)
         self._update_leaf1_output_port(target_spine)
+        
+        self.logger.info("✅ Original path installed")
+        
+        # STEP 2: Brief overlap
+        hub.sleep(0.5)
+        
+        # STEP 3: Delete from current spine
+        self.reroute_stage = 'REVERT_DELETING'
+        
+        self._delete_h1_h2_flows_on_spine(old_spine)
+        
+        hub.sleep(0.3)
         
         # STEP 4: Complete
         self.current_spine = target_spine
@@ -652,7 +594,7 @@ class VoIPForecastController(app_manager.RyuApp):
             'current_spine': self.current_spine
         })
         
-        self.logger.info(f"✅ REVERT COMPLETE: H1->H2 back to Spine {target_spine}")
+        self.logger.info(f"✅ REVERT COMPLETE: H1->H2 back to Spine {target_spine} (make-before-break)")
         return True
 
     # =================================================================
