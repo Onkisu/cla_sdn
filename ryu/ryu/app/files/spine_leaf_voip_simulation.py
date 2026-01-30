@@ -107,16 +107,18 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
             info(f"*** [SESSION {i}] Restarting ITGRecv -> {logfile}\n")
 
-            # Kill old receiver
-            dst_host.popen("pkill -9 ITGRecv 2>/dev/null", shell=True)
-            time.sleep(0.5)
+            # Kill existing ITGRecv (non-blocking)# Cek apakah ITGRecv masih hidup
+            check = dst_host.popen("pgrep ITGRecv", shell=True, stdout=subprocess.PIPE)
+            out = check.stdout.read().decode().strip()
 
-            # Start fresh receiver (9000 steady, 9001 burst)
-            dst_host.popen(f"ITGRecv -Sp 9000 -l {logfile} &", shell=True)
-            dst_host.popen(f"ITGRecv -Sp 9001 -l {logfile_burst} &", shell=True)
-            time.sleep(1)
+            if not out:
+                info("*** ITGRecv not running, restarting...\n")
+                dst_host.popen(f"ITGRecv -Sp 9000 -l {logfile} &", shell=True)
+                dst_host.popen(f"ITGRecv -Sp 9001 -l {logfile_burst} &", shell=True)
+                time.sleep(1)
+            else:
+                info("*** ITGRecv still running\n")
 
-            info(f"*** [SESSION {i}] Starting ITGSend (STEADY)\n")
 
             # Blocking send
             p = src_host.popen(
