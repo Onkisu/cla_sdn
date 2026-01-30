@@ -102,8 +102,8 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
 
             session_ts = int(time.time())
-            logfile = f"/tmp/recv_steady_{session_ts}.log"
-            logfile_burst = f"/tmp/recv_burst_{session_ts}.log"
+            logfile = "/tmp/recv_steady.log"
+            logfile_burst = "/tmp/recv_burst.log"
 
             info(f"*** [SESSION {i}] Restarting ITGRecv -> {logfile}\n")
 
