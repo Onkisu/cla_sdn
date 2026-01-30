@@ -672,7 +672,7 @@ class VoIPForecastController(app_manager.RyuApp):
         max_wait = 12
         waited = 0
         while waited < max_wait:
-            if all(dpid in self.datapaths for dpid in [2, 4, 6]):
+            if all(dpid in self.datapaths for dpid in [2, 4, 5, 6]):
                 break
             hub.sleep(1)
             waited += 1
@@ -982,7 +982,7 @@ class VoIPForecastController(app_manager.RyuApp):
             src_ip = ip_pkt.src
             dst_ip = ip_pkt.dst
             
-            if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and udp_dst == 9000:
+            if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
                 # CRITICAL: Skip flow installation during reroute to prevent duplicate flows
                 if self.reroute_stage in ['INSTALLING_NEW_PATH', 'TRAFFIC_SWITCHING', 'DELETING_OLD_FLOWS',
                                         'REVERT_INSTALLING', 'REVERT_DELETING']:
@@ -1010,14 +1010,22 @@ class VoIPForecastController(app_manager.RyuApp):
                     parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
                     parser.OFPActionOutput(out_port)
                 ]
+                   
+                if udp_dst == 9000:
+                    match = parser.OFPMatch(
+                        eth_type=0x0800,
+                        ip_proto=17,
+                        ipv4_src=src_ip,
+                        ipv4_dst=dst_ip,
+                        udp_dst=9000
+                    )
+                else:
+                    match = parser.OFPMatch(
+                        eth_type=0x0800,
+                        ipv4_src=src_ip,
+                        ipv4_dst=dst_ip
+                    )
 
-                match = parser.OFPMatch(
-                    eth_type=0x0800,
-                    ip_proto=17,
-                    ipv4_src=src_ip,
-                    ipv4_dst=dst_ip,
-                    udp_dst=9000
-                )
 
                 
                 self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
@@ -1045,13 +1053,20 @@ class VoIPForecastController(app_manager.RyuApp):
                     parser.OFPActionOutput(2)
                 ]
 
-                match = parser.OFPMatch(
-                    eth_type=0x0800,
-                    ip_proto=17,
-                    ipv4_src=src_ip,
-                    ipv4_dst=dst_ip,
-                    udp_dst=9001
-                )
+                if udp_dst == 9001:
+                    match = parser.OFPMatch(
+                        eth_type=0x0800,
+                        ip_proto=17,
+                        ipv4_src=src_ip,
+                        ipv4_dst=dst_ip,
+                        udp_dst=9001
+                    )
+                else:
+                    match = parser.OFPMatch(
+                        eth_type=0x0800,
+                        ipv4_src=src_ip,
+                        ipv4_dst=dst_ip
+                    )
   
                 self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
                 
@@ -1088,13 +1103,21 @@ class VoIPForecastController(app_manager.RyuApp):
                     ]
 
                     # Use IP match for stats tracking
-                    match = parser.OFPMatch(
-                        eth_type=0x0800,
-                        ip_proto=17,
-                        ipv4_src=src_ip,
-                        ipv4_dst=dst_ip,
-                        udp_dst=udp_pkt.dst_port
-                    )
+                    if udp_pkt:
+                        match = parser.OFPMatch(
+                            eth_type=0x0800,
+                            ip_proto=17,
+                            ipv4_src=src_ip,
+                            ipv4_dst=dst_ip,
+                            udp_dst=udp_pkt.dst_port
+                        )
+                    else:
+                        match = parser.OFPMatch(
+                            eth_type=0x0800,
+                            ipv4_src=src_ip,
+                            ipv4_dst=dst_ip
+                        )
+
                     self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id, idle_timeout=60)
                     
                     data = None
