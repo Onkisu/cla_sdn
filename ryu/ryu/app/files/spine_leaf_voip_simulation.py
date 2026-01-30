@@ -24,15 +24,8 @@ import subprocess
 import psycopg2
 import re
 
-def save_itg_session_to_db(log_file):
-    # Jalankan ITGDec
-    result = subprocess.check_output(
-        ["ITGDec", log_file],
-        text=True
-    )
-
+def save_itg_session_to_db_from_text(result):
     data = {}
-
     for line in result.splitlines():
         if "Total time" in line:
             data["duration"] = float(line.split("=")[1].split()[0])
@@ -51,10 +44,9 @@ def save_itg_session_to_db(log_file):
         elif "Average packet rate" in line:
             data["pps"] = float(line.split("=")[1].split()[0])
 
-    data["loss"] = (
-        data["dropped"] / data["total_packets"] * 100
-        if data["total_packets"] > 0 else 0
-    )
+    data["loss"] = data["dropped"] / data["total_packets"] * 100 if data["total_packets"] > 0 else 0
+    # (bagian insert DB lu BIARIN SAMA)
+
 
     conn = psycopg2.connect(
         host="127.0.0.1",
@@ -131,9 +123,8 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             p.wait()
 
             try:
-                dst_host.cmd(f"cp {logfile} /tmp/host_{session_ts}.log")
-                time.sleep(0.5)
-                save_itg_session_to_db(f"/tmp/host_{session_ts}.log")
+                result = dst_host.cmd(f"ITGDec {logfile}")
+                save_itg_session_to_db_from_text(result)
             except Exception as e:
                 info(f"!!! DB SAVE FAILED: {e}\n")
 
