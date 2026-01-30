@@ -187,7 +187,7 @@ def run():
         # karena Watchdog sekarang cukup pintar untuk menyalakannya jika belum ada.
         # Tapi untuk inisiasi awal yang cepat, kita nyalakan sekali.
         info("*** Starting ITGRecv on h2 (Initial)\n")
-        h2.cmd('ITGRecv -Sp 9000 -l /tmp/recv_voip.log &')
+        h2.cmd('ITGRecv -Sp 9000 -l /tmp/recv_steady.log &')
         h2.cmd('ITGRecv -Sp 9001 -l /tmp/recv_burst.log &')
         time.sleep(1)
         
