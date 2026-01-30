@@ -24,7 +24,7 @@ import subprocess
 import psycopg2
 import re
 
-def save_itg_session_to_db(log_file="/tmp/recv_steady.log"):
+def save_itg_session_to_db(log_file="/tmp/recv_voip.log"):
     # Jalankan ITGDec
     result = subprocess.check_output(
         ["ITGDec", log_file],
@@ -93,81 +93,73 @@ def save_itg_session_to_db(log_file="/tmp/recv_steady.log"):
     cur.close()
     conn.close()
 
-
-# def keep_steady_traffic(src_host, dst_host, dst_ip):
-#     """
-#     Watchdog loop yang diperbaiki:
-#     1. Cek apakah ITGRecv di h2 masih hidup. Jika mati, nyalakan lagi.
-#     2. Jalankan ITGSend di h1.
-#     """
-    
-#     for i in itertools.count(1):
-#         # --- FIX: CEK DAN HIDUPKAN KEMBALI RECEIVER JIKA MATI ---
-#         # Cek apakah proses ITGRecv berjalan di dst_host (h2)
-#         recv_pid = dst_host.cmd('pgrep -x ITGRecv').strip()
-        
-#         if not recv_pid:
-#             info(f"*** [WATCHDOG] ITGRecv on {dst_host.name} is DEAD. Restarting...\n")
-#             # Restart ITGRecv (Log dipisah atau di-append agar aman)
-#             dst_host.cmd('ITGRecv -l /tmp/recv_steady.log &')
-#             time.sleep(1) # Beri waktu untuk bind port
-#         # ---------------------------------------------------------
-
-#         info("*** [WATCHDOG] (Re)starting STEADY VoIP h1 -> h2\n")
-        
-#         # Menjalankan Sender
-#         src_host.cmd(
-#             f'ITGSend -T UDP -a {dst_ip} '
-#             f'-c {PKT_SIZE} -C {STEADY_RATE} '
-#             f'-t {STEADY_DURATION_MS} -l /dev/null'
-#         )
-
-#         save_itg_session_to_db("/tmp/recv_steady.log")
-        
-#         # Jika ITGSend exit (selesai atau error), tunggu sebentar sebelum loop
-#         time.sleep(RESTART_DELAY)
-        
 def keep_steady_traffic(src_host, dst_host, dst_ip):
     for i in itertools.count(1):
         try:
-            # Check if hosts still alive
             if not hasattr(dst_host, 'shell') or dst_host.shell is None:
                 info("*** Host disconnected\n")
                 break
-                
-            session_ts = int(time.time())
-            logfile = f"/tmp/recv_steady_{session_ts}.log"
 
-            info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
+            info(f"*** [SESSION {i}] Starting ITGSend (STEADY)\n")
 
-            # Kill existing ITGRecv (non-blocking)
-            try:
-                dst_host.cmd("pkill -9 ITGRecv 2>/dev/null")
-            except:
-                pass
-            time.sleep(0.5)
-            
-            # Start ITGRecv
-            dst_host.cmd(f"ITGRecv -l {logfile} &")
-            time.sleep(1)
-
-            info("*** Starting ITGSend (STEADY)\n")
             src_host.cmd(
                 f'ITGSend -T UDP -a {dst_ip} '
+                f'-rp 9000 '
                 f'-c {PKT_SIZE} -C {STEADY_RATE} '
                 f'-t {STEADY_DURATION_MS} -l /dev/null'
             )
 
-            try:
-                save_itg_session_to_db(logfile)
-            except Exception as e:
-                info(f"!!! DB SAVE FAILED: {e}\n")
+            save_itg_session_to_db("/tmp/recv_voip.log")
 
             time.sleep(RESTART_DELAY)
-            
+
         except Exception as e:
             info(f"*** Traffic loop error: {e}\n")
             break
+
+# def keep_steady_traffic(src_host, dst_host, dst_ip):
+#     for i in itertools.count(1):
+#         try:
+#             # Check if hosts still alive
+#             if not hasattr(dst_host, 'shell') or dst_host.shell is None:
+#                 info("*** Host disconnected\n")
+#                 break
+                
+#             session_ts = int(time.time())
+#             logfile = f"/tmp/recv_steady_{session_ts}.log"
+
+#             info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
+
+#             # Kill existing ITGRecv (non-blocking)
+#             try:
+#                 dst_host.cmd("pkill -9 ITGRecv 2>/dev/null")
+#             except:
+#                 pass
+#             time.sleep(0.5)
+            
+#             # Start ITGRecv
+#             dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
+#             dst_host.cmd(f"ITGRecv -Sp 9001 -l {logfile} &")
+#             time.sleep(1)
+
+#             info("*** Starting ITGSend (STEADY)\n")
+#             src_host.cmd(
+#                 f'ITGSend -T UDP -a {dst_ip} '
+#                 f'-rp 9000 '  # Pastikan port tujuan sesuai dengan yang di-listen ITGRecv
+#                 f'-c {PKT_SIZE} -C {STEADY_RATE} '
+#                 f'-t {STEADY_DURATION_MS} -l /dev/null'
+#             )
+
+#             try:
+#                 save_itg_session_to_db(logfile)
+#             except Exception as e:
+#                 info(f"!!! DB SAVE FAILED: {e}\n")
+
+#             time.sleep(RESTART_DELAY)
+            
+#         except Exception as e:
+#             info(f"*** Traffic loop error: {e}\n")
+#             break
 
 
 def run():
@@ -211,7 +203,8 @@ def run():
         # karena Watchdog sekarang cukup pintar untuk menyalakannya jika belum ada.
         # Tapi untuk inisiasi awal yang cepat, kita nyalakan sekali.
         info("*** Starting ITGRecv on h2 (Initial)\n")
-        h2.cmd('ITGRecv -l /tmp/recv_steady.log &')
+        h2.cmd('ITGRecv -Sp 9000 -l /tmp/recv_voip.log &')
+        h2.cmd('ITGRecv -Sp 9001 -l /tmp/recv_burst.log &')
         time.sleep(1)
 
         info("*** Starting STEADY VoIP Watchdog (h1 -> h2)\n")

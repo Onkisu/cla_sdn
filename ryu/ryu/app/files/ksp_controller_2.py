@@ -336,8 +336,10 @@ class VoIPForecastController(app_manager.RyuApp):
             
             match = parser.OFPMatch(
                 eth_type=0x0800,
+                ip_proto=17,
                 ipv4_src='10.0.0.1',
-                ipv4_dst='10.0.0.2'
+                ipv4_dst='10.0.0.2',
+                udp_dst=9000
             )
             
             mod = parser.OFPFlowMod(
@@ -355,7 +357,7 @@ class VoIPForecastController(app_manager.RyuApp):
         # Reset counters
         keys_to_reset = []
         for key in list(self.last_bytes.keys()):
-            dpid, src_ip, dst_ip = key
+            dpid, src_ip, dst_ip, udp_dst = key
             if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
                 keys_to_reset.append(key)
         
@@ -377,8 +379,10 @@ class VoIPForecastController(app_manager.RyuApp):
             
             match = parser.OFPMatch(
                 eth_type=0x0800,
+                ip_proto=17,
                 ipv4_src='10.0.0.1',
-                ipv4_dst='10.0.0.2'
+                ipv4_dst='10.0.0.2',
+                udp_dst=9000
             )
             
             mod = parser.OFPFlowMod(
@@ -400,8 +404,10 @@ class VoIPForecastController(app_manager.RyuApp):
             
             match = parser.OFPMatch(
                 eth_type=0x0800,
+                ip_proto=17,
                 ipv4_src='10.0.0.1',
-                ipv4_dst='10.0.0.2'
+                ipv4_dst='10.0.0.2',
+                udp_dst=9000
             )
             
             # Delete with STRICT priority to remove only low-priority flows
@@ -432,11 +438,17 @@ class VoIPForecastController(app_manager.RyuApp):
         
         match = parser.OFPMatch(
             eth_type=0x0800,
+            ip_proto=17,
             ipv4_src='10.0.0.1',
-            ipv4_dst='10.0.0.2'
+            ipv4_dst='10.0.0.2',   
+            udp_dst=9000
         )
         
-        actions = [parser.OFPActionOutput(out_port)]
+        actions = [
+            parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
+            parser.OFPActionOutput(out_port)
+        ]
+
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         
         mod = parser.OFPFlowMod(
@@ -470,11 +482,17 @@ class VoIPForecastController(app_manager.RyuApp):
         
         match = parser.OFPMatch(
             eth_type=0x0800,
+            ip_proto=17,
             ipv4_src='10.0.0.1',
-            ipv4_dst='10.0.0.2'
+            ipv4_dst='10.0.0.2',
+            udp_dst=9000
         )
         
-        actions = [parser.OFPActionOutput(out_port)]
+        actions = [
+            parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
+            parser.OFPActionOutput(out_port)
+        ]
+
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         
         mod = parser.OFPFlowMod(
@@ -537,7 +555,7 @@ class VoIPForecastController(app_manager.RyuApp):
         })
         
         self.logger.info("⏳ Waiting 0.5s for traffic to switch...")
-        hub.sleep(1.5)
+        hub.sleep(0.4)
         
         # STEP 3: Delete OLD flows
         self.reroute_stage = 'DELETING_OLD_FLOWS'
@@ -550,7 +568,7 @@ class VoIPForecastController(app_manager.RyuApp):
         self._delete_h1_h2_flows_on_spine(old_spine)
         
         self.logger.info("⏳ Waiting 0.3s for deletion to propagate...")
-        hub.sleep(1.0)
+        hub.sleep(0.3)
         
         # STEP 4: Complete
         self.current_spine = target_spine
@@ -596,7 +614,7 @@ class VoIPForecastController(app_manager.RyuApp):
         self.logger.info("✅ Original path installed")
         
         # STEP 2: Brief overlap
-        hub.sleep(0.5)
+        hub.sleep(0.4)
         
         # STEP 3: Delete from current spine
         self.reroute_stage = 'REVERT_DELETING'
@@ -689,10 +707,17 @@ class VoIPForecastController(app_manager.RyuApp):
             match = parser.OFPMatch(
                 eth_type=0x0800,
                 ipv4_src='10.0.0.3',
-                ipv4_dst='10.0.0.2'
+                ipv4_dst='10.0.0.2',
+                ip_proto=17,
+                udp_dst=9001
+
             )
             
-            actions = [parser.OFPActionOutput(2)]  # Port 2 to Spine 2
+            actions = [
+                parser.OFPActionSetQueue(2),
+                parser.OFPActionOutput(2)
+            ]
+
             inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
             
             mod = parser.OFPFlowMod(
@@ -716,10 +741,17 @@ class VoIPForecastController(app_manager.RyuApp):
             match = parser.OFPMatch(
                 eth_type=0x0800,
                 ipv4_src='10.0.0.3',
-                ipv4_dst='10.0.0.2'
+                ipv4_dst='10.0.0.2',
+                ip_proto=17,
+                udp_dst=9001
+
             )
             
-            actions = [parser.OFPActionOutput(2)]  # Port 2 to Leaf 2
+            actions = [
+                parser.OFPActionSetQueue(2),
+                parser.OFPActionOutput(2)
+            ]
+
             inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
             
             mod = parser.OFPFlowMod(
@@ -758,11 +790,12 @@ class VoIPForecastController(app_manager.RyuApp):
                 
                 src_ip = match.get('ipv4_src')
                 dst_ip = match.get('ipv4_dst')
+                udp_dst = match.get('udp_dst')
                 
                 if not src_ip or not dst_ip:
                     continue
                 
-                flow_key = (dpid, src_ip, dst_ip)
+                flow_key = (dpid, src_ip, dst_ip, udp_dst)
                 
                 # Current values
                 current_bytes = stat.byte_count
@@ -787,7 +820,7 @@ class VoIPForecastController(app_manager.RyuApp):
                 bps = (delta_bytes * 8) / time_diff
                 
                 # Update spine traffic for H1->H2
-                if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and dpid in [1, 2, 3]:
+                if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and udp_dst == 9000 and dpid in [1,2,3]:
                     self.spine_traffic[dpid] = bps
                 
                 # Resolve MACs
@@ -796,7 +829,7 @@ class VoIPForecastController(app_manager.RyuApp):
                 
                 # Insert to DB
                 # H1->H2: Always insert (for monitoring)
-                if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
+                if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and udp_dst == 9000:
                     self._insert_flow_stats(
                         dpid, src_ip, dst_ip, match,
                         delta_bytes, delta_packets,
@@ -941,19 +974,26 @@ class VoIPForecastController(app_manager.RyuApp):
         if ip_pkt:
             self.ip_to_mac[ip_pkt.src] = src
         
+        udp_pkt = pkt.get_protocol(udp.udp)
+        udp_dst = udp_pkt.dst_port if udp_pkt else None
+        
         # === SPECIAL HANDLING FOR H1->H2 (Leaf 1 - DPID 4) ===
         if ip_pkt and dpid == 4:
             src_ip = ip_pkt.src
             dst_ip = ip_pkt.dst
             
-            if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
+            if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and udp_dst == 9000:
                 # CRITICAL: Skip flow installation during reroute to prevent duplicate flows
                 if self.reroute_stage in ['INSTALLING_NEW_PATH', 'TRAFFIC_SWITCHING', 'DELETING_OLD_FLOWS',
                                         'REVERT_INSTALLING', 'REVERT_DELETING']:
                     # Just forward packet, don't install flow
                     spine_to_port = {1: 1, 2: 2, 3: 3}
                     out_port = spine_to_port.get(self.current_spine, 2)
-                    actions = [parser.OFPActionOutput(out_port)]
+                    actions = [
+                        parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
+                        parser.OFPActionOutput(out_port)
+                    ]
+
                     data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
                     out = parser.OFPPacketOut(
                         datapath=datapath, buffer_id=msg.buffer_id,
@@ -966,8 +1006,19 @@ class VoIPForecastController(app_manager.RyuApp):
                 spine_to_port = {1: 1, 2: 2, 3: 3}
                 out_port = spine_to_port.get(self.current_spine, 2)
                 
-                actions = [parser.OFPActionOutput(out_port)]
-                match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
+                actions = [
+                    parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
+                    parser.OFPActionOutput(out_port)
+                ]
+
+                match = parser.OFPMatch(
+                    eth_type=0x0800,
+                    ip_proto=17,
+                    ipv4_src=src_ip,
+                    ipv4_dst=dst_ip,
+                    udp_dst=9000
+                )
+
                 
                 self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
                 
@@ -989,9 +1040,19 @@ class VoIPForecastController(app_manager.RyuApp):
             
             if src_ip == '10.0.0.3' and dst_ip == '10.0.0.2':
                 # ALWAYS port 2 (Spine 2)
-                actions = [parser.OFPActionOutput(2)]
-                match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
-                
+                actions = [
+                    parser.OFPActionSetQueue(2),
+                    parser.OFPActionOutput(2)
+                ]
+
+                match = parser.OFPMatch(
+                    eth_type=0x0800,
+                    ip_proto=17,
+                    ipv4_src=src_ip,
+                    ipv4_dst=dst_ip,
+                    udp_dst=9001
+                )
+  
                 self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
                 
                 data = None
@@ -1007,6 +1068,8 @@ class VoIPForecastController(app_manager.RyuApp):
         
         # === SPECIAL HANDLING FOR Leaf 2 (DPID 5) - DESTINATION ===
         if ip_pkt and dpid == 5:
+            if not udp_pkt:
+                return
             src_ip = ip_pkt.src
             dst_ip = ip_pkt.dst
             
@@ -1017,10 +1080,21 @@ class VoIPForecastController(app_manager.RyuApp):
                     out_port = ofproto.OFPP_FLOOD
                 
                 if out_port != ofproto.OFPP_FLOOD:
-                    actions = [parser.OFPActionOutput(out_port)]
+                    queue_id = 1 if udp_dst == 9000 else 2
+
+                    actions = [
+                        parser.OFPActionSetQueue(queue_id),
+                        parser.OFPActionOutput(out_port)
+                    ]
+
                     # Use IP match for stats tracking
-                    match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip, ipv4_dst=dst_ip)
-                    
+                    match = parser.OFPMatch(
+                        eth_type=0x0800,
+                        ip_proto=17,
+                        ipv4_src=src_ip,
+                        ipv4_dst=dst_ip,
+                        udp_dst=udp_pkt.dst_port
+                    )
                     self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id, idle_timeout=60)
                     
                     data = None
@@ -1083,7 +1157,11 @@ class VoIPForecastController(app_manager.RyuApp):
             elif is_spine:
                 actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD))
         else:
-            actions = [parser.OFPActionOutput(out_port)]
+            actions = [
+                parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
+                parser.OFPActionOutput(out_port)
+            ]
+
         
         # Install flow if not flooding
         if out_port != ofproto.OFPP_FLOOD:

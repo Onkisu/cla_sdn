@@ -68,11 +68,13 @@ def burst(rate, duration):
     print(f"[BURST] 🚀 Sending: rate={rate} pps | duration={duration}s")
     
     try:
+        pid = subprocess.check_output(["pgrep", "-n", "-f", H3]).decode().strip()
         subprocess.run([
             "mnexec", "-a",
-            subprocess.check_output(["pgrep", "-f", H3]).decode().strip(),
+            pid,
             "ITGSend",
             "-T", "UDP",
+            "-rp", "9001",
             "-a", DST_IP,
             "-c", "160",
             "-C", str(rate),
