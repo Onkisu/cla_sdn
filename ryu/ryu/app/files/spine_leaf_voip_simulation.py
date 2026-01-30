@@ -97,8 +97,9 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
     for i in itertools.count(1):
         try:
             if not hasattr(dst_host, 'shell') or dst_host.shell is None:
-                info("*** Host disconnected\n")
-                break
+                time.sleep(1)
+                continue
+
 
             session_ts = int(time.time())
             logfile = f"/tmp/recv_steady_{session_ts}.log"
