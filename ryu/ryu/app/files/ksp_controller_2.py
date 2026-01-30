@@ -1083,8 +1083,7 @@ class VoIPForecastController(app_manager.RyuApp):
         
         # === SPECIAL HANDLING FOR Leaf 2 (DPID 5) - DESTINATION ===
         if ip_pkt and dpid == 5:
-            if not udp_pkt:
-                pass
+            udp_dst = udp_pkt.dst_port if udp_pkt else None
             src_ip = ip_pkt.src
             dst_ip = ip_pkt.dst
             
