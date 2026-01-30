@@ -881,7 +881,7 @@ class VoIPForecastController(app_manager.RyuApp):
                 src_mac, dst_mac,
                 match.get('ip_proto', 17),
                 match.get('tcp_src') or match.get('udp_src') or 0,
-                match.get('tcp_dst') or match.get('udp_dst') or 0,
+                match.get('tcp_dst') or match.get('udp_dst') or 1,
                 delta_bytes, delta_bytes,
                 delta_packets, delta_packets,
                 duration,
@@ -1101,34 +1101,28 @@ class VoIPForecastController(app_manager.RyuApp):
                         parser.OFPActionOutput(out_port)
                     ]
 
-                    if udp_dst:
-                        match = parser.OFPMatch(
-                            eth_type=0x0800,
-                            ip_proto=17,
-                            ipv4_src=src_ip,
-                            ipv4_dst=dst_ip,
-                            udp_dst=udp_dst
-                        )
-                    else:
-                        match = parser.OFPMatch(
-                            eth_type=0x0800,
-                            ipv4_src=src_ip,
-                            ipv4_dst=dst_ip
-                        )
-
-
-                    self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
-                    
-                    data = None
-                    if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-                        data = msg.data
-                    
-                    out = parser.OFPPacketOut(
-                        datapath=datapath, buffer_id=msg.buffer_id,
-                        in_port=in_port, actions=actions, data=data
+                if udp_dst == 9000 or udp_dst == 9001:
+                    match = parser.OFPMatch(
+                        eth_type=0x0800,
+                        ip_proto=17,
+                        ipv4_src=src_ip,
+                        ipv4_dst=dst_ip,
+                        udp_dst=udp_dst
                     )
-                    datapath.send_msg(out)
-                    return
+                    
+                    self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
+
+                # Forward packet (ICMP + UDP semua)
+                data = None
+                if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+                    data = msg.data
+
+                out = parser.OFPPacketOut(
+                    datapath=datapath, buffer_id=msg.buffer_id,
+                    in_port=in_port, actions=actions, data=data
+                )
+                datapath.send_msg(out)
+                return
         
         # === ARP HANDLING ===
         if arp_pkt:
