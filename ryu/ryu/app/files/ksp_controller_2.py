@@ -1188,18 +1188,25 @@ class VoIPForecastController(app_manager.RyuApp):
         
         # Install flow if not flooding
         if out_port != ofproto.OFPP_FLOOD:
-            # Use IP match for stats if IP packet
-            if ip_pkt:
+            if ip_pkt and udp_pkt:
                 match = parser.OFPMatch(
-                    in_port=in_port, 
-                    eth_dst=dst, 
-                    eth_type=0x0800, 
-                    ipv4_src=ip_pkt.src, 
+                    in_port=in_port,
+                    eth_dst=dst,
+                    eth_type=0x0800,
+                    ip_proto=17,
+                    ipv4_src=ip_pkt.src,
+                    ipv4_dst=ip_pkt.dst,
+                    udp_dst=udp_pkt.dst_port
+                )
+            elif ip_pkt:
+                match = parser.OFPMatch(
+                    in_port=in_port,
+                    eth_dst=dst,
+                    eth_type=0x0800,
+                    ipv4_src=ip_pkt.src,
                     ipv4_dst=ip_pkt.dst
                 )
-            else:
-                match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-            
+
             self.add_flow(datapath, PRIORITY_DEFAULT, match, actions, msg.buffer_id, idle_timeout=60)
         
         # Send packet out
