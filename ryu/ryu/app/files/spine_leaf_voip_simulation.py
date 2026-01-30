@@ -133,7 +133,8 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             p.wait()
 
             try:
-                result = dst_host.cmd(f"ITGDec {logfile}")
+                dst_host.cmd(f"cp {logfile} /tmp/tmp.log")
+                result = dst_host.cmd("ITGDec /tmp/tmp.log")
                 save_itg_session_to_db_from_text(result)
             except Exception as e:
                 info(f"!!! DB SAVE FAILED: {e}\n")
