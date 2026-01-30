@@ -169,7 +169,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 src_host.popen(
                     f"ITGSend -T UDP -a {dst_ip} "
                     f"-rp 9000 -c {PKT_SIZE} -C {STEADY_RATE} "
-                    f"-t 0 -l /dev/null &",
+                    f"-t {STEADY_DURATION_MS} -l /dev/null &",
                     shell=True
                 )
             else:
