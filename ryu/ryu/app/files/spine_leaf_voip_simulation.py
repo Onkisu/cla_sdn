@@ -15,7 +15,7 @@ import re
 STEADY_DURATION_MS = 60000   # 60 detik per sesi
 STEADY_RATE = 50             # pps
 PKT_SIZE = 160               # bytes
-RESTART_DELAY = STEADY_DURATION_MS / 1000           # detik
+RESTART_DELAY = 1         # detik
 
 def check_ditg():
     return subprocess.run(['which', 'ITGSend'], capture_output=True).returncode == 0
