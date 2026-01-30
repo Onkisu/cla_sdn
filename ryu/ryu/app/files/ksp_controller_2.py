@@ -1101,7 +1101,7 @@ class VoIPForecastController(app_manager.RyuApp):
                         parser.OFPActionOutput(out_port)
                     ]
 
-                    if udp_pkt:
+                    if udp_dst:
                         match = parser.OFPMatch(
                             eth_type=0x0800,
                             ip_proto=17,
