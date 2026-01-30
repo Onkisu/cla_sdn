@@ -159,17 +159,18 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             # === PASTIKAN ITGRecv HIDUP ===
             if not dst_host.cmd("pgrep ITGRecv").strip():
                 info("*** ITGRecv DEAD → starting again\n")
-                dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
-                dst_host.cmd(f"ITGRecv -Sp 9001 -l {logfile_burst} &")
+                dst_host.popen(f"ITGRecv -Sp 9000 -l {logfile} &", shell=True)
+                dst_host.popen(f"ITGRecv -Sp 9001 -l {logfile_burst} &", shell=True)
                 time.sleep(1)
 
             # === CEK STEADY ITGSEND ===
             if not itgsend_alive(src_host):
                 info("*** STEADY DEAD → starting ITGSend\n")
-                src_host.cmd(
+                src_host.popen(
                     f"ITGSend -T UDP -a {dst_ip} "
                     f"-rp 9000 -c {PKT_SIZE} -C {STEADY_RATE} "
-                    f"-t 0 -l /dev/null &"
+                    f"-t 0 -l /dev/null &",
+                    shell=True
                 )
             else:
                 info("*** STEADY running\n")
