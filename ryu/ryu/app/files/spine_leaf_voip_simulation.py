@@ -108,7 +108,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             info(f"*** [SESSION {i}] Restarting ITGRecv -> {logfile}\n")
 
             # Kill old receiver
-            dst_host.cmd("pkill -9 ITGRecv 2>/dev/null")
+            dst_host.popen("pkill -9 ITGRecv 2>/dev/null", shell=True)
             time.sleep(0.5)
 
             # Start fresh receiver (9000 steady, 9001 burst)
