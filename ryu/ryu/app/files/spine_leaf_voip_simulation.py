@@ -104,8 +104,8 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
 
             session_ts = int(time.time())
-            logfile = "/tmp/recv_steady.log"
-            logfile_burst = "/tmp/recv_burst.log"
+            logfile = f"/tmp/recv_steady.log"
+            logfile_burst = f"/tmp/recv_burst.log"
 
             info(f"*** [SESSION {i}] Restarting ITGRecv -> {logfile}\n")
 
@@ -121,7 +121,8 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             else:
                 info("*** ITGRecv still running\n")
 
-
+            dst_host.cmd(f"> {logfile}")  
+            dst_host.cmd(f"> {logfile_burst}")   
             # Blocking send
             p = src_host.popen(
                 f'ITGSend -T UDP -a {dst_ip} '
