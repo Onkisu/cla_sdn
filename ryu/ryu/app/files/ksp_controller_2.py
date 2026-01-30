@@ -51,8 +51,8 @@ PRIORITY_USER = 10
 PRIORITY_DEFAULT = 1           
 
 # Timing
-FLOW_DELETE_WAIT_SEC = 0.5 
-TRAFFIC_SETTLE_WAIT_SEC = 0.5 
+FLOW_DELETE_WAIT_SEC = 2.0 
+TRAFFIC_SETTLE_WAIT_SEC = 2.0 
 STATE_FILE = '/tmp/controller_state.json'
 
 # ==========================================
@@ -537,7 +537,7 @@ class VoIPForecastController(app_manager.RyuApp):
         })
         
         self.logger.info("⏳ Waiting 0.5s for traffic to switch...")
-        hub.sleep(0.5)
+        hub.sleep(1.5)
         
         # STEP 3: Delete OLD flows
         self.reroute_stage = 'DELETING_OLD_FLOWS'
@@ -550,7 +550,7 @@ class VoIPForecastController(app_manager.RyuApp):
         self._delete_h1_h2_flows_on_spine(old_spine)
         
         self.logger.info("⏳ Waiting 0.3s for deletion to propagate...")
-        hub.sleep(0.3)
+        hub.sleep(1.0)
         
         # STEP 4: Complete
         self.current_spine = target_spine
@@ -947,7 +947,22 @@ class VoIPForecastController(app_manager.RyuApp):
             dst_ip = ip_pkt.dst
             
             if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
-                # Route via current_spine
+                # CRITICAL: Skip flow installation during reroute to prevent duplicate flows
+                if self.reroute_stage in ['INSTALLING_NEW_PATH', 'TRAFFIC_SWITCHING', 'DELETING_OLD_FLOWS',
+                                        'REVERT_INSTALLING', 'REVERT_DELETING']:
+                    # Just forward packet, don't install flow
+                    spine_to_port = {1: 1, 2: 2, 3: 3}
+                    out_port = spine_to_port.get(self.current_spine, 2)
+                    actions = [parser.OFPActionOutput(out_port)]
+                    data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
+                    out = parser.OFPPacketOut(
+                        datapath=datapath, buffer_id=msg.buffer_id,
+                        in_port=in_port, actions=actions, data=data
+                    )
+                    datapath.send_msg(out)
+                    return
+                
+                # Normal: Route via current_spine and install flow
                 spine_to_port = {1: 1, 2: 2, 3: 3}
                 out_port = spine_to_port.get(self.current_spine, 2)
                 
