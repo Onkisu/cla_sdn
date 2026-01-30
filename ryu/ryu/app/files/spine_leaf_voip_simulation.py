@@ -93,6 +93,7 @@ def save_itg_session_to_db(log_file):
     cur.close()
     conn.close()
 
+
 def keep_steady_traffic(src_host, dst_host, dst_ip):
     for i in itertools.count(1):
         try:
@@ -100,27 +101,18 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 info("*** Host disconnected\n")
                 break
 
-
             session_ts = int(time.time())
             logfile = f"/tmp/recv_steady_{session_ts}.log"
             logfile_burst = f"/tmp/recv_burst_{session_ts}.log"
 
-            info(f"*** [SESSION {i}] Restarting ITGRecv -> {logfile}\n")
+            info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
 
-            # Kill existing ITGRecv (non-blocking)# Cek apakah ITGRecv masih hidup
-            check = dst_host.popen("pgrep ITGRecv", shell=True, stdout=subprocess.PIPE)
-            out = check.stdout.read().decode().strip()
+            # Start ITGRecv
+            dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
+            dst_host.cmd(f"ITGRecv -Sp 9001 -l {logfile_burst} &")
+            time.sleep(0.2)
 
-            if not out:
-                info("*** ITGRecv not running, restarting...\n")
-                dst_host.popen(f"ITGRecv -Sp 9000 -l {logfile} &", shell=True)
-                dst_host.popen(f"ITGRecv -Sp 9001 -l {logfile_burst} &", shell=True)
-                time.sleep(1)
-            else:
-                info("*** ITGRecv still running\n")
-
-
-            # Blocking send
+            # Send traffic
             p = src_host.popen(
                 f'ITGSend -T UDP -a {dst_ip} '
                 f'-rp 9000 '
@@ -130,12 +122,13 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             )
             p.wait()
 
-            try:
-                dst_host.cmd(f"cp {logfile} /tmp/host_{session_ts}.log")
-                time.sleep(0.5)
-                save_itg_session_to_db(f"/tmp/host_{session_ts}.log")
-            except Exception as e:
-                info(f"!!! DB SAVE FAILED: {e}\n")
+            # STOP receiver (cepat, aman buat ITGDec)
+            dst_host.cmd("pkill -f ITGRecv")
+            time.sleep(0.1)   # bukan 1 detik
+
+            # Copy & decode
+            dst_host.cmd(f"cp {logfile} /tmp/host_{session_ts}.log")
+            save_itg_session_to_db(f"/tmp/host_{session_ts}.log")
 
             time.sleep(RESTART_DELAY)
 
@@ -147,43 +140,49 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 # def keep_steady_traffic(src_host, dst_host, dst_ip):
 #     for i in itertools.count(1):
 #         try:
-#             # Check if hosts still alive
 #             if not hasattr(dst_host, 'shell') or dst_host.shell is None:
 #                 info("*** Host disconnected\n")
 #                 break
-                
+
+
 #             session_ts = int(time.time())
 #             logfile = f"/tmp/recv_steady_{session_ts}.log"
+#             logfile_burst = f"/tmp/recv_burst_{session_ts}.log"
 
-#             info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
+#             info(f"*** [SESSION {i}] Restarting ITGRecv -> {logfile}\n")
 
-#             # Kill existing ITGRecv (non-blocking)
-#             try:
-#                 dst_host.cmd("pkill -9 ITGRecv 2>/dev/null")
-#             except:
-#                 pass
-#             time.sleep(0.5)
-            
-#             # Start ITGRecv
-#             dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
-#             dst_host.cmd(f"ITGRecv -Sp 9001 -l {logfile} &")
-#             time.sleep(1)
+#             # Kill existing ITGRecv (non-blocking)# Cek apakah ITGRecv masih hidup
+#             check = dst_host.popen("pgrep ITGRecv", shell=True, stdout=subprocess.PIPE)
+#             out = check.stdout.read().decode().strip()
 
-#             info("*** Starting ITGSend (STEADY)\n")
-#             src_host.cmd(
+#             if not out:
+#                 info("*** ITGRecv not running, restarting...\n")
+#                 dst_host.popen(f"ITGRecv -Sp 9000 -l {logfile} &", shell=True)
+#                 dst_host.popen(f"ITGRecv -Sp 9001 -l {logfile_burst} &", shell=True)
+#                 time.sleep(1)
+#             else:
+#                 info("*** ITGRecv still running\n")
+
+
+#             # Blocking send
+#             p = src_host.popen(
 #                 f'ITGSend -T UDP -a {dst_ip} '
-#                 f'-rp 9000 '  # Pastikan port tujuan sesuai dengan yang di-listen ITGRecv
+#                 f'-rp 9000 '
 #                 f'-c {PKT_SIZE} -C {STEADY_RATE} '
-#                 f'-t {STEADY_DURATION_MS} -l /dev/null'
+#                 f'-t {STEADY_DURATION_MS} -l /dev/null',
+#                 shell=True
 #             )
+#             p.wait()
 
 #             try:
-#                 save_itg_session_to_db(logfile)
+#                 dst_host.cmd(f"cp {logfile} /tmp/host_{session_ts}.log")
+#                 time.sleep(0.5)
+#                 save_itg_session_to_db(f"/tmp/host_{session_ts}.log")
 #             except Exception as e:
 #                 info(f"!!! DB SAVE FAILED: {e}\n")
 
 #             time.sleep(RESTART_DELAY)
-            
+
 #         except Exception as e:
 #             info(f"*** Traffic loop error: {e}\n")
 #             break
