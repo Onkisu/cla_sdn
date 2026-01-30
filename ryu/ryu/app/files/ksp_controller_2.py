@@ -368,30 +368,54 @@ class VoIPForecastController(app_manager.RyuApp):
         self.logger.info(f"🗑️ Complete: Deleted flows from {deleted_count} switches")
 
     def _delete_h1_h2_flows_on_spine(self, spine_dpid):
-        """Delete H1->H2 flows on SPECIFIC spine only (for make-before-break)"""
-        if spine_dpid not in self.datapaths:
-            return
+        """Delete H1->H2 flows on SPECIFIC spine AND Leaf 1"""
+        # Delete from spine
+        if spine_dpid in self.datapaths:
+            dp = self.datapaths[spine_dpid]
+            parser = dp.ofproto_parser
+            ofproto = dp.ofproto
+            
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src='10.0.0.1',
+                ipv4_dst='10.0.0.2'
+            )
+            
+            mod = parser.OFPFlowMod(
+                datapath=dp,
+                command=ofproto.OFPFC_DELETE,
+                out_port=ofproto.OFPP_ANY,
+                out_group=ofproto.OFPG_ANY,
+                match=match
+            )
+            
+            dp.send_msg(mod)
+            self.logger.info(f"🗑️ Deleted H1->H2 flows on Spine {spine_dpid}")
         
-        dp = self.datapaths[spine_dpid]
-        parser = dp.ofproto_parser
-        ofproto = dp.ofproto
-        
-        match = parser.OFPMatch(
-            eth_type=0x0800,
-            ipv4_src='10.0.0.1',
-            ipv4_dst='10.0.0.2'
-        )
-        
-        mod = parser.OFPFlowMod(
-            datapath=dp,
-            command=ofproto.OFPFC_DELETE,
-            out_port=ofproto.OFPP_ANY,
-            out_group=ofproto.OFPG_ANY,
-            match=match
-        )
-        
-        dp.send_msg(mod)
-        self.logger.info(f"🗑️ Deleted H1->H2 flows on Spine {spine_dpid}")
+        # CRITICAL: Also delete LOW PRIORITY flows from Leaf 1
+        if 4 in self.datapaths:
+            dp = self.datapaths[4]
+            parser = dp.ofproto_parser
+            ofproto = dp.ofproto
+            
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src='10.0.0.1',
+                ipv4_dst='10.0.0.2'
+            )
+            
+            # Delete with STRICT priority to remove only low-priority flows
+            mod = parser.OFPFlowMod(
+                datapath=dp,
+                command=ofproto.OFPFC_DELETE_STRICT,
+                priority=PRIORITY_USER,  # Only delete priority 10
+                out_port=ofproto.OFPP_ANY,
+                out_group=ofproto.OFPG_ANY,
+                match=match
+            )
+            
+            dp.send_msg(mod)
+            self.logger.info(f"🗑️ Deleted low-priority H1->H2 flows on Leaf 1")
     
     def _install_h1_h2_flow_on_spine(self, spine_dpid):
         """Install H1->H2 flow on specified spine"""
