@@ -97,8 +97,8 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
     for i in itertools.count(1):
         try:
             if not hasattr(dst_host, 'shell') or dst_host.shell is None:
-                time.sleep(1)
-                continue
+                info("*** Host disconnected\n")
+                break
 
 
             session_ts = int(time.time())
