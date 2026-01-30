@@ -25,7 +25,17 @@ import psycopg2
 import re
 
 def save_itg_session_to_db_from_text(result):
-    data = {}
+    data = {
+        "duration": 0,
+        "total_packets": 0,
+        "dropped": 0,
+        "avg_delay": 0,
+        "avg_jitter": 0,
+        "max_delay": 0,
+        "bitrate": 0,
+        "pps": 0
+    }
+
     for line in result.splitlines():
         if "Total time" in line:
             data["duration"] = float(line.split("=")[1].split()[0])
