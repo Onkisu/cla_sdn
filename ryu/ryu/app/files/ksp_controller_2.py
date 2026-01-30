@@ -1102,14 +1102,21 @@ class VoIPForecastController(app_manager.RyuApp):
                         parser.OFPActionOutput(out_port)
                     ]
 
-                    # Use IP match for stats tracking
-                    match = parser.OFPMatch(
+                    if udp_pkt:
+                        match = parser.OFPMatch(
                             eth_type=0x0800,
                             ip_proto=17,
                             ipv4_src=src_ip,
                             ipv4_dst=dst_ip,
                             udp_dst=udp_pkt.dst_port
                         )
+                    else:
+                        match = parser.OFPMatch(
+                            eth_type=0x0800,
+                            ipv4_src=src_ip,
+                            ipv4_dst=dst_ip
+                        )
+
 
                     self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id, idle_timeout=60)
                     
