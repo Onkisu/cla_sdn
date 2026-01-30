@@ -111,8 +111,8 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             time.sleep(0.5)
 
             # Start fresh receiver (9000 steady, 9001 burst)
-            dst_host.popen(f"ITGRecv -Sp 9000 -l {logfile} &")
-            dst_host.popen(f"ITGRecv -Sp 9001 -l {logfile_burst} &")
+            dst_host.popen(f"ITGRecv -Sp 9000 -l {logfile} &", shell=True)
+            dst_host.popen(f"ITGRecv -Sp 9001 -l {logfile_burst} &", shell=True)
             time.sleep(1)
 
             info(f"*** [SESSION {i}] Starting ITGSend (STEADY)\n")
@@ -122,7 +122,8 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 f'ITGSend -T UDP -a {dst_ip} '
                 f'-rp 9000 '
                 f'-c {PKT_SIZE} -C {STEADY_RATE} '
-                f'-t {STEADY_DURATION_MS} -l /dev/null'
+                f'-t {STEADY_DURATION_MS} -l /dev/null',
+                shell=True
             )
             p.wait()
 
