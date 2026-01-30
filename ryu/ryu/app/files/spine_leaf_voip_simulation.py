@@ -24,7 +24,7 @@ import subprocess
 import psycopg2
 import re
 
-def save_itg_session_to_db(log_file="/tmp/recv_voip.log"):
+def save_itg_session_to_db(log_file):
     # Jalankan ITGDec
     result = subprocess.check_output(
         ["ITGDec", log_file],
@@ -100,8 +100,24 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 info("*** Host disconnected\n")
                 break
 
+            session_ts = int(time.time())
+            logfile = f"/tmp/recv_steady_{session_ts}.log"
+            logfile_burst = f"/tmp/recv_burst_{session_ts}.log"
+
+            info(f"*** [SESSION {i}] Restarting ITGRecv -> {logfile}\n")
+
+            # Kill old receiver
+            dst_host.cmd("pkill -9 ITGRecv 2>/dev/null")
+            time.sleep(0.5)
+
+            # Start fresh receiver (9000 steady, 9001 burst)
+            dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
+            dst_host.cmd(f"ITGRecv -Sp 9001 -l {logfile_burst} &")
+            time.sleep(1)
+
             info(f"*** [SESSION {i}] Starting ITGSend (STEADY)\n")
 
+            # Blocking send
             src_host.cmd(
                 f'ITGSend -T UDP -a {dst_ip} '
                 f'-rp 9000 '
@@ -109,13 +125,17 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 f'-t {STEADY_DURATION_MS} -l /dev/null'
             )
 
-            save_itg_session_to_db("/tmp/recv_voip.log")
+            try:
+                save_itg_session_to_db(logfile)
+            except Exception as e:
+                info(f"!!! DB SAVE FAILED: {e}\n")
 
             time.sleep(RESTART_DELAY)
 
         except Exception as e:
             info(f"*** Traffic loop error: {e}\n")
             break
+
 
 # def keep_steady_traffic(src_host, dst_host, dst_ip):
 #     for i in itertools.count(1):
