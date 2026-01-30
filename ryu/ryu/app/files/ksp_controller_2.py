@@ -1117,7 +1117,7 @@ class VoIPForecastController(app_manager.RyuApp):
                         )
 
 
-                    self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id, idle_timeout=60)
+                    self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
                     
                     data = None
                     if msg.buffer_id == ofproto.OFP_NO_BUFFER:
