@@ -365,7 +365,7 @@ class VoIPForecastController(app_manager.RyuApp):
         # FAIL-SAFE: Kalau error/null, anggap MACET (999999) biar GAK REVERT.
         return None  
     
-    def _get_alternative_spine(self, avoid_spine):
+    def _get_alternative_spine(self, avoid_spine): 
         """Get alternative spine (avoiding current one)"""
         available = [1, 2, 3]
         available.remove(avoid_spine)
