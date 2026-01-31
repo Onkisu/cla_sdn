@@ -542,7 +542,8 @@ class VoIPForecastController(app_manager.RyuApp):
             self.logger.error("❌ Failed to update Leaf 1")
             self.reroute_stage = 'IDLE'
             return False
-        
+            
+        hub.sleep(0.1)
         self.logger.info("✅ New path installed")
         
         # STEP 2: Brief overlap to allow traffic to switch
@@ -555,7 +556,7 @@ class VoIPForecastController(app_manager.RyuApp):
         })
         
         self.logger.info("⏳ Waiting 0.5s for traffic to switch...")
-        hub.sleep(0.4)
+        hub.sleep(0.05)
         
         # STEP 3: Delete OLD flows
         self.reroute_stage = 'DELETING_OLD_FLOWS'
@@ -568,7 +569,7 @@ class VoIPForecastController(app_manager.RyuApp):
         self._delete_h1_h2_flows_on_spine(old_spine)
         
         self.logger.info("⏳ Waiting 0.3s for deletion to propagate...")
-        hub.sleep(0.3)
+        hub.sleep(0.05)
         
         # STEP 4: Complete
         self.current_spine = target_spine
