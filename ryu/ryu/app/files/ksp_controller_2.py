@@ -295,10 +295,7 @@ class VoIPForecastController(app_manager.RyuApp):
                             spine2_load = self.get_spine2_load()
                             
                             # Threshold aman (100kbps). Jika lebih, berarti MACET/BURST.
-                            if spine2_load > 500:
-                                self.logger.warning(f"⚠️ [REVERT BLOCKED] Forecast OK, tapi Spine 2 MACET ({spine2_load:.0f} bps)!")
-                                self.stability_counter = 0 # Reset counter, tunggu lagi
-                            else:
+                            if spine2_load is None or spine2_load < 500:
                                 # AMAN: Forecast sepi DAN Spine 2 sepi
                                 self.logger.info(f"✅ Forecast & Spine 2 ({spine2_load:.0f} bps) stable. Reverting...")
                                 
@@ -309,6 +306,11 @@ class VoIPForecastController(app_manager.RyuApp):
                                     self.stability_counter = 0
                                 else:
                                     self.logger.error("❌ Revert failed")
+
+                              
+                            else:
+                                self.logger.warning(f"⚠️ [REVERT BLOCKED] Forecast OK, tapi Spine 2 MACET ({spine2_load:.0f} bps)!")
+                                self.stability_counter = 0 # Reset counter, tunggu lagi
                     else:
                         # Reset stability counter if forecast goes back up
                         if self.congestion_active and predicted_bps >= REVERT_THRESHOLD_BPS:
