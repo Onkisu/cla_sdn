@@ -293,6 +293,7 @@ class VoIPForecastController(app_manager.RyuApp):
                         if self.stability_counter >= STABILITY_CYCLES_REQUIRED:
                     
                           
+                            spine2_load = self.get_spine2_load() or 999999  # ← tambah ini
                             self.logger.info(f"✅ Forecast & Spine 2 ({spine2_load:.0f} bps) stable. Reverting...")
                                 
                             self.stats['forecast_revert'] += 1
@@ -305,8 +306,8 @@ class VoIPForecastController(app_manager.RyuApp):
 
                               
                         else:
-                            self.logger.warning(f"⚠️ [REVERT BLOCKED] ")
-                            self.stability_counter = 0 # Reset counter, tunggu lagi
+                            self.logger.debug(f"⏳ [REVERT] Waiting stability: {self.stability_counter}/{STABILITY_CYCLES_REQUIRED}")
+                            
                     else:
                         # Reset stability counter if forecast goes back up
                         if self.congestion_active and predicted_bps >= REVERT_THRESHOLD_BPS:
