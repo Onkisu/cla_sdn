@@ -158,14 +158,20 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 f'ITGSend -T UDP -a {dst_ip} '
                 f'-rp 9000 '
                 f'-c {PKT_SIZE} -C {STEADY_RATE} '
-                f'-t {STEADY_DURATION_MS} -l /dev/null'
+                f'-t {STEADY_DURATION_MS} -l /dev/null &'
             )
             src_host.cmd(
                 f'ITGSend -T UDP -a {dst_ip} '
                 f'-rp 9001 '
                 f'-c {PKT_SIZE} -C {STEADY_RATE} '
-                f'-t {STEADY_DURATION_MS} -l /dev/null'
+                f'-t {STEADY_DURATION_MS} -l /dev/null &'
             )
+
+            # ⬇️ WAJIB TUNGGU 60 DETIK
+            time.sleep(STEADY_DURATION_MS / 1000 )
+
+            # Stop receiver supaya log stop nambah
+            dst_host.cmd("pkill -9 ITGRecv")
 
             try:
                 save_itg_session_to_db(logfile)
@@ -219,10 +225,10 @@ def run():
         # Kita tidak perlu start ITGRecv manual di sini lagi, 
         # karena Watchdog sekarang cukup pintar untuk menyalakannya jika belum ada.
         # Tapi untuk inisiasi awal yang cepat, kita nyalakan sekali.
-        info("*** Starting ITGRecv on h2 (Initial)\n")
-        h2.cmd('ITGRecv -Sp 9000 -l /tmp/recv_steady.log &')
-        h2.cmd('ITGRecv -Sp 9001 -l /tmp/recv_burst.log &')
-        time.sleep(1)
+        # info("*** Starting ITGRecv on h2 (Initial)\n")
+        # h2.cmd('ITGRecv -Sp 9000 -l /tmp/recv_steady.log &')
+        # h2.cmd('ITGRecv -Sp 9001 -l /tmp/recv_burst.log &')
+        # time.sleep(1)
 
         info("*** Starting STEADY VoIP Watchdog (h1 -> h2)\n")
         # FIX: Pass h2 object juga ke argumen thread
