@@ -43,6 +43,7 @@ REVERT_THRESHOLD_BPS = 80900        # Revert jika forecast < 70 Kbps
 
 # Stability
 STABILITY_CYCLES_REQUIRED = 8      # Butuh 8 cycle stabil sebelum revert
+REVERT_COOLDOWN_SEC = 60
 
 # OpenFlow
 COOKIE_REROUTE = 0xDEADBEEF    
@@ -90,6 +91,7 @@ class VoIPForecastController(app_manager.RyuApp):
         
         # Stability tracking
         self.stability_counter = 0
+        self.last_revert_time = 0
         
         # Congestion state
         self.congestion_active = False
@@ -263,7 +265,8 @@ class VoIPForecastController(app_manager.RyuApp):
                     
                     # === TRIGGER PROACTIVE REROUTE ===
                     if ( self.reroute_stage == 'IDLE' and
-                        predicted_bps > FORECAST_THRESHOLD_BPS):
+                        predicted_bps > FORECAST_THRESHOLD_BPS and
+                        time.time() - self.last_revert_time > REVERT_COOLDOWN_SEC):
                         
                         self.logger.warning(f"🔮 FORECAST ALERT: Predicted {predicted_bps:.0f} bps > {FORECAST_THRESHOLD_BPS} bps")
                         self.logger.info(f"🚀 PROACTIVE REROUTE: Moving H1->H2 from Spine {self.current_spine}")
@@ -293,9 +296,9 @@ class VoIPForecastController(app_manager.RyuApp):
                         if self.stability_counter >= STABILITY_CYCLES_REQUIRED:
                     
                           
-                            spine2_load = self.get_spine2_load() or 999999  # ← tambah ini
-                            self.logger.info(f"✅ Forecast & Spine 2 ({spine2_load:.0f} bps) stable. Reverting...")
-                                
+                            # spine2_load = self.get_spine2_load() or 999999  # ← tambah ini
+                            # self.logger.info(f"✅ Forecast & Spine 2 ({spine2_load:.0f} bps) stable. Reverting...")
+                            self.logger.info(f"✅ Forecast stable. Reverting...")
                             self.stats['forecast_revert'] += 1
                             success = self._atomic_revert_to_original_spine()
                                 
@@ -688,7 +691,7 @@ class VoIPForecastController(app_manager.RyuApp):
             'congestion': False,
             'current_spine': self.current_spine
         })
-        
+        self.last_revert_time = time.time()   
         self.logger.info(f"✅ REVERT COMPLETE: H1->H2 back to Spine {target_spine} (make-before-break)")
         return True
 
