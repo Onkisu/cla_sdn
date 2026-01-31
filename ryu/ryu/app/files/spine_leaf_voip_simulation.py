@@ -147,11 +147,8 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             except:
                 pass
             time.sleep(0.5)
-            
-            try:
-                save_itg_session_to_db(logfile)
-            except Exception as e:
-                info(f"!!! DB SAVE FAILED: {e}\n")
+
+       
             
             # Start ITGRecv
             dst_host.popen(f"ITGRecv -Sp 9000 -l {logfile}", shell=True)
@@ -166,6 +163,11 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 f'-t {STEADY_DURATION_MS} -l /dev/null', shell=True
             )
 
+
+            try:
+                save_itg_session_to_db(logfile)
+            except Exception as e:
+                info(f"!!! DB SAVE FAILED: {e}\n")
             time.sleep(RESTART_DELAY)
             
         except Exception as e:
