@@ -282,24 +282,33 @@ class VoIPForecastController(app_manager.RyuApp):
                             self.reroute_stage = 'IDLE'
                     
                     # === TRIGGER REVERT ===
+                    # === TRIGGER REVERT (DENGAN CEK SPINE 2) ===
                     elif (self.congestion_active and 
                           self.reroute_stage == 'ACTIVE_REROUTE' and
                           predicted_bps < REVERT_THRESHOLD_BPS):
                         
                         self.stability_counter += 1
-                        
                         self.logger.debug(f"✓ Stability check {self.stability_counter}/{STABILITY_CYCLES_REQUIRED} (forecast: {predicted_bps:.0f} bps)")
                         
                         if self.stability_counter >= STABILITY_CYCLES_REQUIRED:
-                            self.logger.info(f"✅ Forecast stable below {REVERT_THRESHOLD_BPS} bps, reverting...")
+                            # --- TAMBAHAN: CEK SPINE 2 SEBELUM REVERT ---
+                            spine2_load = self.get_spine2_load()
                             
-                            self.stats['forecast_revert'] += 1
-                            success = self._atomic_revert_to_original_spine()
-                            
-                            if success:
-                                self.stability_counter = 0
+                            # Threshold aman (100kbps). Jika lebih, berarti MACET/BURST.
+                            if spine2_load > 500:
+                                self.logger.warning(f"⚠️ [REVERT BLOCKED] Forecast OK, tapi Spine 2 MACET ({spine2_load:.0f} bps)!")
+                                self.stability_counter = 0 # Reset counter, tunggu lagi
                             else:
-                                self.logger.error("❌ Revert failed")
+                                # AMAN: Forecast sepi DAN Spine 2 sepi
+                                self.logger.info(f"✅ Forecast & Spine 2 ({spine2_load:.0f} bps) stable. Reverting...")
+                                
+                                self.stats['forecast_revert'] += 1
+                                success = self._atomic_revert_to_original_spine()
+                                
+                                if success:
+                                    self.stability_counter = 0
+                                else:
+                                    self.logger.error("❌ Revert failed")
                     else:
                         # Reset stability counter if forecast goes back up
                         if self.congestion_active and predicted_bps >= REVERT_THRESHOLD_BPS:
@@ -311,6 +320,50 @@ class VoIPForecastController(app_manager.RyuApp):
     # =================================================================
     # COMPLETE FLOW DELETION - Prevents Counter Accumulation
     # =================================================================
+    # =========================================================
+    # NEW FUNCTION: CEK BEBAN SPINE 2 (MAIN PATH)
+    # =========================================================
+    def get_spine2_load(self):
+        """
+        Mengambil throughput aktual Spine 2 (bits/sec) dari Database.
+        Digunakan untuk memastikan jalan utama kosong sebelum Revert.
+        """
+        try:
+            # Query user (optimized with LIMIT 1)
+            query = """
+                WITH x AS (
+                    SELECT
+                        date_trunc('second', timestamp) AS detik,
+                        dpid,
+                        sum(bytes_tx) AS total_bytes
+                    FROM traffic.flow_stats_
+                    WHERE timestamp >= NOW() - INTERVAL '10 seconds'
+                    GROUP BY detik, dpid
+                )
+                SELECT
+                    detik AS ts,
+                    MAX(CASE WHEN dpid = 2 THEN total_bytes * 8 END) AS thp_2
+                FROM x
+                GROUP BY detik
+                ORDER BY ts DESC
+                LIMIT 1;
+            """
+            
+            # Gunakan cursor baru biar thread-safe
+            with self.db_conn.cursor() as cur:
+                cur.execute(query)
+                row = cur.fetchone()
+                
+                if row and row[1] is not None:
+                    load = float(row[1])
+                    # self.logger.info(f"[SPINE-2 CHECK] Load: {load} bps") # Uncomment kalau mau debug
+                    return load
+                    
+        except Exception as e:
+            self.logger.error(f"[SPINE-2 CHECK] Error fetching DB: {e}")
+        
+        # FAIL-SAFE: Kalau error/null, anggap MACET (999999) biar GAK REVERT.
+        return None  
     
     def _get_alternative_spine(self, avoid_spine):
         """Get alternative spine (avoiding current one)"""
@@ -542,7 +595,7 @@ class VoIPForecastController(app_manager.RyuApp):
             self.logger.error("❌ Failed to update Leaf 1")
             self.reroute_stage = 'IDLE'
             return False
-            
+
         hub.sleep(0.1)
         self.logger.info("✅ New path installed")
         
