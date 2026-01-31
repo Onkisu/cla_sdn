@@ -42,7 +42,7 @@ FORECAST_LEAD_TIME_SEC = 10         # Reroute 10 detik sebelum predicted congest
 REVERT_THRESHOLD_BPS = 85000        # Revert jika forecast < 70 Kbps
 
 # Stability
-STABILITY_CYCLES_REQUIRED = 8       # Butuh 8 cycle stabil sebelum revert
+STABILITY_CYCLES_REQUIRED = 60      # Butuh 8 cycle stabil sebelum revert
 
 # OpenFlow
 COOKIE_REROUTE = 0xDEADBEEF    
