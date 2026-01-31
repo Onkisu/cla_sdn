@@ -152,16 +152,16 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
        
             
             # Start ITGRecv
-            dst_host.popen(f"ITGRecv -Sp 9000 -l {logfile}", shell=True)
-            dst_host.popen(f"ITGRecv -Sp 9001 -l {logfile_burst}", shell=True)
+            dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
+            dst_host.cmd(f"ITGRecv -Sp 9001 -l {logfile_burst} &")
             time.sleep(1)
 
             info("*** Starting ITGSend (STEADY)\n")
-            src_host.popen(
+            src_host.cmd(
                 f'ITGSend -T UDP -a {dst_ip} '
                 f'-rp 9000 '
                 f'-c {PKT_SIZE} -C {STEADY_RATE} '
-                f'-t {STEADY_DURATION_MS} -l /dev/null', shell=True
+                f'-t {STEADY_DURATION_MS} -l /dev/null &'
             )
 
             time.sleep(STEADY_DURATION_MS / 1000)
