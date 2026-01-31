@@ -1237,6 +1237,14 @@ class VoIPForecastController(app_manager.RyuApp):
         
         # Install flow if not flooding
         if out_port != ofproto.OFPP_FLOOD:
+            
+            # --- [BARIS BARU] ---
+            # Bikin match default dulu (berdasarkan MAC Address & Port)
+            # Biar paket ARP/Non-IP tetap punya variabel 'match'
+            match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
+            # --------------------
+
+            # Baru cek detail IP (kalau ada)
             if ip_pkt and udp_pkt:
                 match = parser.OFPMatch(
                     in_port=in_port,
@@ -1256,6 +1264,7 @@ class VoIPForecastController(app_manager.RyuApp):
                     ipv4_dst=ip_pkt.dst
                 )
 
+            # Sekarang aman, 'match' pasti sudah terisi (minimal yang L2 tadi)
             self.add_flow(datapath, PRIORITY_DEFAULT, match, actions, msg.buffer_id, idle_timeout=60)
         
         # Send packet out
