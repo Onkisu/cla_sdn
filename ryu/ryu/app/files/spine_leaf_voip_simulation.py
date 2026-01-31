@@ -160,12 +160,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 f'-c {PKT_SIZE} -C {STEADY_RATE} '
                 f'-t {STEADY_DURATION_MS} -l /dev/null &'
             )
-            src_host.cmd(
-                f'ITGSend -T UDP -a {dst_ip} '
-                f'-rp 9001 '
-                f'-c {PKT_SIZE} -C {STEADY_RATE} '
-                f'-t {STEADY_DURATION_MS} -l /dev/null &'
-            )
+  
 
             # ⬇️ WAJIB TUNGGU 60 DETIK
             time.sleep(STEADY_DURATION_MS / 1000 )
