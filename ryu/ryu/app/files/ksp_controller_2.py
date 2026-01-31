@@ -39,7 +39,7 @@ DB_CONFIG = {
 FORECAST_CHECK_INTERVAL = 3         # Check forecast setiap 3 detik
 FORECAST_THRESHOLD_BPS = 100000     # 100 Kbps threshold untuk reroute
 FORECAST_LEAD_TIME_SEC = 10         # Reroute 10 detik sebelum predicted congestion
-REVERT_THRESHOLD_BPS = 85000        # Revert jika forecast < 70 Kbps
+REVERT_THRESHOLD_BPS = 80900        # Revert jika forecast < 70 Kbps
 
 # Stability
 STABILITY_CYCLES_REQUIRED = 8      # Butuh 8 cycle stabil sebelum revert
@@ -291,26 +291,22 @@ class VoIPForecastController(app_manager.RyuApp):
                         self.logger.debug(f"✓ Stability check {self.stability_counter}/{STABILITY_CYCLES_REQUIRED} (forecast: {predicted_bps:.0f} bps)")
                         
                         if self.stability_counter >= STABILITY_CYCLES_REQUIRED:
-                            # --- TAMBAHAN: CEK SPINE 2 SEBELUM REVERT ---
-                            spine2_load = self.get_spine2_load()
-                            
-                            # Threshold aman (100kbps). Jika lebih, berarti MACET/BURST.
-                            if spine2_load is None or spine2_load < 500:
-                                # AMAN: Forecast sepi DAN Spine 2 sepi
-                                self.logger.info(f"✅ Forecast & Spine 2 ({spine2_load:.0f} bps) stable. Reverting...")
+                    
+                          
+                            self.logger.info(f"✅ Forecast & Spine 2 ({spine2_load:.0f} bps) stable. Reverting...")
                                 
-                                self.stats['forecast_revert'] += 1
-                                success = self._atomic_revert_to_original_spine()
+                            self.stats['forecast_revert'] += 1
+                            success = self._atomic_revert_to_original_spine()
                                 
-                                if success:
-                                    self.stability_counter = 0
-                                else:
-                                    self.logger.error("❌ Revert failed")
+                            if success:
+                                 self.stability_counter = 0
+                            else:
+                                 self.logger.error("❌ Revert failed")
 
                               
-                            else:
-                                self.logger.warning(f"⚠️ [REVERT BLOCKED] Forecast OK, tapi Spine 2 MACET ({spine2_load:.0f} bps)!")
-                                self.stability_counter = 0 # Reset counter, tunggu lagi
+                        else:
+                            self.logger.warning(f"⚠️ [REVERT BLOCKED] ")
+                            self.stability_counter = 0 # Reset counter, tunggu lagi
                     else:
                         # Reset stability counter if forecast goes back up
                         if self.congestion_active and predicted_bps >= REVERT_THRESHOLD_BPS:
