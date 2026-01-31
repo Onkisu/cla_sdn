@@ -146,6 +146,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 dst_host.cmd("pkill -9 ITGRecv 2>/dev/null")
             except:
                 pass
+
             time.sleep(0.5)
 
        
@@ -163,11 +164,12 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 f'-t {STEADY_DURATION_MS} -l /dev/null', shell=True
             )
 
-
+            time.sleep(STEADY_DURATION_MS / 1000)
             try:
                 save_itg_session_to_db(logfile)
             except Exception as e:
                 info(f"!!! DB SAVE FAILED: {e}\n")
+
             time.sleep(RESTART_DELAY)
             
         except Exception as e:
