@@ -221,8 +221,8 @@ def run():
         # karena Watchdog sekarang cukup pintar untuk menyalakannya jika belum ada.
         # Tapi untuk inisiasi awal yang cepat, kita nyalakan sekali.
         info("*** Starting ITGRecv on h2 (Initial)\n")
-        h2.cmd('ITGRecv -Sp 9000 -l /tmp/recv_steady.log &')
-        h2.cmd('ITGRecv -Sp 9001 -l /tmp/recv_burst.log &')
+        h2.popen('ITGRecv -Sp 9000 -l /tmp/recv_steady.log &',shell=True)
+        h2.popen('ITGRecv -Sp 9001 -l /tmp/recv_burst.log &',shell=True)
         time.sleep(1)
 
         info("*** Starting STEADY VoIP Watchdog (h1 -> h2)\n")
