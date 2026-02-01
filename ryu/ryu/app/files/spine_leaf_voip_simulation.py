@@ -163,7 +163,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 f'ITGSend -T UDP -a {dst_ip} '
                 f'-rp 9000 '
                 f'-c {PKT_SIZE} -C {STEADY_RATE} '
-                f'-t {STEADY_DURATION_MS} -l /dev/null &'
+                f'-t {STEADY_DURATION_MS} -l /dev/null'
             )
 
             time.sleep(STEADY_DURATION_MS / 1000)
