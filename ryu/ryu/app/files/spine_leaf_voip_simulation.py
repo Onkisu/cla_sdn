@@ -143,8 +143,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
             # Kill existing ITGRecv (non-blocking)
             try:
-                dst_host.cmd("pkill -f 'ITGRecv -Sp 9000'")
-                dst_host.cmd("pkill -f 'ITGRecv -Sp 9001'")
+                dst_host.cmd("pkill -f 'ITGRecv -Sp 9000'")          
 
             except:
                 pass
