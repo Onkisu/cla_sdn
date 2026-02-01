@@ -166,7 +166,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 f'-t {STEADY_DURATION_MS} -l /dev/null'
             )
 
-            time.sleep(STEADY_DURATION_MS / 1000)
+            
             try:
                 save_itg_session_to_db(logfile)
             except Exception as e:
