@@ -32,8 +32,23 @@ def save_itg_session_to_db(log_file="/tmp/recv_steady.log"):
     )
 
     data = {}
+    in_target_flow = False
 
     for line in result.splitlines():
+        # Stop kalau masuk TOTAL RESULTS
+        if "TOTAL RESULTS" in line:
+            break
+
+        # Detect flow src IP dari baris "From 10.0.0.1:51102"
+        if line.strip().startswith("From "):
+            src_ip = line.strip().split()[1].split(":")[0]
+            in_target_flow = (src_ip == "10.0.0.1")
+            continue
+
+        # Skip kalau bukan flow dari 10.0.0.1
+        if not in_target_flow:
+            continue
+
         if "Total time" in line:
             data["duration"] = float(line.split("=")[1].split()[0])
         elif "Total packets" in line:
@@ -50,6 +65,11 @@ def save_itg_session_to_db(log_file="/tmp/recv_steady.log"):
             data["bitrate"] = float(line.split("=")[1].split()[0])
         elif "Average packet rate" in line:
             data["pps"] = float(line.split("=")[1].split()[0])
+
+    # Kalau flow 10.0.0.1 tidak ditemukan, jangan save
+    if "total_packets" not in data:
+        info(f"!!! No flow from 10.0.0.1 found in {log_file}, skipping\n")
+        return
 
     data["loss"] = (
         data["dropped"] / data["total_packets"] * 100
