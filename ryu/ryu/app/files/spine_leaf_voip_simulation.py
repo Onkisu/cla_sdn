@@ -154,7 +154,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             
             # Start ITGRecv
             dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
-            dst_host.cmd(f"ITGRecv -Sp 9001 -l {logfile_burst} &")
+            # dst_host.cmd(f"ITGRecv -Sp 9001 -l {logfile_burst} &")
             time.sleep(1)
 
             info("*** Starting ITGSend (STEADY)\n")
