@@ -641,6 +641,12 @@ class VoIPForecastController(app_manager.RyuApp):
         })
         
         self.logger.info(f"✅ REROUTE COMPLETE: H1->H2 now via Spine {target_spine} (make-before-break)")
+        # Log ke database
+        self._log_system_event(
+            event_type='REROUTE',
+            description=f'H1->H2 via Spine {target_spine}',
+            trigger_value=self.last_forecast_value
+        )
         return True
 
     def _atomic_revert_to_original_spine(self):
@@ -693,6 +699,13 @@ class VoIPForecastController(app_manager.RyuApp):
         })
         self.last_revert_time = time.time()   
         self.logger.info(f"✅ REVERT COMPLETE: H1->H2 back to Spine {target_spine} (make-before-break)")
+
+        # Log ke database
+        self._log_system_event(
+            event_type='REVERT',
+            description=f'H1->H2 back to Spine {self.original_spine}',
+            trigger_value=self.last_forecast_value
+        )
         return True
 
     # =================================================================
@@ -901,6 +914,27 @@ class VoIPForecastController(app_manager.RyuApp):
         
         except Exception as e:
             self.logger.error(f"❌ Flow stats error: {e}")
+        finally:
+            self.return_db_connection(conn)
+    
+
+    def _log_system_event(self, event_type, description, trigger_value=None):
+        """Log reroute/revert events to database"""
+        conn = self.get_db_connection()
+        if not conn:
+            return
+        
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO traffic.system_events 
+                (event_type, description, trigger_value)
+                VALUES (%s, %s, %s)
+            """, (event_type, description, trigger_value))
+            conn.commit()
+            cur.close()
+        except Exception as e:
+            self.logger.error(f"❌ Failed to log system event: {e}")
         finally:
             self.return_db_connection(conn)
 
