@@ -1375,7 +1375,7 @@ class VoIPForecastController(app_manager.RyuApp):
                             udp_dst=udp_pkt.dst_port
                         )
                         self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
-                    elif tcp_pkt and tcp_pkt.dst_port == [9001, 9003]:
+                    elif tcp_pkt and tcp_pkt.dst_port in [9001, 9003]:
                         match = parser.OFPMatch(
                             eth_type=0x0800,
                             ip_proto=6,
