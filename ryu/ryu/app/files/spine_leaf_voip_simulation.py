@@ -187,7 +187,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             rate_variation = random.randint(-10, 15)   # 40–65 pps
             current_rate = max(30, base_rate + rate_variation)
 
-            packet_size = random.randint(140, 200)     # sedikit variasi payload
+            tcp_packet_size = random.randint(140, 200)     # sedikit variasi payload
             duration = STEADY_DURATION_MS + random.randint(-5000, 5000)
 
             # Random silence (simulate VAD)
