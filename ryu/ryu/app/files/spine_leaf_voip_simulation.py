@@ -162,15 +162,15 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
             info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
 
-            # Kill existing ITGRecv (non-blocking)
-            try:
-                dst_host.cmd("pkill -f 'ITGRecv -Sp 9000'")          
-                dst_host.cmd("pkill -f 'ITGRecv -Sp 9001'") 
-                dst_host.cmd("pkill -f 'ITGRecv -Sp 9003'")
-            except:
-                pass
-
-            time.sleep(0.5)
+            # ✅ FIX 1: Aggressive kill ALL ITGRecv processes
+            dst_host.cmd("pkill -9 ITGRecv")
+            time.sleep(2)  # Increased from 0.5 to 2 seconds
+            
+            # ✅ FIX: Force kill any processes still using these ports
+            for port in [9000, 9001, 9003]:
+                dst_host.cmd(f"fuser -k {port}/tcp 2>/dev/null")
+                dst_host.cmd(f"fuser -k {port}/udp 2>/dev/null")
+            time.sleep(1)
 
        
             
@@ -178,7 +178,13 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
             dst_host.cmd(f"ITGRecv -T TCP -Sp 9001 -l {logfile_burst} &")
             dst_host.cmd(f"ITGRecv -T TCP -Sp 9003 -l {logfile}_tcp &")
-            time.sleep(1)
+            time.sleep(3)  # ✅ Increased from 1 to 3 seconds for TCP setup
+            
+            # ✅ FIX: Verify all receivers started
+            recv_check = dst_host.cmd("ps aux | grep ITGRecv | grep -v grep | wc -l")
+            if int(recv_check.strip()) < 3:
+                info("*** WARNING: Not all receivers started! Retrying...\n")
+                continue
 
             info("*** Starting ITGSend (VoIP ON-OFF)\n")
 
@@ -211,31 +217,44 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
 
             # ---- STEADY TCP Background Traffic ----
-            TCP_BASE_RATE = 260        # kbps target
-            TCP_VARIATION = 20         # ±20 kbps max deviation
+            TCP_BASE_RATE = 1000       # ✅ Increased from 260 to 1000 kbps for easier detection
+            TCP_VARIATION = 100         # ±100 kbps max deviation
 
             tcp_rate = TCP_BASE_RATE + random.randint(-TCP_VARIATION, TCP_VARIATION)
             tcp_pkt_size = 1200
             tcp_duration = STEADY_DURATION_MS   # fix duration (60s)
 
-            # Start UDP background
-            src_host.cmd(
-                f'ITGSend -T UDP -a {dst_ip} '
-                f'-rp 9000 '
-                f'-c {packet_size} -C {current_rate} '
-                f'-t {duration} -l /dev/null &'
-            )
+            # ✅ FIX: Use threading to run UDP and TCP in parallel, wait for completion
+            def send_udp():
+                src_host.cmd(
+                    f'ITGSend -T UDP -a {dst_ip} '
+                    f'-rp 9000 '
+                    f'-c {packet_size} -C {current_rate} '
+                    f'-t {duration} -l /dev/null'  # ✅ Removed & - will block
+                )
 
-            # Start TCP background
-            src_host.cmd(
-                f'ITGSend -T TCP -a {dst_ip} '
-                f'-rp 9003 '
-                f'-c {tcp_pkt_size} -C {tcp_rate} '
-                f'-t {tcp_duration} -l /dev/null &'
-            )
+            def send_tcp():
+                src_host.cmd(
+                    f'ITGSend -T TCP -a {dst_ip} '
+                    f'-rp 9003 '
+                    f'-c {tcp_pkt_size} -C {tcp_rate} '
+                    f'-t {tcp_duration} -l /dev/null'  # ✅ Removed & - will block
+                )
 
-            # Tunggu durasi selesai (ms → sec)
-            time.sleep(max(duration, tcp_duration) / 1000)
+            udp_thread = threading.Thread(target=send_udp)
+            tcp_thread = threading.Thread(target=send_tcp)
+
+            udp_thread.start()
+            tcp_thread.start()
+
+            # ✅ FIX: Wait for BOTH to complete before killing receivers
+            udp_thread.join()
+            tcp_thread.join()
+
+            info("*** Traffic generation complete\n")
+            
+            # Small delay before decoding logs
+            time.sleep(2)
 
 
             
@@ -288,14 +307,9 @@ def run():
     net.pingAll()
 
     if check_ditg():
-        # Kita tidak perlu start ITGRecv manual di sini lagi, 
-        # karena Watchdog sekarang cukup pintar untuk menyalakannya jika belum ada.
-        # Tapi untuk inisiasi awal yang cepat, kita nyalakan sekali.
-        info("*** Starting ITGRecv on h2 (Initial)\n")
-        h2.cmd('ITGRecv -Sp 9000 -l /tmp/recv_steady.log &')
-        h2.cmd('ITGRecv -T TCP -Sp 9001 -l /tmp/recv_burst.log &')
-        h2.cmd('ITGRecv -T TCP -Sp 9003 -l /tmp/recv_tcp.log &')
-        time.sleep(1)
+        # ✅ FIX: Remove initial receiver start - let the loop handle ALL receiver management
+        # This prevents conflicts between static log files and timestamped ones
+        info("*** Traffic generator will start in session loop\n")
 
         info("*** Starting STEADY VoIP Watchdog (h1 -> h2)\n")
         # FIX: Pass h2 object juga ke argumen thread
