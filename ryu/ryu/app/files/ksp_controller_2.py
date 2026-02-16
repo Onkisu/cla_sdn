@@ -1381,7 +1381,7 @@ class VoIPForecastController(app_manager.RyuApp):
                             ip_proto=6,
                             ipv4_src=src_ip,
                             ipv4_dst=dst_ip,
-                            tcp_dst=9001
+                            tcp_dst=tcp_pkt.dst_port
                         )
                         self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
                 
