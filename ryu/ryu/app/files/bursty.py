@@ -63,7 +63,7 @@ def send_tcp(rate, duration):
             "-T", "TCP",
             "-rp", "9001",
             "-a", DST_IP,
-            "-c", "160",
+            "-c", "1400",
             "-C", str(rate),
             "-t", str(duration * 1000),
             "-l", "/dev/null"
@@ -84,11 +84,11 @@ if __name__ == "__main__":
 
         # 2️⃣ RAMP UP (2 minutes)
         print("\n[TCP] 📈 RAMP UP")
-        send_tcp(180, 120)
+        send_tcp(8750, 120)
 
         # 3️⃣ BURST (2 minutes)
         print("\n[TCP] 🔥 BURST")
-        send_tcp(350, 120)
+        send_tcp(7320, 90)
 
         # 4️⃣ COOLDOWN (3 minutes)
         print("\n[TCP] ❄ COOLDOWN")
