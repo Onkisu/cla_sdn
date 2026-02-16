@@ -166,6 +166,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             try:
                 dst_host.cmd("pkill -f 'ITGRecv -Sp 9000'")          
                 dst_host.cmd("pkill -f 'ITGRecv -Sp 9001'") 
+                dst_host.cmd("pkill -f 'ITGRecv -Sp 9003'")
             except:
                 pass
 
@@ -176,6 +177,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             # Start ITGRecv
             dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
             dst_host.cmd(f"ITGRecv -T TCP -Sp 9001 -l {logfile_burst} &")
+            dst_host.cmd(f"ITGRecv -T TCP -Sp 9003 -l {logfile}_tcp &")
             time.sleep(1)
 
             info("*** Starting ITGSend (VoIP ON-OFF)\n")
@@ -214,6 +216,21 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 f'-t {duration} -l /dev/null'
             )
 
+            # ---- TCP Background Traffic ----
+            tcp_rate = random.randint(200, 400)   # kbps-ish load
+            tcp_pkt_size = 1200                   # typical TCP payload
+            tcp_duration = duration
+
+            info(f"*** Starting TCP traffic on port 9003 ({tcp_rate})\n")
+
+            src_host.cmd(
+                f'ITGSend -T TCP -a {dst_ip} '
+                f'-rp 9003 '
+                f'-c {tcp_pkt_size} -C {tcp_rate} '
+                f'-t {tcp_duration} -l /dev/null'
+            )
+
+
             
             try:
                 save_itg_session_to_db(logfile)
@@ -249,7 +266,7 @@ def run():
     for l in leaves:
         for s in spines:
             #net.addLink(l, s, bw=1000, delay='1ms')
-            net.addLink(l, s, bw=0.55, delay='1ms', max_queue_size=10, use_htb=True)
+            net.addLink(l, s, bw=100, delay='1ms', max_queue_size=10, use_htb=True)
 
     h1 = net.addHost('h1', ip='10.0.0.1/24')
     h2 = net.addHost('h2', ip='10.0.0.2/24')
