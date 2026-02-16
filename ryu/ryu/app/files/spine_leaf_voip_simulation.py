@@ -293,7 +293,7 @@ def run():
         # Tapi untuk inisiasi awal yang cepat, kita nyalakan sekali.
         info("*** Starting ITGRecv on h2 (Initial)\n")
         h2.cmd('ITGRecv -Sp 9000 -l /tmp/recv_steady.log &')
-        h2.cmd('ITGRecv -Sp 9001 -l /tmp/recv_burst.log &')
+        h2.cmd('ITGRecv -T TCP -Sp 9001 -l /tmp/recv_burst.log &')
         h2.cmd('ITGRecv -T TCP -Sp 9003 -l /tmp/recv_tcp.log &')
         time.sleep(1)
 
