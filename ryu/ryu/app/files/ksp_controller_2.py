@@ -867,8 +867,8 @@ class VoIPForecastController(app_manager.RyuApp):
             parser = dp.ofproto_parser
             ofproto = dp.ofproto
             
-            # Cari port ke H2
-            out_port = self.mac_to_port.get(5, {}).get('00:00:00:00:00:02', 1)
+            # Cari port ke H2 (default port 4 - host port di leaf switch)
+            out_port = self.mac_to_port.get(5, {}).get('00:00:00:00:00:02', 4)
             
             # ✅ INSTALL 2 FLOWS: UDP + TCP
             flows = [
@@ -992,8 +992,8 @@ class VoIPForecastController(app_manager.RyuApp):
                 tcp_dst=9003
             )
             
-            # Cari port ke H2
-            out_port = self.mac_to_port.get(5, {}).get('00:00:00:00:00:02', 1)
+            # Cari port ke H2 (default port 4 - host port di leaf switch)
+            out_port = self.mac_to_port.get(5, {}).get('00:00:00:00:00:02', 4)
 
             
             actions = [
