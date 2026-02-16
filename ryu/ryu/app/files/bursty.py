@@ -60,7 +60,7 @@ def send_tcp(rate, duration):
             "mnexec", "-a",
             pid,
             "ITGSend",
-            "-T", "TCPSS",
+            "-T", "TCP",
             "-rp", "9001",
             "-a", DST_IP,
             "-c", "160",
