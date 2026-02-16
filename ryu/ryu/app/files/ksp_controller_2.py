@@ -1044,6 +1044,13 @@ class VoIPForecastController(app_manager.RyuApp):
                         delta_bytes, delta_packets,
                         src_mac, dst_mac, time_diff
                     )
+                 # ✅ H3->H2 port 9001 (TCP/UDP): Always insert
+                elif src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and tp_dst == 9003:
+                    self._insert_flow_stats(
+                        dpid, src_ip, dst_ip, match,
+                        delta_bytes, delta_packets,
+                        src_mac, dst_mac, time_diff
+                    )
                 # Other traffic: Only if there's actual traffic
                 elif delta_bytes > 0:
                     self._insert_flow_stats(

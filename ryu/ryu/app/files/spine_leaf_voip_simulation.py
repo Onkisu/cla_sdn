@@ -178,7 +178,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
             dst_host.cmd(f"ITGRecv -T TCP -Sp 9001 -l {logfile_burst} &")
             dst_host.cmd(f"ITGRecv -T TCP -Sp 9003 -l {logfile}_tcp &")
-            time.sleep(1)
+            time.sleep(3)
 
             info("*** Starting ITGSend (VoIP ON-OFF)\n")
 
