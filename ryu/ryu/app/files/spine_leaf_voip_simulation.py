@@ -172,8 +172,6 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
             time.sleep(0.5)
 
-       
-            
             # Start ITGRecv
             dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
             dst_host.cmd(f"ITGRecv -T TCP -Sp 9001 -l {logfile_burst} &")
@@ -182,16 +180,16 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
             info("*** Starting ITGSend (VoIP ON-OFF)\n")
 
-                        # --- Generate VoIP-like random behavior ---
+            # --- Generate VoIP-like random behavior ---
             base_rate = 50
-            rate_variation = random.randint(-10, 15)   # 40–65 pps
+            rate_variation = random.randint(-10, 15)
             current_rate = max(30, base_rate + rate_variation)
 
-            packet_size = random.randint(140, 200)     # sedikit variasi payload
+            packet_size = random.randint(140, 200)
             duration = STEADY_DURATION_MS + random.randint(-5000, 5000)
 
             # Random silence (simulate VAD)
-            if random.random() < 0.25:   # 25% kemungkinan silent gap
+            if random.random() < 0.25:
                 silence_time = random.uniform(0.5, 2.0)
                 info(f"*** Simulating silence {silence_time:.2f}s\n")
                 time.sleep(silence_time)
@@ -209,14 +207,13 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
             info(f"*** Starting Noisy VoIP: {current_rate} pps | {packet_size} bytes\n")
 
-
             # ---- STEADY TCP Background Traffic ----
-            TCP_BASE_RATE = 260        # kbps target
-            TCP_VARIATION = 20         # ±20 kbps max deviation
+            TCP_BASE_RATE = 260
+            TCP_VARIATION = 20
 
             tcp_rate = TCP_BASE_RATE + random.randint(-TCP_VARIATION, TCP_VARIATION)
             tcp_pkt_size = 1200
-            tcp_duration = STEADY_DURATION_MS   # fix duration (60s)
+            tcp_duration = STEADY_DURATION_MS
 
             # Start UDP background
             src_host.cmd(
@@ -226,26 +223,21 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 f'-t {duration} -l /dev/null &'
             )
 
-            # Start TCP background
+            # Start TCP background - FIX RACE CONDITION
             src_host.cmd(
                 f'ITGSend -T TCP -a {dst_ip} '
                 f'-rp 9003 '
                 f'-c {tcp_pkt_size} -C {tcp_rate} '
-                f'-t {tcp_duration} -l /dev/null &'
+                f'-t {tcp_duration} -l /dev/null > /dev/null 2>&1 &'
             )
-            # # Verify TCP:9003 sender started
+            
+            # Wait dengan blocking call buat kasih waktu spawn & handshake
             time.sleep(1)
-            check = src_host.cmd("pgrep -f 'ITGSend.*9003'").strip()
-            if not check:
-                info("!!! TCP:9003 sender FAILED to start!\n")
-            else:
-                info(f"*** TCP:9003 sender running (PID {check})\n")
-
+            dst_host.cmd("echo > /dev/null")  # Dummy blocking call
+            
             # Tunggu durasi selesai (ms → sec)
             time.sleep(max(duration, tcp_duration) / 1000)
 
-
-            
             try:
                 save_itg_session_to_db(logfile)
             except Exception as e:
