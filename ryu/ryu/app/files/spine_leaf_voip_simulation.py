@@ -163,6 +163,14 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
 
             # Kill existing ITGRecv (non-blocking)
+            # Kill old senders first
+            try:
+                src_host.cmd("pkill -9 ITGSend")
+                time.sleep(0.5)
+            except:
+                pass
+
+            # Kill existing ITGRecv
             try:
                 dst_host.cmd("pkill -f 'ITGRecv -Sp 9000'")          
                 dst_host.cmd("pkill -f 'ITGRecv -Sp 9001'") 
