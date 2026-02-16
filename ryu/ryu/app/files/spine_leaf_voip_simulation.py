@@ -290,9 +290,9 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
                 dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
 
-                dst_host.cmd(f"ITGRecv -Sp 9001 -l {logfile_burst} &")
+                dst_host.cmd(f"ITGRecv -Sp 9001 -H 10.0.0.2 -l {logfile_burst} &")
 
-                dst_host.cmd(f"ITGRecv -Sp 9003 -l {logfile_tcp} &")
+                dst_host.cmd(f"ITGRecv -Sp 9003 -H 10.0.0.2 -l {logfile_tcp} &")
 
 
 
