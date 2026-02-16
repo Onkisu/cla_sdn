@@ -90,8 +90,13 @@ if __name__ == "__main__":
         print("\n[TCP] 🔥 BURST")
         send_tcp(7320, 90)
 
+        print("\n[TCP] 🌊 NORMAL PHASE")
+        send_tcp(110, 300)  # 5 menit
+
         # 4️⃣ COOLDOWN (3 minutes)
         print("\n[TCP] ❄ COOLDOWN")
-        send_tcp(150, 180)
+        send_tcp(8250, 180)
 
+        print("\n[TCP] 🌊 NORMAL PHASE")
+        send_tcp(132, 120)   # 8 menit
         print("\n[TCP] 🔁 Cycle Repeat\n")
