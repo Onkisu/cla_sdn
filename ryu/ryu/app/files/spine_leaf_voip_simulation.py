@@ -180,38 +180,39 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
             info("*** Starting ITGSend (VoIP ON-OFF)\n")
 
-            total_time = 0
-            session_duration = STEADY_DURATION_MS / 1000  # convert ms → detik
+                        # --- Generate VoIP-like random behavior ---
+            base_rate = 50
+            rate_variation = random.randint(-10, 15)   # 40–65 pps
+            current_rate = max(30, base_rate + rate_variation)
 
-            while total_time < session_duration:
+            packet_size = random.randint(140, 200)     # sedikit variasi payload
+            duration = STEADY_DURATION_MS + random.randint(-5000, 5000)
 
-                # ON period (orang bicara)
-                on_time = random.uniform(0.3, 1.2)
-                on_time = min(on_time, session_duration - total_time)
+            # Random silence (simulate VAD)
+            if random.random() < 0.25:   # 25% kemungkinan silent gap
+                silence_time = random.uniform(0.5, 2.0)
+                info(f"*** Simulating silence {silence_time:.2f}s\n")
+                time.sleep(silence_time)
 
-                info(f"*** VoIP TALKING for {on_time:.2f}s\n")
-
+            # Occasional micro-burst
+            if random.random() < 0.15:
+                burst_rate = random.randint(80, 120)
+                info(f"*** Micro burst at {burst_rate} pps\n")
                 src_host.cmd(
                     f'ITGSend -T UDP -a {dst_ip} '
                     f'-rp 9000 '
-                    f'-c 160 -C 50 '
-                    f'-t {int(on_time * 1000)} -l /dev/null'
+                    f'-c {packet_size} -C {burst_rate} '
+                    f'-t 3000 -l /dev/null'
                 )
 
-                total_time += on_time
+            info(f"*** Starting Noisy VoIP: {current_rate} pps | {packet_size} bytes\n")
 
-                if total_time >= session_duration:
-                    break
-
-                # OFF period (diam)
-                off_time = random.uniform(0.2, 0.8)
-                off_time = min(off_time, session_duration - total_time)
-
-                info(f"*** VoIP SILENCE for {off_time:.2f}s\n")
-                time.sleep(off_time)
-
-                total_time += off_time
-
+            src_host.cmd(
+                f'ITGSend -T UDP -a {dst_ip} '
+                f'-rp 9000 '
+                f'-c {packet_size} -C {current_rate} '
+                f'-t {duration} -l /dev/null'
+            )
 
             
             try:
