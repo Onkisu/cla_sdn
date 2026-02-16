@@ -288,13 +288,13 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
                 # Start ITGRecv
 
-                dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
+                # dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
 
-                dst_host.cmd(f"ITGRecv -Sp 9001 -H 10.0.0.2 -l {logfile_burst} &")
+                # dst_host.cmd(f"ITGRecv -Sp 9001 -H 10.0.0.2 -l {logfile_burst} &")
 
-                dst_host.cmd(f"ITGRecv -Sp 9003 -H 10.0.0.2 -l {logfile_tcp} &")
+                # dst_host.cmd(f"ITGRecv -Sp 9003 -H 10.0.0.2 -l {logfile_tcp} &")
 
-
+                dst_host.cmd(f"ITGRecv -m 9000,9001,9003 -l {logfile} &")
 
             # Tunggu ITGRecv 9003 siap
 
