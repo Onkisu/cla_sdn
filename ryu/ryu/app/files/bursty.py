@@ -22,7 +22,7 @@ def check_controller_state():
         
         current_state = state.get('state', 'IDLE')
         
-        # Don't send burst if controller is in transition states
+        # Don't send burst if controller is in transition statesss
         transition_states = [
             'DELETING_ALL_FLOWS',
             'WAITING_SETTLE', 
