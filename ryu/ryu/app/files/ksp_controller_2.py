@@ -1333,14 +1333,8 @@ class VoIPForecastController(app_manager.RyuApp):
                         tcp_dst=9003
                     )
                     self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
-                else:
-                    # Other traffic (UDP non-9000, ICMP, etc)
-                    match = parser.OFPMatch(
-                        eth_type=0x0800,
-                        ipv4_src=src_ip,
-                        ipv4_dst=dst_ip
-                    )
-                    self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
+                # ✅ FIX: TIDAK ada else block - biarkan packet_out saja
+                # High-priority permanent flows akan handle traffic lainnya
                 
                 # Forward packet
                 data = None
@@ -1388,14 +1382,8 @@ class VoIPForecastController(app_manager.RyuApp):
                         tcp_dst=9001
                     )
                     self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
-                else:
-                    # Other traffic
-                    match = parser.OFPMatch(
-                        eth_type=0x0800,
-                        ipv4_src=src_ip,
-                        ipv4_dst=dst_ip
-                    )
-                    self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
+                # ✅ FIX: TIDAK ada else block - biarkan packet_out saja
+                # High-priority permanent flows akan handle traffic lainnya
                 
                 # Forward packet
                 data = None
