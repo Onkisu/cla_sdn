@@ -944,7 +944,8 @@ class VoIPForecastController(app_manager.RyuApp):
             )
             
             # Cari port ke H2
-            out_port = self.mac_to_port[5].get('00:00:00:00:00:02', 1)
+            out_port = self.mac_to_port.get(5, {}).get('00:00:00:00:00:02', 1)
+
             
             actions = [
                 parser.OFPActionSetQueue(2),  # Queue 2 = background
