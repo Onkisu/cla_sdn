@@ -266,35 +266,19 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
             with traffic_lock:  # LOCK akses host
 
-                # Kill old senders
-
                 src_host.cmd("pkill -9 ITGSend")
-
+                dst_host.cmd("pkill -9 ITGRecv")
+                dst_host.cmd("pkill -9 iperf3")
                 time.sleep(0.5)
-
-
-
-                # Kill existing ITGRecv
-
-                dst_host.cmd("pkill -f 'ITGRecv -Sp 9000'")          
-
-                dst_host.cmd("pkill -f 'ITGRecv -Sp 9001'") 
-
-                dst_host.cmd("pkill -f 'ITGRecv -Sp 9003'")
-
-                time.sleep(0.5)
-
-
-
-                # Start ITGRecv
-
-                # dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
-
-                # dst_host.cmd(f"ITGRecv -Sp 9001 -H 10.0.0.2 -l {logfile_burst} &")
-
-                # dst_host.cmd(f"ITGRecv -Sp 9003 -H 10.0.0.2 -l {logfile_tcp} &")
-
+                
+                # ITGRecv untuk port 9000 (UDP VoIP)
                 dst_host.cmd(f"ITGRecv -l {logfile} &")
+                
+                # iperf3 untuk port 9001 dan 9003
+                dst_host.cmd(f"iperf3 -s -p 9001 -D")
+                dst_host.cmd(f"iperf3 -s -p 9003 -D")
+                time.sleep(2)
+
 
             # Tunggu ITGRecv 9003 siap
 
@@ -399,36 +383,30 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 )
 
                 src_host.cmd(
-
-                    f'ITGSend -T TCP -a {dst_ip} '
-
-                    f'-p 9003 '
-
-                    f'-c {tcp_pkt_size} -C {tcp_rate} '
-
-                    f'-t {tcp_duration} -l /dev/null &'
-
+                    f'iperf3 -c {dst_ip} -p 9003 '
+                    f'-b {tcp_rate * tcp_pkt_size * 8} '
+                    f'-t {tcp_duration/1000} &'
                 )
 
 
 
-            # Verifikasi TCP sender
+            # # Verifikasi TCP sender
 
-            for _ in range(5):
+            # for _ in range(5):
 
-                check = src_host.cmd("pgrep -f 'ITGSend.*9003'").strip()
+            #     check = src_host.cmd("pgrep -f 'ITGSend.*9003'").strip()
 
-                if check:
+            #     if check:
 
-                    info(f"*** TCP:9003 sender running (PID {check})\n")
+            #         info(f"*** TCP:9003 sender running (PID {check})\n")
 
-                    break
+            #         break
 
-                time.sleep(0.5)
+            #     time.sleep(0.5)
 
-            else:
+            # else:
 
-                info("!!! TCP:9003 sender FAILED to start!\n")
+            #     info("!!! TCP:9003 sender FAILED to start!\n")
 
 
 
