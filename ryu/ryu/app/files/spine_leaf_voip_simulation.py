@@ -187,7 +187,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             rate_variation = random.randint(-10, 15)   # 40–65 pps
             current_rate = max(30, base_rate + rate_variation)
 
-            tcp_packet_size = random.randint(140, 200)     # sedikit variasi payload
+            packet_size = random.randint(140, 200)     # sedikit variasi payload
             duration = STEADY_DURATION_MS + random.randint(-5000, 5000)
 
             # Random silence (simulate VAD)
@@ -209,6 +209,15 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
             info(f"*** Starting Noisy VoIP: {current_rate} pps | {packet_size} bytes\n")
 
+
+            # ---- STEADY TCP Background Traffic ----
+            TCP_BASE_RATE = 260        # kbps target
+            TCP_VARIATION = 20         # ±20 kbps max deviation
+
+            tcp_rate = TCP_BASE_RATE + random.randint(-TCP_VARIATION, TCP_VARIATION)
+            tcp_pkt_size = 1200
+            tcp_duration = STEADY_DURATION_MS   # fix duration (60s)
+
             udp_thread = threading.Thread(
                 target=src_host.cmd,
                 args=(f'ITGSend -T UDP -a {dst_ip} -rp 9000 '
@@ -219,7 +228,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             tcp_thread = threading.Thread(
                 target=src_host.cmd,
                 args=(f'ITGSend -T TCP -a {dst_ip} -rp 9003 '
-                    f'-c {tcp_packet_size} -C {tcp_rate} '
+                    f'-c {tcp_pkt_size} -C {tcp_rate} '
                     f'-t {tcp_duration} -l /dev/null',)
             )
 
