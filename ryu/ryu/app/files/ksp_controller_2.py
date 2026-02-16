@@ -889,7 +889,7 @@ class VoIPForecastController(app_manager.RyuApp):
                 ip_proto = match.get('ip_proto', 0)
                 tp_dst = match.get('tcp_dst') or match.get('udp_dst') or 0
                 
-                flow_key = (dpid, src_ip, dst_ip, tp_dst)
+                flow_key = (dpid, src_ip, dst_ip,ip_proto, tp_dst)
                 
                 # Current values
                 current_bytes = stat.byte_count
