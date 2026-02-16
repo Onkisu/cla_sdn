@@ -235,11 +235,11 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             )
             # # Verify TCP:9003 sender started
             time.sleep(1)
-            check = src_host.cmd("pgrep -f 'ITGSend.*9003'").strip()
-            if not check:
-                info("!!! TCP:9003 sender FAILED to start!\n")
-            else:
-                info(f"*** TCP:9003 sender running (PID {check})\n")
+            # check = src_host.cmd("pgrep -f 'ITGSend.*9003'").strip()
+            # if not check:
+            #     info("!!! TCP:9003 sender FAILED to start!\n")
+            # else:
+            #     info(f"*** TCP:9003 sender running (PID {check})\n")
 
             # Tunggu durasi selesai (ms → sec)
             time.sleep(max(duration, tcp_duration) / 1000)
