@@ -12,7 +12,7 @@ import subprocess
 import psycopg2
 import re
 import random
-import threading
+
 
 
 STEADY_DURATION_MS = 60000   # 60 detik per sesi
