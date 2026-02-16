@@ -11,6 +11,7 @@ import itertools
 import subprocess
 import psycopg2
 import re
+import random
 
 STEADY_DURATION_MS = 60000   # 60 detik per sesi
 STEADY_RATE = 50             # pps
@@ -177,13 +178,40 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             dst_host.cmd(f"ITGRecv -Sp 9001 -l {logfile_burst} &")
             time.sleep(1)
 
-            info("*** Starting ITGSend (STEADY)\n")
-            src_host.cmd(
-                f'ITGSend -T UDP -a {dst_ip} '
-                f'-rp 9000 '
-                f'-c {PKT_SIZE} -C {STEADY_RATE} '
-                f'-t {STEADY_DURATION_MS} -l /dev/null'
-            )
+            info("*** Starting ITGSend (VoIP ON-OFF)\n")
+
+            total_time = 0
+            session_duration = STEADY_DURATION_MS / 1000  # convert ms → detik
+
+            while total_time < session_duration:
+
+                # ON period (orang bicara)
+                on_time = random.uniform(0.3, 1.2)
+                on_time = min(on_time, session_duration - total_time)
+
+                info(f"*** VoIP TALKING for {on_time:.2f}s\n")
+
+                src_host.cmd(
+                    f'ITGSend -T UDP -a {dst_ip} '
+                    f'-rp 9000 '
+                    f'-c 160 -C 50 '
+                    f'-t {int(on_time * 1000)} -l /dev/null'
+                )
+
+                total_time += on_time
+
+                if total_time >= session_duration:
+                    break
+
+                # OFF period (diam)
+                off_time = random.uniform(0.2, 0.8)
+                off_time = min(off_time, session_duration - total_time)
+
+                info(f"*** VoIP SILENCE for {off_time:.2f}s\n")
+                time.sleep(off_time)
+
+                total_time += off_time
+
 
             
             try:
