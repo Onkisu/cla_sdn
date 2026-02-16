@@ -50,30 +50,17 @@ def check_controller_state():
         print(f"[BURST] ⚠️  State check error: {e}")
         return True  # Default allow on error
 
-def burst(rate, duration):
-    """
-    Send burst traffic from H3 to H2
-    """
-    # Wait for controller to be ready
-    max_wait = 10
-    waited = 0
-    while not check_controller_state() and waited < max_wait:
-        time.sleep(1)
-        waited += 1
-    
-    if waited >= max_wait:
-        print(f"[BURST] ⏭️  Skipping burst (controller busy too long)")
-        return
-    
-    print(f"[BURST] 🚀 Sending: rate={rate} pps | duration={duration}s")
-    
+def send_tcp(rate, duration):
     try:
-        pid = subprocess.check_output(["pgrep", "-n", "-f", H3]).decode().strip()
+        pid = subprocess.check_output(
+            ["pgrep", "-n", "-f", H3]
+        ).decode().strip()
+
         subprocess.run([
             "mnexec", "-a",
             pid,
             "ITGSend",
-            "-T", "UDP",
+            "-T", "TCP",
             "-rp", "9001",
             "-a", DST_IP,
             "-c", "160",
@@ -81,47 +68,30 @@ def burst(rate, duration):
             "-t", str(duration * 1000),
             "-l", "/dev/null"
         ], timeout=duration + 5)
-        
-        print(f"[BURST] ✅ Completed: {rate} pps for {duration}s")
-        
-    except subprocess.TimeoutExpired:
-        print(f"[BURST] ⚠️  Timeout after {duration}s")
+
     except Exception as e:
-        print(f"[BURST] ❌ Error: {e}")
+        print(f"[TCP] Error: {e}")
+
 
 if __name__ == "__main__":
-    print("[BURST] 🎯 Burst Generator Started (Controller-Aware)")
-    print("[BURST] 📍 H3 -> H2 via Spine 2 (permanent path)")
-    print("[BURST] ⏰ Initial wait: 10 minutes before first burst")
-    
+    print("[TCP] 🎯 Structured Continuous TCP Started")
+
     while True:
-        # Initial wait - 10 minutes
-        print("[BURST] ⏳ Waiting 600 seconds before burst cycle...")
-        time.sleep(600)
-        
-        print("[BURST] 🔥 Starting burst sequence...")
-        
-        # Burst sequence with cooldown
-        bursts = [
-            (150, 60),   # Warm-up
-            (200, 30),   # Ramp up
-            (250, 20),   # Medium
-            (300, 20),   # High
-            (400, 10),   # Peak
-            (250, 20),   # Cool down
-            (360, 10),   # Second peak
-            (200, 20),   # Ramp down
-            (150, 30)    # Final cool down
-        ]
-        
-        for i, (rate, duration) in enumerate(bursts, 1):
-            print(f"\n[BURST] === Burst {i}/{len(bursts)} ===")
-            burst(rate, duration)
-            
-            if i < len(bursts):
-                print(f"[BURST] 💤 Cooldown 2 seconds...")
-                time.sleep(2)  # Cooldown between bursts
-        
-        print("\n[BURST] ✅ Burst sequence completed")
-        print("[BURST] ⏳ Waiting 500 seconds before next cycle...")
-        time.sleep(500)
+
+        # 1️⃣ NORMAL PHASE (8 minutes)
+        print("\n[TCP] 🌊 NORMAL PHASE")
+        send_tcp(120, 480)   # 8 menit
+
+        # 2️⃣ RAMP UP (2 minutes)
+        print("\n[TCP] 📈 RAMP UP")
+        send_tcp(180, 120)
+
+        # 3️⃣ BURST (2 minutes)
+        print("\n[TCP] 🔥 BURST")
+        send_tcp(350, 120)
+
+        # 4️⃣ COOLDOWN (3 minutes)
+        print("\n[TCP] ❄ COOLDOWN")
+        send_tcp(150, 180)
+
+        print("\n[TCP] 🔁 Cycle Repeat\n")
