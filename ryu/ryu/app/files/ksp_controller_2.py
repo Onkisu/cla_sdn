@@ -754,6 +754,10 @@ class VoIPForecastController(app_manager.RyuApp):
         self._install_h1_h2_flow_on_spine(2)
         self._update_leaf1_output_port(2)
         self.logger.info("✅ H1->H2 path: Leaf1 → Spine2 → Leaf2")
+
+            # ✅ TAMBAHKAN INI - H1->H2 TCP:9003: PERMANENT
+        self._install_h1_tcp_background_permanent()
+        self.logger.info("✅ H1->H2 TCP:9003: Leaf1 → Spine2 → Leaf2 (PERMANENT)")
         
         # === H3->H2: PERMANENTLY via Spine 2 (NEVER reroute) ===
         self._install_h3_h2_permanent_flow()
@@ -856,6 +860,74 @@ class VoIPForecastController(app_manager.RyuApp):
                 dp.send_msg(mod)
             
             self.logger.info("✅ Spine 2: H3->H2 TCP/UDP:9001 → Leaf 2 (port 2) [PERMANENT]")
+
+    
+    def _install_h1_tcp_background_permanent(self):
+        """
+        Install H1->H2 TCP:9003 PERMANENTLY on Spine 2 and Leaf 1
+        This flow is NEVER deleted or rerouted
+        """
+        # Leaf 1 (DPID 4)
+        if 4 in self.datapaths:
+            dp = self.datapaths[4]
+            parser = dp.ofproto_parser
+            ofproto = dp.ofproto
+            
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ip_proto=6,
+                ipv4_src='10.0.0.1',
+                ipv4_dst='10.0.0.2',
+                tcp_dst=9003
+            )
+            
+            actions = [
+                parser.OFPActionSetQueue(2),  # Queue 2 = background
+                parser.OFPActionOutput(2)     # Port 2 = Spine 2
+            ]
+            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+            
+            mod = parser.OFPFlowMod(
+                datapath=dp,
+                priority=PRIORITY_REROUTE + 50,  # Priority 30050
+                match=match,
+                instructions=inst,
+                idle_timeout=0,
+                hard_timeout=0
+            )
+            dp.send_msg(mod)
+            self.logger.info("✅ Leaf 1: H1->H2 TCP:9003 → Spine 2 [PERMANENT]")
+        
+        # Spine 2 (DPID 2)
+        if 2 in self.datapaths:
+            dp = self.datapaths[2]
+            parser = dp.ofproto_parser
+            ofproto = dp.ofproto
+            
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ip_proto=6,
+                ipv4_src='10.0.0.1',
+                ipv4_dst='10.0.0.2',
+                tcp_dst=9003
+            )
+            
+            actions = [
+                parser.OFPActionSetQueue(2),
+                parser.OFPActionOutput(2)  # Port 2 = Leaf 2
+            ]
+            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+            
+            mod = parser.OFPFlowMod(
+                datapath=dp,
+                priority=PRIORITY_REROUTE + 50,
+                match=match,
+                instructions=inst,
+                idle_timeout=0,
+                hard_timeout=0
+            )
+            dp.send_msg(mod)
+            self.logger.info("✅ Spine 2: H1->H2 TCP:9003 → Leaf 2 [PERMANENT]")
 
     # =================================================================
     # TRAFFIC MONITORING
