@@ -1106,6 +1106,20 @@ class VoIPForecastController(app_manager.RyuApp):
             return
         
         try:
+            # âœ… FIX: Extract protocol and ports correctly
+            ip_proto = match.get('ip_proto', 0)
+            
+            # Get transport layer ports based on protocol
+            if ip_proto == 6:  # TCP
+                tp_src = match.get('tcp_src', 0)
+                tp_dst = match.get('tcp_dst', 0)
+            elif ip_proto == 17:  # UDP
+                tp_src = match.get('udp_src', 0)
+                tp_dst = match.get('udp_dst', 0)
+            else:
+                tp_src = 0
+                tp_dst = 0
+            
             cur = conn.cursor()
             cur.execute("""
                 INSERT INTO traffic.flow_stats_
@@ -1116,9 +1130,9 @@ class VoIPForecastController(app_manager.RyuApp):
             """, (
                 datetime.now(), dpid, src_ip, dst_ip,
                 src_mac, dst_mac,
-                match.get('ip_proto', 17),
-                match.get('tcp_src') or match.get('udp_src') or 0,
-                match.get('tcp_dst') or match.get('udp_dst') or 1,
+                ip_proto,
+                tp_src,
+                tp_dst,
                 delta_bytes, delta_bytes,
                 delta_packets, delta_packets,
                 duration,
@@ -1480,6 +1494,17 @@ class VoIPForecastController(app_manager.RyuApp):
                     ipv4_src=ip_pkt.src,
                     ipv4_dst=ip_pkt.dst,
                     udp_dst=udp_pkt.dst_port
+                )
+            elif ip_pkt and tcp_pkt:
+                # âœ… TAMBAHKAN: TCP handling
+                match = parser.OFPMatch(
+                    in_port=in_port,
+                    eth_dst=dst,
+                    eth_type=0x0800,
+                    ip_proto=6,
+                    ipv4_src=ip_pkt.src,
+                    ipv4_dst=ip_pkt.dst,
+                    tcp_dst=tcp_pkt.dst_port
                 )
             elif ip_pkt:
                 match = parser.OFPMatch(
