@@ -861,6 +861,55 @@ class VoIPForecastController(app_manager.RyuApp):
             
             self.logger.info("âœ… Spine 2: H3->H2 TCP/UDP:9001 â†’ Leaf 2 (port 2) [PERMANENT]")
 
+        # ✅ TAMBAHAN: Leaf 2 (DPID 5) - DESTINATION for H3->H2
+        if 5 in self.datapaths:
+            dp = self.datapaths[5]
+            parser = dp.ofproto_parser
+            ofproto = dp.ofproto
+            
+            # Cari port ke H2
+            out_port = self.mac_to_port.get(5, {}).get('00:00:00:00:00:02', 1)
+            
+            # ✅ INSTALL 2 FLOWS: UDP + TCP
+            flows = [
+                # UDP 9001
+                parser.OFPMatch(
+                    eth_type=0x0800,
+                    ip_proto=17,
+                    ipv4_src='10.0.0.3',
+                    ipv4_dst='10.0.0.2',
+                    udp_dst=9001
+                ),
+                # TCP 9001
+                parser.OFPMatch(
+                    eth_type=0x0800,
+                    ip_proto=6,
+                    ipv4_src='10.0.0.3',
+                    ipv4_dst='10.0.0.2',
+                    tcp_dst=9001
+                )
+            ]
+            
+            actions = [
+                parser.OFPActionSetQueue(2),  # Queue 2 = bursty
+                parser.OFPActionOutput(out_port)  # Port ke H2
+            ]
+            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+            
+            for match in flows:
+                mod = parser.OFPFlowMod(
+                    datapath=dp,
+                    priority=PRIORITY_REROUTE + 100,  # Priority 30100
+                    match=match,
+                    instructions=inst,
+                    idle_timeout=0,
+                    hard_timeout=0
+                )
+                dp.send_msg(mod)
+            
+            self.logger.info("✅ Leaf 2: H3->H2 TCP/UDP:9001 → H2 [PERMANENT]")
+
+
     
     def _install_h1_tcp_background_permanent(self):
         """
@@ -1476,7 +1525,16 @@ class VoIPForecastController(app_manager.RyuApp):
 
         
         # Install flow if not flooding
-        if out_port != ofproto.OFPP_FLOOD:
+        # âœ… FIX: Jangan install generic flow untuk traffic yang sudah punya specific flow
+        should_install_flow = (out_port != ofproto.OFPP_FLOOD)
+        
+        # Skip generic flow installation untuk H1->H2 dan H3->H2
+        if ip_pkt:
+            if (ip_pkt.src == '10.0.0.1' and ip_pkt.dst == '10.0.0.2') or \
+               (ip_pkt.src == '10.0.0.3' and ip_pkt.dst == '10.0.0.2'):
+                should_install_flow = False  # Sudah ada high-priority specific flows
+        
+        if should_install_flow:
             
             # --- [BARIS BARU] ---
             # Bikin match default dulu (berdasarkan MAC Address & Port)
