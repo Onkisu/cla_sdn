@@ -61,7 +61,7 @@ def send_tcp(rate, duration):
             pid,
             "ITGSend",
             "-T", "TCP",
-            "-rp", "9001",
+            "-p", "9001",
             "-a", DST_IP,
             "-c", "1400",
             "-C", str(rate),

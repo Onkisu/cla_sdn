@@ -238,7 +238,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 )
                 src_host.cmd(
                     f'ITGSend -T TCP -a {dst_ip} '
-                    f'-rp 9003 '
+                    f'-p 9003 '
                     f'-c {tcp_pkt_size} -C {tcp_rate} '
                     f'-t {tcp_duration} -l /dev/null &'
                 )
