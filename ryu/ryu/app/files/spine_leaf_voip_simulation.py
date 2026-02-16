@@ -209,26 +209,25 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
             info(f"*** Starting Noisy VoIP: {current_rate} pps | {packet_size} bytes\n")
 
-            src_host.cmd(
-                f'ITGSend -T UDP -a {dst_ip} '
-                f'-rp 9000 '
-                f'-c {packet_size} -C {current_rate} '
-                f'-t {duration} -l /dev/null'
+            udp_thread = threading.Thread(
+                target=src_host.cmd,
+                args=(f'ITGSend -T UDP -a {dst_ip} -rp 9000 '
+                    f'-c {packet_size} -C {current_rate} '
+                    f'-t {duration} -l /dev/null',)
             )
 
-            # ---- TCP Background Traffic ----
-            tcp_rate = random.randint(200, 400)   # kbps-ish load
-            tcp_pkt_size = 1200                   # typical TCP payload
-            tcp_duration = duration
-
-            info(f"*** Starting TCP traffic on port 9003 ({tcp_rate})\n")
-
-            src_host.cmd(
-                f'ITGSend -T TCP -a {dst_ip} '
-                f'-rp 9003 '
-                f'-c {tcp_pkt_size} -C {tcp_rate} '
-                f'-t {tcp_duration} -l /dev/null'
+            tcp_thread = threading.Thread(
+                target=src_host.cmd,
+                args=(f'ITGSend -T TCP -a {dst_ip} -rp 9003 '
+                    f'-c {tcp_pkt_size} -C {tcp_rate} '
+                    f'-t {tcp_duration} -l /dev/null',)
             )
+
+            udp_thread.start()
+            tcp_thread.start()
+
+            udp_thread.join()
+            tcp_thread.join()
 
 
             
