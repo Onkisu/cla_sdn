@@ -83,7 +83,7 @@ if __name__ == "__main__":
         send_tcp(120, 480)   # 8 menit
 
         # 2️⃣ RAMP UP (2 minutes)
-        print("\n[TCP] 📈 RAMP UP")
+        print("\n[TCP] 🔥 BURST")
         send_tcp(8750, 120)
 
         # 3️⃣ BURST (2 minutes)
@@ -94,7 +94,7 @@ if __name__ == "__main__":
         send_tcp(110, 300)  # 5 menit
 
         # 4️⃣ COOLDOWN (3 minutes)
-        print("\n[TCP] ❄ COOLDOWN")
+        print("\n[TCP] 🔥 BURST")
         send_tcp(8250, 180)
 
         print("\n[TCP] 🌊 NORMAL PHASE")
