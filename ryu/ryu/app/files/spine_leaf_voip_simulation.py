@@ -165,11 +165,12 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             session_ts = int(time.time())
             logfile = f"/tmp/recv_steady_{session_ts}.log"
             logfile_burst = f"/tmp/recv_burst_{session_ts}.log"
+            logfile_tcp = f"/tmp/recv_tcp_{session_ts}.log"
 
             info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
 
-            with traffic_lock:  # <-- LOCK
-                # Kill old senders first
+            with traffic_lock:  # LOCK akses host
+                # Kill old senders
                 src_host.cmd("pkill -9 ITGSend")
                 time.sleep(0.5)
 
@@ -182,12 +183,21 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 # Start ITGRecv
                 dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
                 dst_host.cmd(f"ITGRecv -T TCP -Sp 9001 -l {logfile_burst} &")
-                dst_host.cmd(f"ITGRecv -T TCP -Sp 9003 -l {logfile}_tcp &")
-                time.sleep(1)  # beri waktu binding port
+                dst_host.cmd(f"ITGRecv -T TCP -Sp 9003 -l {logfile_tcp} &")
 
-            # --- GENERATE TRAFFIC ---
+            # Tunggu ITGRecv 9003 siap
+            for _ in range(10):
+                pid = dst_host.cmd("pgrep -f 'ITGRecv.*9003'").strip()
+                if pid:
+                    info(f"*** ITGRecv 9003 ready (PID {pid})\n")
+                    break
+                time.sleep(0.5)
+            else:
+                info("!!! ITGRecv 9003 failed to start!\n")
+
+            # --- Generate VoIP-like random behavior ---
             base_rate = 50
-            rate_variation = random.randint(-10, 15)   # 40–65 pps
+            rate_variation = random.randint(-10, 15)
             current_rate = max(30, base_rate + rate_variation)
             packet_size = random.randint(140, 200)
             duration = STEADY_DURATION_MS + random.randint(-5000, 5000)
@@ -202,7 +212,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             if random.random() < 0.15:
                 burst_rate = random.randint(80, 120)
                 info(f"*** Micro burst at {burst_rate} pps\n")
-                with traffic_lock:  # <-- LOCK saat burst
+                with traffic_lock:
                     src_host.cmd(
                         f'ITGSend -T UDP -a {dst_ip} '
                         f'-rp 9000 '
@@ -218,7 +228,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             tcp_pkt_size = 1200
             tcp_duration = STEADY_DURATION_MS
 
-            # Start UDP & TCP background traffic safely
+            # Start background traffic (UDP + TCP)
             with traffic_lock:
                 src_host.cmd(
                     f'ITGSend -T UDP -a {dst_ip} '
@@ -233,16 +243,20 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                     f'-t {tcp_duration} -l /dev/null &'
                 )
 
-            time.sleep(1)
-            check = src_host.cmd("pgrep -f 'ITGSend.*9003'").strip()
-            if not check:
-                info("!!! TCP:9003 sender FAILED to start!\n")
+            # Verifikasi TCP sender
+            for _ in range(5):
+                check = src_host.cmd("pgrep -f 'ITGSend.*9003'").strip()
+                if check:
+                    info(f"*** TCP:9003 sender running (PID {check})\n")
+                    break
+                time.sleep(0.5)
             else:
-                info(f"*** TCP:9003 sender running (PID {check})\n")
+                info("!!! TCP:9003 sender FAILED to start!\n")
 
             # Tunggu durasi selesai (ms → sec)
             time.sleep(max(duration, tcp_duration) / 1000)
 
+            # Save session ke DB
             try:
                 save_itg_session_to_db(logfile)
             except Exception as e:
@@ -253,6 +267,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
         except Exception as e:
             info(f"*** Traffic loop error: {e}\n")
             break
+
 
 
 def run():
