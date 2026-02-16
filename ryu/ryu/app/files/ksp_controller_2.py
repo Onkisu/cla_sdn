@@ -929,6 +929,40 @@ class VoIPForecastController(app_manager.RyuApp):
             dp.send_msg(mod)
             self.logger.info("✅ Spine 2: H1->H2 TCP:9003 → Leaf 2 [PERMANENT]")
 
+        # ✅ TAMBAHAN: Leaf 2 (DPID 5) - DESTINATION
+        if 5 in self.datapaths:
+            dp = self.datapaths[5]
+            parser = dp.ofproto_parser
+            ofproto = dp.ofproto
+            
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ip_proto=6,
+                ipv4_src='10.0.0.1',
+                ipv4_dst='10.0.0.2',
+                tcp_dst=9003
+            )
+            
+            # Cari port ke H2
+            out_port = self.mac_to_port[5].get('00:00:00:00:00:02', 1)
+            
+            actions = [
+                parser.OFPActionSetQueue(2),  # Queue 2 = background
+                parser.OFPActionOutput(out_port)  # Port ke H2
+            ]
+            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+            
+            mod = parser.OFPFlowMod(
+                datapath=dp,
+                priority=PRIORITY_REROUTE + 50,  # Priority 30050
+                match=match,
+                instructions=inst,
+                idle_timeout=0,
+                hard_timeout=0
+            )
+            dp.send_msg(mod)
+            self.logger.info("✅ Leaf 2: H1->H2 TCP:9003 → H2 [PERMANENT]")
+
     # =================================================================
     # TRAFFIC MONITORING
     # =================================================================
@@ -1341,7 +1375,7 @@ class VoIPForecastController(app_manager.RyuApp):
                             udp_dst=udp_pkt.dst_port
                         )
                         self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
-                    elif tcp_pkt and tcp_pkt.dst_port == 9001:
+                    elif tcp_pkt and tcp_pkt.dst_port == [9001, 9003]:
                         match = parser.OFPMatch(
                             eth_type=0x0800,
                             ip_proto=6,
