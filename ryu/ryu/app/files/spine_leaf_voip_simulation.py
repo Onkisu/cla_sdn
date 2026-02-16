@@ -13,8 +13,6 @@ import psycopg2
 import re
 import random
 
-
-
 STEADY_DURATION_MS = 60000   # 60 detik per sesi
 STEADY_RATE = 50             # pps
 PKT_SIZE = 160               # bytes
