@@ -12,6 +12,8 @@ import subprocess
 import psycopg2
 import re
 import random
+import threading
+
 
 STEADY_DURATION_MS = 60000   # 60 detik per sesi
 STEADY_RATE = 50             # pps
@@ -148,6 +150,10 @@ def save_itg_session_to_db(log_file="/tmp/recv_steady.log"):
 #         # Jika ITGSend exit (selesai atau error), tunggu sebentar sebelum loop
 #         time.sleep(RESTART_DELAY)
         
+
+# Lock global untuk akses dst_host / src_host agar kill & start tidak bentrok
+traffic_lock = threading.Lock()
+
 def keep_steady_traffic(src_host, dst_host, dst_ip):
     for i in itertools.count(1):
         try:
@@ -155,51 +161,39 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             if not hasattr(dst_host, 'shell') or dst_host.shell is None:
                 info("*** Host disconnected\n")
                 break
-                
+
             session_ts = int(time.time())
             logfile = f"/tmp/recv_steady_{session_ts}.log"
             logfile_burst = f"/tmp/recv_burst_{session_ts}.log"
 
             info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
 
-            # Kill existing ITGRecv (non-blocking)
-            # Kill old senders first
-            try:
+            with traffic_lock:  # <-- LOCK
+                # Kill old senders first
                 src_host.cmd("pkill -9 ITGSend")
                 time.sleep(0.5)
-            except:
-                pass
 
-            # Kill existing ITGRecv
-            try:
+                # Kill existing ITGRecv
                 dst_host.cmd("pkill -f 'ITGRecv -Sp 9000'")          
                 dst_host.cmd("pkill -f 'ITGRecv -Sp 9001'") 
                 dst_host.cmd("pkill -f 'ITGRecv -Sp 9003'")
-            except:
-                pass
+                time.sleep(0.5)
 
-            time.sleep(0.5)
+                # Start ITGRecv
+                dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
+                dst_host.cmd(f"ITGRecv -T TCP -Sp 9001 -l {logfile_burst} &")
+                dst_host.cmd(f"ITGRecv -T TCP -Sp 9003 -l {logfile}_tcp &")
+                time.sleep(1)  # beri waktu binding port
 
-       
-            
-            # Start ITGRecv
-            dst_host.cmd(f"ITGRecv -Sp 9000 -l {logfile} &")
-            dst_host.cmd(f"ITGRecv -T TCP -Sp 9001 -l {logfile_burst} &")
-            dst_host.cmd(f"ITGRecv -T TCP -Sp 9003 -l {logfile}_tcp &")
-            time.sleep(3)
-
-            info("*** Starting ITGSend (VoIP ON-OFF)\n")
-
-                        # --- Generate VoIP-like random behavior ---
+            # --- GENERATE TRAFFIC ---
             base_rate = 50
             rate_variation = random.randint(-10, 15)   # 40–65 pps
             current_rate = max(30, base_rate + rate_variation)
-
-            packet_size = random.randint(140, 200)     # sedikit variasi payload
+            packet_size = random.randint(140, 200)
             duration = STEADY_DURATION_MS + random.randint(-5000, 5000)
 
-            # Random silence (simulate VAD)
-            if random.random() < 0.25:   # 25% kemungkinan silent gap
+            # Random silence
+            if random.random() < 0.25:
                 silence_time = random.uniform(0.5, 2.0)
                 info(f"*** Simulating silence {silence_time:.2f}s\n")
                 time.sleep(silence_time)
@@ -208,40 +202,37 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             if random.random() < 0.15:
                 burst_rate = random.randint(80, 120)
                 info(f"*** Micro burst at {burst_rate} pps\n")
-                src_host.cmd(
-                    f'ITGSend -T UDP -a {dst_ip} '
-                    f'-rp 9000 '
-                    f'-c {packet_size} -C {burst_rate} '
-                    f'-t 3000 -l /dev/null'
-                )
+                with traffic_lock:  # <-- LOCK saat burst
+                    src_host.cmd(
+                        f'ITGSend -T UDP -a {dst_ip} '
+                        f'-rp 9000 '
+                        f'-c {packet_size} -C {burst_rate} '
+                        f'-t 3000 -l /dev/null'
+                    )
 
             info(f"*** Starting Noisy VoIP: {current_rate} pps | {packet_size} bytes\n")
 
-
-            # ---- STEADY TCP Background Traffic ----
-            TCP_BASE_RATE = 260        # kbps target
-            TCP_VARIATION = 20         # ±20 kbps max deviation
-
+            TCP_BASE_RATE = 260
+            TCP_VARIATION = 20
             tcp_rate = TCP_BASE_RATE + random.randint(-TCP_VARIATION, TCP_VARIATION)
             tcp_pkt_size = 1200
-            tcp_duration = STEADY_DURATION_MS   # fix duration (60s)
+            tcp_duration = STEADY_DURATION_MS
 
-            # Start UDP background
-            src_host.cmd(
-                f'ITGSend -T UDP -a {dst_ip} '
-                f'-rp 9000 '
-                f'-c {packet_size} -C {current_rate} '
-                f'-t {duration} -l /dev/null &'
-            )
+            # Start UDP & TCP background traffic safely
+            with traffic_lock:
+                src_host.cmd(
+                    f'ITGSend -T UDP -a {dst_ip} '
+                    f'-rp 9000 '
+                    f'-c {packet_size} -C {current_rate} '
+                    f'-t {duration} -l /dev/null &'
+                )
+                src_host.cmd(
+                    f'ITGSend -T TCP -a {dst_ip} '
+                    f'-rp 9003 '
+                    f'-c {tcp_pkt_size} -C {tcp_rate} '
+                    f'-t {tcp_duration} -l /dev/null &'
+                )
 
-            # Start TCP background
-            src_host.cmd(
-                f'ITGSend -T TCP -a {dst_ip} '
-                f'-rp 9003 '
-                f'-c {tcp_pkt_size} -C {tcp_rate} '
-                f'-t {tcp_duration} -l /dev/null &'
-            )
-            # Verify TCP:9003 sender started
             time.sleep(1)
             check = src_host.cmd("pgrep -f 'ITGSend.*9003'").strip()
             if not check:
@@ -252,15 +243,13 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             # Tunggu durasi selesai (ms → sec)
             time.sleep(max(duration, tcp_duration) / 1000)
 
-
-            
             try:
                 save_itg_session_to_db(logfile)
             except Exception as e:
                 info(f"!!! DB SAVE FAILED: {e}\n")
 
             time.sleep(RESTART_DELAY)
-            
+
         except Exception as e:
             info(f"*** Traffic loop error: {e}\n")
             break
