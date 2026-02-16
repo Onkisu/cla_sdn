@@ -1253,13 +1253,14 @@ class VoIPForecastController(app_manager.RyuApp):
                         udp_dst=9000
                     )
                     self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
-                elif tcp_pkt:
+                elif tcp_pkt and tcp_pkt.dst_port == 9003:
                     # TCP → Install flow tanpa port (tidak akan di-reroute)
                     match = parser.OFPMatch(
                         eth_type=0x0800,
                         ip_proto=6,
                         ipv4_src=src_ip,
-                        ipv4_dst=dst_ip
+                        ipv4_dst=dst_ip,
+                        tcp_dst=9003
                     )
                     self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
                 else:
