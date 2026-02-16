@@ -219,7 +219,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             tcp_thread = threading.Thread(
                 target=src_host.cmd,
                 args=(f'ITGSend -T TCP -a {dst_ip} -rp 9003 '
-                    f'-c {tcp_pkt_size} -C {tcp_rate} '
+                    f'-c {tcp_packet_size} -C {tcp_rate} '
                     f'-t {tcp_duration} -l /dev/null',)
             )
 
