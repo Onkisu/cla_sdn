@@ -234,7 +234,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
                 f'-t {tcp_duration} -l /dev/null & '
             )
             # # Verify TCP:9003 sender started
-            time.sleep(0.5)
+            time.sleep(1)
             check = src_host.cmd("pgrep -f 'ITGSend.*9003'").strip()
             if not check:
                 info("!!! TCP:9003 sender FAILED to start!\n")
