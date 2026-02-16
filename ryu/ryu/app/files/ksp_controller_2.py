@@ -1136,6 +1136,7 @@ class VoIPForecastController(app_manager.RyuApp):
 
     def _monitor_traffic(self):
         """Request flow stats periodically"""
+        hub.sleep(5)
         while True:
             hub.sleep(1)
             for dp in self.datapaths.values():
