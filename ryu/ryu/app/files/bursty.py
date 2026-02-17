@@ -36,16 +36,22 @@ def check_controller_state():
 
 def send_tcp(rate, duration):
     try:
-        pid = subprocess.check_output(["pgrep", "-n", "-f", H3]).decode().strip()
+        # Get H3 PID
+        h3_pid = subprocess.check_output(["pgrep", "-n", "-f", H3]).decode().strip()
         
-        # rate (pps) * packet_size (1400 bytes) * 8 = bitrate
+        # Get H2 PID & restart server
+        h2_pid = subprocess.check_output(["pgrep", "-n", "-f", "h2"]).decode().strip()
+        subprocess.run(["mnexec", "-a", h2_pid, "pkill", "-9", "iperf3"])
+        time.sleep(0.3)
+        subprocess.run(["mnexec", "-a", h2_pid, "iperf3", "-s", "-p", str(PORT), "-D"])
+        time.sleep(1)
+        
+        # Send traffic
         bitrate = rate * 1400 * 8
-        
         subprocess.run([
-            "mnexec", "-a", pid,
+            "mnexec", "-a", h3_pid,
             "iperf3", "-c", DST_IP, "-p", str(PORT),
-            "-b", str(bitrate),
-            "-t", str(duration)
+            "-b", str(bitrate), "-t", str(duration)
         ], timeout=duration + 5)
     except Exception as e:
         print(f"[TCP] Error: {e}")
