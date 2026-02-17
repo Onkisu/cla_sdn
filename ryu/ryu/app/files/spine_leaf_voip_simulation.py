@@ -264,20 +264,13 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
 
 
-            with traffic_lock:  # LOCK akses host
-
+          # Di keep_steady_traffic, ganti bagian with traffic_lock:
+            with traffic_lock:
                 src_host.cmd("pkill -9 ITGSend")
                 dst_host.cmd("pkill -9 ITGRecv")
-                dst_host.cmd("pkill -9 iperf3")
                 time.sleep(0.5)
-                
-                # ITGRecv untuk port 9000 (UDP VoIP)
                 dst_host.cmd(f"ITGRecv -l {logfile} &")
-                
-                # iperf3 untuk port 9001 dan 9003
-                dst_host.cmd(f"iperf3 -s -p 9001 -D")
-                dst_host.cmd(f"iperf3 -s -p 9003 -D")
-                time.sleep(2)
+                time.sleep(1)
 
 
             # Tunggu ITGRecv 9003 siap
@@ -514,7 +507,11 @@ def run():
 
     net.pingAll()
 
-
+    # Di run(), setelah net.pingAll():
+    time.sleep(1)
+    h2.cmd("iperf3 -s -p 9001 -D")
+    h2.cmd("iperf3 -s -p 9003 -D")
+    time.sleep(1)
 
     if check_ditg():
 
