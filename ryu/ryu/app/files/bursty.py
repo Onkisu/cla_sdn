@@ -49,12 +49,38 @@ def send_tcp(rate, duration):
 
 if __name__ == "__main__":
     print("[TCP] 🎯 iperf3 Burst Started")
-    
+    time.sleep(600)
     while True:
-        print("\n[TCP] 🌊 NORMAL"); send_tcp(120, 480)
-        print("\n[TCP] 🔥 BURST"); send_tcp(8750, 120)
-        print("\n[TCP] 🔥 BURST"); send_tcp(7320, 90)
-        print("\n[TCP] 🌊 NORMAL"); send_tcp(110, 600)
-        print("\n[TCP] 🔥 BURST"); send_tcp(8250, 180)
-        print("\n[TCP] 🌊 NORMAL"); send_tcp(132, 500)
+
+        bursts = [
+            (250, 60),
+            (500, 30),
+            (1200, 20),
+            (2500, 20),
+            (4500, 15),
+
+            (8750, 30),
+            (7200, 45),
+            (5400, 30),
+
+            (3200, 20),
+            (1800, 20),
+            (900, 30),
+
+            (400, 60),
+            (250, 120)
+        ]
+
+        for rate, duration in bursts:
+            if rate >= 5000:
+                print(f"\n[TCP] 🔥 BURST {rate}")
+            elif rate >= 1000:
+                print(f"\n[TCP] ⚡ HIGH {rate}")
+            else:
+                print(f"\n[TCP] 🌊 NORMAL {rate}")
+
+            send_tcp(rate, duration)
+
         print("\n[TCP] 🔁 Cycle Repeat\n")
+        time.sleep(500)
+
