@@ -37,9 +37,9 @@ DB_CONFIG = {
 
 # Forecast Configuration
 FORECAST_CHECK_INTERVAL = 3         # Check forecast setiap 3 detik
-FORECAST_THRESHOLD_BPS = 40000000     # 100 Kbps threshold untuk reroute
+FORECAST_THRESHOLD_BPS = 200000     # 100 Kbps threshold untuk reroute
 FORECAST_LEAD_TIME_SEC = 10         # Reroute 10 detik sebelum predicted congestion
-REVERT_THRESHOLD_BPS = 250000000        # Revert jika forecast < 70 Kbps
+REVERT_THRESHOLD_BPS = 80900        # Revert jika forecast < 70 Kbps
 
 # Stability
 STABILITY_CYCLES_REQUIRED = 8      # Butuh 8 cycle stabil sebelum revert
@@ -126,8 +126,8 @@ class VoIPForecastController(app_manager.RyuApp):
         hub.spawn_after(15, self._start_forecast)  # Tunggu lebih lama, pastikan default flows selesai
         self.topology_thread = hub.spawn(self._discover_topology)
         
-        self.logger.info("ðŸŸ¢ VoIP Forecast Controller Started")
-        self.logger.info("ðŸ“Š Forecast source: forecast_1h.y_pred (DPID 5)")
+        self.logger.info("🟢 VoIP Forecast Controller Started")
+        self.logger.info("📊 Forecast source: forecast_1h.y_pred (DPID 5)")
         
         write_state_file({
             'state': 'IDLE',
@@ -150,10 +150,10 @@ class VoIPForecastController(app_manager.RyuApp):
             waited += 1
         
         if not self.default_flows_installed:
-            self.logger.warning("âš ï¸ Starting forecast without default flows!")
+            self.logger.warning("⚠️ Starting forecast without default flows!")
         
         self.forecast_thread = hub.spawn(self._forecast_monitor)
-        self.logger.info("ðŸ“Š Forecast monitor started")
+        self.logger.info("📊 Forecast monitor started")
 
 
     def connect_database_pool(self):
@@ -161,9 +161,9 @@ class VoIPForecastController(app_manager.RyuApp):
         try:
             from psycopg2 import pool
             self.db_pool = pool.SimpleConnectionPool(1, 5, **DB_CONFIG)
-            self.logger.info("âœ… Database pool created")
+            self.logger.info("✅ Database pool created")
         except Exception as e:
-            self.logger.warning(f"âš ï¸ DB Pool Error: {e}")
+            self.logger.warning(f"⚠️ DB Pool Error: {e}")
             self.db_pool = None
     
     def get_db_connection(self):
@@ -173,7 +173,7 @@ class VoIPForecastController(app_manager.RyuApp):
         try:
             return self.db_pool.getconn()
         except Exception as e:
-            self.logger.error(f"âŒ DB Connection Error: {e}")
+            self.logger.error(f"❌ DB Connection Error: {e}")
             return None
     
     def return_db_connection(self, conn):
@@ -224,7 +224,7 @@ class VoIPForecastController(app_manager.RyuApp):
             return None
             
         except Exception as e:
-            self.logger.error(f"âŒ Forecast query error: {e}")
+            self.logger.error(f"❌ Forecast query error: {e}")
             return None
         finally:
             self.return_db_connection(conn)
@@ -253,7 +253,7 @@ class VoIPForecastController(app_manager.RyuApp):
                     
                     # Only use recent forecasts (< 60 seconds old)
                     if forecast_age > 60:
-                        self.logger.debug(f"â° Forecast too old ({forecast_age:.0f}s), skipping")
+                        self.logger.debug(f"⏰ Forecast too old ({forecast_age:.0f}s), skipping")
                         continue
                     
                     self.last_forecast_value = predicted_bps
@@ -261,15 +261,15 @@ class VoIPForecastController(app_manager.RyuApp):
                     
                     # Log forecast value
                     if int(time.time()) % 10 == 0:  # Every 10 seconds
-                        self.logger.info(f"ðŸ“Š Forecast: {predicted_bps:.0f} bps (age: {forecast_age:.1f}s)")
+                        self.logger.info(f"📊 Forecast: {predicted_bps:.0f} bps (age: {forecast_age:.1f}s)")
                     
                     # === TRIGGER PROACTIVE REROUTE ===
                     if ( self.reroute_stage == 'IDLE' and
                         predicted_bps > FORECAST_THRESHOLD_BPS and
                         time.time() - self.last_revert_time > REVERT_COOLDOWN_SEC):
                         
-                        self.logger.warning(f"ðŸ”® FORECAST ALERT: Predicted {predicted_bps:.0f} bps > {FORECAST_THRESHOLD_BPS} bps")
-                        self.logger.info(f"ðŸš€ PROACTIVE REROUTE: Moving H1->H2 from Spine {self.current_spine}")
+                        self.logger.warning(f"🔮 FORECAST ALERT: Predicted {predicted_bps:.0f} bps > {FORECAST_THRESHOLD_BPS} bps")
+                        self.logger.info(f"🚀 PROACTIVE REROUTE: Moving H1->H2 from Spine {self.current_spine}")
                         
                         # Select alternative spine
                         target_spine = self._get_alternative_spine(self.current_spine)
@@ -281,7 +281,7 @@ class VoIPForecastController(app_manager.RyuApp):
                         success = self._atomic_reroute_to_spine(target_spine)
                         
                         if not success:
-                            self.logger.error("âŒ Proactive reroute failed")
+                            self.logger.error("❌ Proactive reroute failed")
                             self.reroute_stage = 'IDLE'
                     
                     # === TRIGGER REVERT ===
@@ -291,25 +291,25 @@ class VoIPForecastController(app_manager.RyuApp):
                           predicted_bps < REVERT_THRESHOLD_BPS):
                         
                         self.stability_counter += 1
-                        self.logger.debug(f"âœ“ Stability check {self.stability_counter}/{STABILITY_CYCLES_REQUIRED} (forecast: {predicted_bps:.0f} bps)")
+                        self.logger.debug(f"✓ Stability check {self.stability_counter}/{STABILITY_CYCLES_REQUIRED} (forecast: {predicted_bps:.0f} bps)")
                         
                         if self.stability_counter >= STABILITY_CYCLES_REQUIRED:
                     
                           
-                            # spine2_load = self.get_spine2_load() or 999999  # â† tambah ini
-                            # self.logger.info(f"âœ… Forecast & Spine 2 ({spine2_load:.0f} bps) stable. Reverting...")
-                            self.logger.info(f"âœ… Forecast stable. Reverting...")
+                            # spine2_load = self.get_spine2_load() or 999999  # ← tambah ini
+                            # self.logger.info(f"✅ Forecast & Spine 2 ({spine2_load:.0f} bps) stable. Reverting...")
+                            self.logger.info(f"✅ Forecast stable. Reverting...")
                             self.stats['forecast_revert'] += 1
                             success = self._atomic_revert_to_original_spine()
                                 
                             if success:
                                  self.stability_counter = 0
                             else:
-                                 self.logger.error("âŒ Revert failed")
+                                 self.logger.error("❌ Revert failed")
 
                               
                         else:
-                            self.logger.debug(f"â³ [REVERT] Waiting stability: {self.stability_counter}/{STABILITY_CYCLES_REQUIRED}")
+                            self.logger.debug(f"⏳ [REVERT] Waiting stability: {self.stability_counter}/{STABILITY_CYCLES_REQUIRED}")
                             
                     else:
                         # Reset stability counter if forecast goes back up
@@ -317,7 +317,7 @@ class VoIPForecastController(app_manager.RyuApp):
                             self.stability_counter = 0
                             
             except Exception as e:
-                self.logger.error(f"âŒ Forecast monitor error: {e}")
+                self.logger.error(f"❌ Forecast monitor error: {e}")
 
     # =================================================================
     # COMPLETE FLOW DELETION - Prevents Counter Accumulation
@@ -376,7 +376,7 @@ class VoIPForecastController(app_manager.RyuApp):
     
     def _delete_all_h1_h2_flows(self):
         """Delete ALL H1->H2 flows from ALL switches (for complete cleanup)"""
-        self.logger.info("ðŸ—‘ï¸ DELETING ALL H1->H2 flows from ALL switches...")
+        self.logger.info("🗑️ DELETING ALL H1->H2 flows from ALL switches...")
         
         switches_to_clean = [1, 2, 3, 4, 5]
         deleted_count = 0
@@ -407,7 +407,7 @@ class VoIPForecastController(app_manager.RyuApp):
             
             dp.send_msg(mod)
             deleted_count += 1
-            self.logger.info(f"  âœ“ DPID {dpid}: Deleted H1->H2 flows")
+            self.logger.info(f"  ✓ DPID {dpid}: Deleted H1->H2 flows")
         
         # Reset counters
         keys_to_reset = []
@@ -421,8 +421,8 @@ class VoIPForecastController(app_manager.RyuApp):
             self.last_bytes_timestamp.pop(key, None)
             self.last_packets.pop(key, None)
         
-        self.logger.info(f"  âœ“ Reset {len(keys_to_reset)} traffic counters")
-        self.logger.info(f"ðŸ—‘ï¸ Complete: Deleted flows from {deleted_count} switches")
+        self.logger.info(f"  ✓ Reset {len(keys_to_reset)} traffic counters")
+        self.logger.info(f"🗑️ Complete: Deleted flows from {deleted_count} switches")
 
     def _delete_h1_h2_flows_on_spine(self, spine_dpid):
         """Delete H1->H2 flows on SPECIFIC spine AND Leaf 1"""
@@ -449,7 +449,7 @@ class VoIPForecastController(app_manager.RyuApp):
             )
             
             dp.send_msg(mod)
-            self.logger.info(f"ðŸ—‘ï¸ Deleted H1->H2 flows on Spine {spine_dpid}")
+            self.logger.info(f"🗑️ Deleted H1->H2 flows on Spine {spine_dpid}")
         
         # CRITICAL: Also delete LOW PRIORITY flows from Leaf 1
         if 4 in self.datapaths:
@@ -476,12 +476,12 @@ class VoIPForecastController(app_manager.RyuApp):
             )
             
             dp.send_msg(mod)
-            self.logger.info(f"ðŸ—‘ï¸ Deleted low-priority H1->H2 flows on Leaf 1")
+            self.logger.info(f"🗑️ Deleted low-priority H1->H2 flows on Leaf 1")
     
     def _install_h1_h2_flow_on_spine(self, spine_dpid):
         """Install H1->H2 flow on specified spine"""
         if spine_dpid not in self.datapaths:
-            self.logger.warning(f"âš ï¸ Spine {spine_dpid} not available")
+            self.logger.warning(f"⚠️ Spine {spine_dpid} not available")
             return False
         
         dp = self.datapaths[spine_dpid]
@@ -517,14 +517,14 @@ class VoIPForecastController(app_manager.RyuApp):
         )
         
         dp.send_msg(mod)
-        self.logger.info(f"âœ… Spine {spine_dpid}: Installed H1->H2 flow (port {out_port})")
+        self.logger.info(f"✅ Spine {spine_dpid}: Installed H1->H2 flow (port {out_port})")
         return True
     
     
     def _update_leaf1_output_port(self, target_spine):
         """Update Leaf 1 to forward H1->H2 to target spine"""
         if 4 not in self.datapaths:
-            self.logger.warning("âš ï¸ Leaf 1 (DPID 4) not available")
+            self.logger.warning("⚠️ Leaf 1 (DPID 4) not available")
             return False
         
         dp = self.datapaths[4]
@@ -561,7 +561,7 @@ class VoIPForecastController(app_manager.RyuApp):
         )
         
         dp.send_msg(mod)
-        self.logger.info(f"âœ… Leaf 1: Routing H1->H2 via Spine {target_spine} (port {out_port})")
+        self.logger.info(f"✅ Leaf 1: Routing H1->H2 via Spine {target_spine} (port {out_port})")
         return True
 
     def _atomic_reroute_to_spine(self, target_spine):
@@ -576,7 +576,7 @@ class VoIPForecastController(app_manager.RyuApp):
         """
         old_spine = self.current_spine
         
-        self.logger.info(f"ðŸ”„ MAKE-BEFORE-BREAK REROUTE: Spine {old_spine} â†’ Spine {target_spine}")
+        self.logger.info(f"🔄 MAKE-BEFORE-BREAK REROUTE: Spine {old_spine} → Spine {target_spine}")
         
         # STEP 1: Install NEW path first
         self.reroute_stage = 'INSTALLING_NEW_PATH'
@@ -588,18 +588,18 @@ class VoIPForecastController(app_manager.RyuApp):
         
         success = self._install_h1_h2_flow_on_spine(target_spine)
         if not success:
-            self.logger.error("âŒ Failed to install on new spine")
+            self.logger.error("❌ Failed to install on new spine")
             self.reroute_stage = 'IDLE'
             return False
         
         success = self._update_leaf1_output_port(target_spine)
         if not success:
-            self.logger.error("âŒ Failed to update Leaf 1")
+            self.logger.error("❌ Failed to update Leaf 1")
             self.reroute_stage = 'IDLE'
             return False
 
         hub.sleep(0.1)
-        self.logger.info("âœ… New path installed")
+        self.logger.info("✅ New path installed")
         
         # STEP 2: Brief overlap to allow traffic to switch
         self.reroute_stage = 'TRAFFIC_SWITCHING'
@@ -610,7 +610,7 @@ class VoIPForecastController(app_manager.RyuApp):
             'new_spine': target_spine
         })
         
-        self.logger.info("â³ Waiting 0.5s for traffic to switch...")
+        self.logger.info("⏳ Waiting 0.5s for traffic to switch...")
         hub.sleep(0.05)
         
         # STEP 3: Delete OLD flows
@@ -623,7 +623,7 @@ class VoIPForecastController(app_manager.RyuApp):
         
         self._delete_h1_h2_flows_on_spine(old_spine)
         
-        self.logger.info("â³ Waiting 0.3s for deletion to propagate...")
+        self.logger.info("⏳ Waiting 0.3s for deletion to propagate...")
         hub.sleep(0.05)
         
         # STEP 4: Complete
@@ -640,7 +640,7 @@ class VoIPForecastController(app_manager.RyuApp):
             'original_spine': self.original_spine
         })
         
-        self.logger.info(f"âœ… REROUTE COMPLETE: H1->H2 now via Spine {target_spine} (make-before-break)")
+        self.logger.info(f"✅ REROUTE COMPLETE: H1->H2 now via Spine {target_spine} (make-before-break)")
         # Log ke database
         self._log_system_event(
             event_type='REROUTE',
@@ -654,13 +654,13 @@ class VoIPForecastController(app_manager.RyuApp):
         MAKE-BEFORE-BREAK REVERT: Return to original spine with zero loss
         """
         if not self.congestion_active or not self.original_spine:
-            self.logger.warning("âš ï¸ Cannot revert: not in rerouted state")
+            self.logger.warning("⚠️ Cannot revert: not in rerouted state")
             return False
         
         target_spine = self.original_spine
         old_spine = self.current_spine
         
-        self.logger.info(f"ðŸ”™ MAKE-BEFORE-BREAK REVERT: Spine {old_spine} â†’ Spine {target_spine}")
+        self.logger.info(f"🔙 MAKE-BEFORE-BREAK REVERT: Spine {old_spine} → Spine {target_spine}")
         
         # STEP 1: Install on original spine
         self.reroute_stage = 'REVERT_INSTALLING'
@@ -673,7 +673,7 @@ class VoIPForecastController(app_manager.RyuApp):
         self._install_h1_h2_flow_on_spine(target_spine)
         self._update_leaf1_output_port(target_spine)
         
-        self.logger.info("âœ… Original path installed")
+        self.logger.info("✅ Original path installed")
         
         # STEP 2: Brief overlap
         hub.sleep(0.4)
@@ -698,7 +698,7 @@ class VoIPForecastController(app_manager.RyuApp):
             'current_spine': self.current_spine
         })
         self.last_revert_time = time.time()   
-        self.logger.info(f"âœ… REVERT COMPLETE: H1->H2 back to Spine {target_spine} (make-before-break)")
+        self.logger.info(f"✅ REVERT COMPLETE: H1->H2 back to Spine {target_spine} (make-before-break)")
 
         # Log ke database
         self._log_system_event(
@@ -735,7 +735,7 @@ class VoIPForecastController(app_manager.RyuApp):
         Install default flows at startup
         BOTH H1 and H3 start via Spine 2
         """
-        self.logger.info("ðŸ”§ Installing DEFAULT flows...")
+        self.logger.info("🔧 Installing DEFAULT flows...")
         
         # Wait for datapaths
         max_wait = 12
@@ -747,207 +747,61 @@ class VoIPForecastController(app_manager.RyuApp):
             waited += 1
         
         if not all(dpid in self.datapaths for dpid in [2, 4, 6]):
-            self.logger.error("âŒ Not all datapaths ready")
+            self.logger.error("❌ Not all datapaths ready")
             return
         
         # === H1->H2: Via Spine 2 (default, can be rerouted) ===
         self._install_h1_h2_flow_on_spine(2)
         self._update_leaf1_output_port(2)
-        self.logger.info("âœ… H1->H2 path: Leaf1 â†’ Spine2 â†’ Leaf2")
-
-            # âœ… TAMBAHKAN INI - H1->H2 TCP:9003: PERMANENT
-        self._install_h1_tcp_background_permanent()
-        self.logger.info("âœ… H1->H2 TCP:9003: Leaf1 â†’ Spine2 â†’ Leaf2 (PERMANENT)")
+        self.logger.info("✅ H1->H2 path: Leaf1 → Spine2 → Leaf2")
         
         # === H3->H2: PERMANENTLY via Spine 2 (NEVER reroute) ===
         self._install_h3_h2_permanent_flow()
-        self.logger.info("âœ… H3->H2 path: Leaf3 â†’ Spine2 â†’ Leaf2 (PERMANENT)")
+        self.logger.info("✅ H3->H2 path: Leaf3 → Spine2 → Leaf2 (PERMANENT)")
         
         self.default_flows_installed = True
-        self.logger.info("ðŸŸ¢ Default paths established (both via Spine 2)")
+        self.logger.info("🟢 Default paths established (both via Spine 2)")
 
     def _install_h3_h2_permanent_flow(self):
         """
         Install H3->H2 flow PERMANENTLY on Spine 2 and Leaf 3
-        Support TCP & UDP port 9001
+        This flow is NEVER deleted or rerouted
         """
-        # Leaf 3 (DPID 6): H3->H2 â†’ Spine 2
+        # Leaf 3 (DPID 6): H3->H2 → Spine 2
         if 6 in self.datapaths:
             dp = self.datapaths[6]
             parser = dp.ofproto_parser
             ofproto = dp.ofproto
             
-            # âœ… INSTALL 2 FLOWS: UDP + TCP
-            flows = [
-                # UDP 9001
-                parser.OFPMatch(
-                    eth_type=0x0800,
-                    ip_proto=17,
-                    ipv4_src='10.0.0.3',
-                    ipv4_dst='10.0.0.2',
-                    udp_dst=9001
-                ),
-                # TCP 9001
-                parser.OFPMatch(
-                    eth_type=0x0800,
-                    ip_proto=6,
-                    ipv4_src='10.0.0.3',
-                    ipv4_dst='10.0.0.2',
-                    tcp_dst=9001
-                )
-            ]
-            
-            actions = [
-                parser.OFPActionSetQueue(2),
-                parser.OFPActionOutput(2)
-            ]
-            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-            
-            for match in flows:
-                mod = parser.OFPFlowMod(
-                    datapath=dp,
-                    priority=PRIORITY_REROUTE + 100,
-                    match=match,
-                    instructions=inst,
-                    idle_timeout=0,
-                    hard_timeout=0
-                )
-                dp.send_msg(mod)
-            
-            self.logger.info("âœ… Leaf 3: H3->H2 TCP/UDP:9001 â†’ Spine 2 (port 2) [PERMANENT]")
-        
-        # Spine 2: H3->H2 â†’ Leaf 2
-        if 2 in self.datapaths:
-            dp = self.datapaths[2]
-            parser = dp.ofproto_parser
-            ofproto = dp.ofproto
-            
-            # âœ… INSTALL 2 FLOWS: UDP + TCP
-            flows = [
-                # UDP 9001
-                parser.OFPMatch(
-                    eth_type=0x0800,
-                    ip_proto=17,
-                    ipv4_src='10.0.0.3',
-                    ipv4_dst='10.0.0.2',
-                    udp_dst=9001
-                ),
-                # TCP 9001
-                parser.OFPMatch(
-                    eth_type=0x0800,
-                    ip_proto=6,
-                    ipv4_src='10.0.0.3',
-                    ipv4_dst='10.0.0.2',
-                    tcp_dst=9001
-                )
-            ]
-            
-            actions = [
-                parser.OFPActionSetQueue(2),
-                parser.OFPActionOutput(2)
-            ]
-            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-            
-            for match in flows:
-                mod = parser.OFPFlowMod(
-                    datapath=dp,
-                    priority=PRIORITY_REROUTE + 100,
-                    match=match,
-                    instructions=inst,
-                    idle_timeout=0,
-                    hard_timeout=0
-                )
-                dp.send_msg(mod)
-            
-            self.logger.info("âœ… Spine 2: H3->H2 TCP/UDP:9001 â†’ Leaf 2 (port 2) [PERMANENT]")
-
-        # ✅ TAMBAHAN: Leaf 2 (DPID 5) - DESTINATION for H3->H2
-        if 5 in self.datapaths:
-            dp = self.datapaths[5]
-            parser = dp.ofproto_parser
-            ofproto = dp.ofproto
-            
-            # Cari port ke H2 (default port 4 - host port di leaf switch)
-            out_port = self.mac_to_port.get(5, {}).get('00:00:00:00:00:02', 4)
-            
-            # ✅ INSTALL 2 FLOWS: UDP + TCP
-            flows = [
-                # UDP 9001
-                parser.OFPMatch(
-                    eth_type=0x0800,
-                    ip_proto=17,
-                    ipv4_src='10.0.0.3',
-                    ipv4_dst='10.0.0.2',
-                    udp_dst=9001
-                ),
-                # TCP 9001
-                parser.OFPMatch(
-                    eth_type=0x0800,
-                    ip_proto=6,
-                    ipv4_src='10.0.0.3',
-                    ipv4_dst='10.0.0.2',
-                    tcp_dst=9001
-                )
-            ]
-            
-            actions = [
-                parser.OFPActionSetQueue(2),  # Queue 2 = bursty
-                parser.OFPActionOutput(out_port)  # Port ke H2
-            ]
-            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-            
-            for match in flows:
-                mod = parser.OFPFlowMod(
-                    datapath=dp,
-                    priority=PRIORITY_REROUTE + 100,  # Priority 30100
-                    match=match,
-                    instructions=inst,
-                    idle_timeout=0,
-                    hard_timeout=0
-                )
-                dp.send_msg(mod)
-            
-            self.logger.info("✅ Leaf 2: H3->H2 TCP/UDP:9001 → H2 [PERMANENT]")
-
-
-    
-    def _install_h1_tcp_background_permanent(self):
-        """
-        Install H1->H2 TCP:9003 PERMANENTLY on Spine 2 and Leaf 1
-        This flow is NEVER deleted or rerouted
-        """
-        # Leaf 1 (DPID 4)
-        if 4 in self.datapaths:
-            dp = self.datapaths[4]
-            parser = dp.ofproto_parser
-            ofproto = dp.ofproto
-            
             match = parser.OFPMatch(
                 eth_type=0x0800,
-                ip_proto=6,
-                ipv4_src='10.0.0.1',
+                ipv4_src='10.0.0.3',
                 ipv4_dst='10.0.0.2',
-                tcp_dst=9003
+                ip_proto=17,
+                udp_dst=9001
+
             )
             
             actions = [
-                parser.OFPActionSetQueue(2),  # Queue 2 = background
-                parser.OFPActionOutput(2)     # Port 2 = Spine 2
+                parser.OFPActionSetQueue(2),
+                parser.OFPActionOutput(2)
             ]
+
             inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
             
             mod = parser.OFPFlowMod(
                 datapath=dp,
-                priority=PRIORITY_REROUTE + 50,  # Priority 30050
+                priority=PRIORITY_REROUTE + 100,  # Higher priority to prevent override
                 match=match,
                 instructions=inst,
                 idle_timeout=0,
                 hard_timeout=0
             )
+            
             dp.send_msg(mod)
-            self.logger.info("âœ… Leaf 1: H1->H2 TCP:9003 â†’ Spine 2 [PERMANENT]")
+            self.logger.info("✅ Leaf 3: H3->H2 → Spine 2 (port 2) [PERMANENT]")
         
-        # Spine 2 (DPID 2)
+        # Spine 2: H3->H2 → Leaf 2
         if 2 in self.datapaths:
             dp = self.datapaths[2]
             parser = dp.ofproto_parser
@@ -955,63 +809,31 @@ class VoIPForecastController(app_manager.RyuApp):
             
             match = parser.OFPMatch(
                 eth_type=0x0800,
-                ip_proto=6,
-                ipv4_src='10.0.0.1',
+                ipv4_src='10.0.0.3',
                 ipv4_dst='10.0.0.2',
-                tcp_dst=9003
+                ip_proto=17,
+                udp_dst=9001
+
             )
             
             actions = [
                 parser.OFPActionSetQueue(2),
-                parser.OFPActionOutput(2)  # Port 2 = Leaf 2
+                parser.OFPActionOutput(2)
             ]
+
             inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
             
             mod = parser.OFPFlowMod(
                 datapath=dp,
-                priority=PRIORITY_REROUTE + 50,
+                priority=PRIORITY_REROUTE + 100,  # Higher priority
                 match=match,
                 instructions=inst,
                 idle_timeout=0,
                 hard_timeout=0
             )
+            
             dp.send_msg(mod)
-            self.logger.info("âœ… Spine 2: H1->H2 TCP:9003 â†’ Leaf 2 [PERMANENT]")
-
-        # âœ… TAMBAHAN: Leaf 2 (DPID 5) - DESTINATION
-        if 5 in self.datapaths:
-            dp = self.datapaths[5]
-            parser = dp.ofproto_parser
-            ofproto = dp.ofproto
-            
-            match = parser.OFPMatch(
-                eth_type=0x0800,
-                ip_proto=6,
-                ipv4_src='10.0.0.1',
-                ipv4_dst='10.0.0.2',
-                tcp_dst=9003
-            )
-            
-            # Cari port ke H2 (default port 4 - host port di leaf switch)
-            out_port = self.mac_to_port.get(5, {}).get('00:00:00:00:00:02', 4)
-
-            
-            actions = [
-                parser.OFPActionSetQueue(2),  # Queue 2 = background
-                parser.OFPActionOutput(out_port)  # Port ke H2
-            ]
-            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-            
-            mod = parser.OFPFlowMod(
-                datapath=dp,
-                priority=PRIORITY_REROUTE + 50,  # Priority 30050
-                match=match,
-                instructions=inst,
-                idle_timeout=0,
-                hard_timeout=0
-            )
-            dp.send_msg(mod)
-            self.logger.info("âœ… Leaf 2: H1->H2 TCP:9003 â†’ H2 [PERMANENT]")
+            self.logger.info("✅ Spine 2: H3->H2 → Leaf 2 (port 2) [PERMANENT]")
 
     # =================================================================
     # TRAFFIC MONITORING
@@ -1037,15 +859,12 @@ class VoIPForecastController(app_manager.RyuApp):
                 
                 src_ip = match.get('ipv4_src')
                 dst_ip = match.get('ipv4_dst')
+                udp_dst = match.get('udp_dst')
                 
                 if not src_ip or not dst_ip:
                     continue
                 
-                # âœ… UBAH: Get port from TCP or UDP
-                ip_proto = match.get('ip_proto', 0)
-                tp_dst = match.get('tcp_dst') or match.get('udp_dst') or 0
-                
-                flow_key = (dpid, src_ip, dst_ip,ip_proto, tp_dst)
+                flow_key = (dpid, src_ip, dst_ip, udp_dst)
                 
                 # Current values
                 current_bytes = stat.byte_count
@@ -1069,9 +888,8 @@ class VoIPForecastController(app_manager.RyuApp):
                 # Calculate bps
                 bps = (delta_bytes * 8) / time_diff
                 
-                # âœ… UBAH: Update spine traffic HANYA untuk UDP:9000
-                if (src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and 
-                    tp_dst == 9000 and dpid in [1,2,3]):
+                # Update spine traffic for H1->H2
+                if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and udp_dst == 9000 and dpid in [1,2,3]:
                     self.spine_traffic[dpid] = bps
                 
                 # Resolve MACs
@@ -1079,22 +897,8 @@ class VoIPForecastController(app_manager.RyuApp):
                 dst_mac = self.ip_to_mac.get(dst_ip)
                 
                 # Insert to DB
-                # âœ… H1->H2 UDP:9000: Always insert (for monitoring)
-                if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and tp_dst == 9000:
-                    self._insert_flow_stats(
-                        dpid, src_ip, dst_ip, match,
-                        delta_bytes, delta_packets,
-                        src_mac, dst_mac, time_diff
-                    )
-                # âœ… H3->H2 port 9001 (TCP/UDP): Always insert
-                elif src_ip == '10.0.0.3' and dst_ip == '10.0.0.2' and tp_dst == 9001:
-                    self._insert_flow_stats(
-                        dpid, src_ip, dst_ip, match,
-                        delta_bytes, delta_packets,
-                        src_mac, dst_mac, time_diff
-                    )
-                 # âœ… H3->H2 port 9001 (TCP/UDP): Always insert
-                elif src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and tp_dst == 9003:
+                # H1->H2: Always insert (for monitoring)
+                if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and udp_dst == 9000:
                     self._insert_flow_stats(
                         dpid, src_ip, dst_ip, match,
                         delta_bytes, delta_packets,
@@ -1109,7 +913,7 @@ class VoIPForecastController(app_manager.RyuApp):
                     )
         
         except Exception as e:
-            self.logger.error(f"âŒ Flow stats error: {e}")
+            self.logger.error(f"❌ Flow stats error: {e}")
         finally:
             self.return_db_connection(conn)
     
@@ -1130,13 +934,12 @@ class VoIPForecastController(app_manager.RyuApp):
             conn.commit()
             cur.close()
         except Exception as e:
-            self.logger.error(f"âŒ Failed to log system event: {e}")
+            self.logger.error(f"❌ Failed to log system event: {e}")
         finally:
             self.return_db_connection(conn)
 
     def _monitor_traffic(self):
         """Request flow stats periodically"""
-        hub.sleep(5)
         while True:
             hub.sleep(1)
             for dp in self.datapaths.values():
@@ -1156,20 +959,6 @@ class VoIPForecastController(app_manager.RyuApp):
             return
         
         try:
-            # âœ… FIX: Extract protocol and ports correctly
-            ip_proto = match.get('ip_proto', 0)
-            
-            # Get transport layer ports based on protocol
-            if ip_proto == 6:  # TCP
-                tp_src = match.get('tcp_src', 0)
-                tp_dst = match.get('tcp_dst', 0)
-            elif ip_proto == 17:  # UDP
-                tp_src = match.get('udp_src', 0)
-                tp_dst = match.get('udp_dst', 0)
-            else:
-                tp_src = 0
-                tp_dst = 0
-            
             cur = conn.cursor()
             cur.execute("""
                 INSERT INTO traffic.flow_stats_
@@ -1180,9 +969,9 @@ class VoIPForecastController(app_manager.RyuApp):
             """, (
                 datetime.now(), dpid, src_ip, dst_ip,
                 src_mac, dst_mac,
-                ip_proto,
-                tp_src,
-                tp_dst,
+                match.get('ip_proto', 17),
+                match.get('tcp_src') or match.get('udp_src') or 0,
+                match.get('tcp_dst') or match.get('udp_dst') or 1,
                 delta_bytes, delta_bytes,
                 delta_packets, delta_packets,
                 duration,
@@ -1191,7 +980,7 @@ class VoIPForecastController(app_manager.RyuApp):
             conn.commit()
             cur.close()
         except Exception as e:
-            self.logger.error(f"âŒ DB insert error: {e}")
+            self.logger.error(f"❌ DB insert error: {e}")
         finally:
             self.return_db_connection(conn)
 
@@ -1205,11 +994,11 @@ class VoIPForecastController(app_manager.RyuApp):
         if ev.state == MAIN_DISPATCHER:
             if datapath.id not in self.datapaths:
                 self.datapaths[datapath.id] = datapath
-                self.logger.info(f"ðŸ”Œ Switch connected: DPID {datapath.id}")
+                self.logger.info(f"🔌 Switch connected: DPID {datapath.id}")
         elif ev.state == DEAD_DISPATCHER:
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
-                self.logger.warning(f"ðŸ”Œ Switch disconnected: DPID {datapath.id}")
+                self.logger.warning(f"🔌 Switch disconnected: DPID {datapath.id}")
     
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -1276,7 +1065,6 @@ class VoIPForecastController(app_manager.RyuApp):
             self.ip_to_mac[ip_pkt.src] = src
         
         udp_pkt = pkt.get_protocol(udp.udp)
-        tcp_pkt = pkt.get_protocol(tcp.tcp)  # âœ… TAMBAHKAN INI
         udp_dst = udp_pkt.dst_port if udp_pkt else None
         
         # === SPECIAL HANDLING FOR H1->H2 (Leaf 1 - DPID 4) ===
@@ -1285,15 +1073,17 @@ class VoIPForecastController(app_manager.RyuApp):
             dst_ip = ip_pkt.dst
             
             if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
-                # CRITICAL: Skip flow installation during reroute
+                # CRITICAL: Skip flow installation during reroute to prevent duplicate flows
                 if self.reroute_stage in ['INSTALLING_NEW_PATH', 'TRAFFIC_SWITCHING', 'DELETING_OLD_FLOWS',
                                         'REVERT_INSTALLING', 'REVERT_DELETING']:
+                    # Just forward packet, don't install flow
                     spine_to_port = {1: 1, 2: 2, 3: 3}
                     out_port = spine_to_port.get(self.current_spine, 2)
                     actions = [
-                        parser.OFPActionSetQueue(1),
+                        parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
                         parser.OFPActionOutput(out_port)
                     ]
+
                     data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
                     out = parser.OFPPacketOut(
                         datapath=datapath, buffer_id=msg.buffer_id,
@@ -1302,20 +1092,16 @@ class VoIPForecastController(app_manager.RyuApp):
                     datapath.send_msg(out)
                     return
                 
-                # Normal: Route via current_spine
+                # Normal: Route via current_spine and install flow
                 spine_to_port = {1: 1, 2: 2, 3: 3}
                 out_port = spine_to_port.get(self.current_spine, 2)
                 
                 actions = [
-                    parser.OFPActionSetQueue(1),
+                    parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
                     parser.OFPActionOutput(out_port)
                 ]
-                
-                # âœ… UBAH: Install flow untuk UDP:9000 atau TCP (tanpa port spesifik)
-                tcp_pkt = pkt.get_protocol(tcp.tcp)
-                
-                if udp_pkt and udp_pkt.dst_port == 9000:
-                    # UDP:9000 â†’ Install specific flow (akan di-reroute)
+                   
+                if udp_dst == 9000:
                     match = parser.OFPMatch(
                         eth_type=0x0800,
                         ip_proto=17,
@@ -1323,21 +1109,17 @@ class VoIPForecastController(app_manager.RyuApp):
                         ipv4_dst=dst_ip,
                         udp_dst=9000
                     )
-                    self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
-                elif tcp_pkt and tcp_pkt.dst_port == 9003:
-                    # TCP â†’ Install flow tanpa port (tidak akan di-reroute)
+                else:
                     match = parser.OFPMatch(
                         eth_type=0x0800,
-                        ip_proto=6,
                         ipv4_src=src_ip,
-                        ipv4_dst=dst_ip,
-                        tcp_dst=9003
+                        ipv4_dst=dst_ip
                     )
-                    self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
-                # ✅ FIX: TIDAK ada else block - biarkan packet_out saja
-                # High-priority permanent flows akan handle traffic lainnya
+
+
                 
-                # Forward packet
+                self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
+                
                 data = None
                 if msg.buffer_id == ofproto.OFP_NO_BUFFER:
                     data = msg.data
@@ -1349,7 +1131,6 @@ class VoIPForecastController(app_manager.RyuApp):
                 datapath.send_msg(out)
                 return
         
-        # === SPECIAL HANDLING FOR H3->H2 (Leaf 3 - DPID 6) ===
         # === SPECIAL HANDLING FOR H3->H2 (Leaf 3 - DPID 6) ===
         if ip_pkt and dpid == 6:
             src_ip = ip_pkt.src
@@ -1361,11 +1142,8 @@ class VoIPForecastController(app_manager.RyuApp):
                     parser.OFPActionSetQueue(2),
                     parser.OFPActionOutput(2)
                 ]
-                
-                # âœ… UBAH: Support TCP & UDP port 9001
-                tcp_pkt = pkt.get_protocol(tcp.tcp)
-                
-                if udp_pkt and udp_pkt.dst_port == 9001:
+
+                if udp_dst == 9001:
                     match = parser.OFPMatch(
                         eth_type=0x0800,
                         ip_proto=17,
@@ -1373,20 +1151,15 @@ class VoIPForecastController(app_manager.RyuApp):
                         ipv4_dst=dst_ip,
                         udp_dst=9001
                     )
-                    self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
-                elif tcp_pkt and tcp_pkt.dst_port == 9001:
+                else:
                     match = parser.OFPMatch(
                         eth_type=0x0800,
-                        ip_proto=6,
                         ipv4_src=src_ip,
-                        ipv4_dst=dst_ip,
-                        tcp_dst=9001
+                        ipv4_dst=dst_ip
                     )
-                    self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
-                # ✅ FIX: TIDAK ada else block - biarkan packet_out saja
-                # High-priority permanent flows akan handle traffic lainnya
+  
+                self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
                 
-                # Forward packet
                 data = None
                 if msg.buffer_id == ofproto.OFP_NO_BUFFER:
                     data = msg.data
@@ -1399,12 +1172,10 @@ class VoIPForecastController(app_manager.RyuApp):
                 return
         
         # === SPECIAL HANDLING FOR Leaf 2 (DPID 5) - DESTINATION ===
-        # === SPECIAL HANDLING FOR Leaf 2 (DPID 5) - DESTINATION ===
         if ip_pkt and dpid == 5:
+            udp_dst = udp_pkt.dst_port if udp_pkt else None
             src_ip = ip_pkt.src
             dst_ip = ip_pkt.dst
-            tcp_pkt = pkt.get_protocol(tcp.tcp)
-            udp_pkt = pkt.get_protocol(udp.udp)
             
             if dst_ip == '10.0.0.2':
                 if dst in self.mac_to_port[dpid]:
@@ -1413,44 +1184,29 @@ class VoIPForecastController(app_manager.RyuApp):
                     out_port = ofproto.OFPP_FLOOD
                 
                 if out_port != ofproto.OFPP_FLOOD:
-                    # âœ… UBAH: Detect queue berdasarkan protocol & port
-                    queue_id = 1  # Default VoIP queue
-                    
-                    if udp_pkt:
-                        queue_id = 1 if udp_pkt.dst_port == 9000 else 2
-                    elif tcp_pkt:
-                        queue_id = 2  # TCP = bursty queue
-                    
+                    queue_id = 1 if udp_dst == 9000 else 2
+
                     actions = [
                         parser.OFPActionSetQueue(queue_id),
                         parser.OFPActionOutput(out_port)
                     ]
+
+                if udp_dst == 9000 or udp_dst == 9001:
+                    match = parser.OFPMatch(
+                        eth_type=0x0800,
+                        ip_proto=17,
+                        ipv4_src=src_ip,
+                        ipv4_dst=dst_ip,
+                        udp_dst=udp_dst
+                    )
                     
-                    # âœ… UBAH: Install flow untuk TCP & UDP port 9000/9001
-                    if udp_pkt and udp_pkt.dst_port in [9000, 9001]:
-                        match = parser.OFPMatch(
-                            eth_type=0x0800,
-                            ip_proto=17,
-                            ipv4_src=src_ip,
-                            ipv4_dst=dst_ip,
-                            udp_dst=udp_pkt.dst_port
-                        )
-                        self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
-                    elif tcp_pkt and tcp_pkt.dst_port in [9001, 9003]:
-                        match = parser.OFPMatch(
-                            eth_type=0x0800,
-                            ip_proto=6,
-                            ipv4_src=src_ip,
-                            ipv4_dst=dst_ip,
-                            tcp_dst=tcp_pkt.dst_port
-                        )
-                        self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
-                
-                # Forward packet (ICMP + UDP + TCP semua)
+                    self.add_flow(datapath, PRIORITY_USER, match, actions, msg.buffer_id)
+
+                # Forward packet (ICMP + UDP semua)
                 data = None
                 if msg.buffer_id == ofproto.OFP_NO_BUFFER:
                     data = msg.data
-                
+
                 out = parser.OFPPacketOut(
                     datapath=datapath, buffer_id=msg.buffer_id,
                     in_port=in_port, actions=actions, data=data
@@ -1514,16 +1270,7 @@ class VoIPForecastController(app_manager.RyuApp):
 
         
         # Install flow if not flooding
-        # âœ… FIX: Jangan install generic flow untuk traffic yang sudah punya specific flow
-        should_install_flow = (out_port != ofproto.OFPP_FLOOD)
-        
-        # Skip generic flow installation untuk H1->H2 dan H3->H2
-        if ip_pkt:
-            if (ip_pkt.src == '10.0.0.1' and ip_pkt.dst == '10.0.0.2') or \
-               (ip_pkt.src == '10.0.0.3' and ip_pkt.dst == '10.0.0.2'):
-                should_install_flow = False  # Sudah ada high-priority specific flows
-        
-        if should_install_flow:
+        if out_port != ofproto.OFPP_FLOOD:
             
             # --- [BARIS BARU] ---
             # Bikin match default dulu (berdasarkan MAC Address & Port)
@@ -1541,17 +1288,6 @@ class VoIPForecastController(app_manager.RyuApp):
                     ipv4_src=ip_pkt.src,
                     ipv4_dst=ip_pkt.dst,
                     udp_dst=udp_pkt.dst_port
-                )
-            elif ip_pkt and tcp_pkt:
-                # âœ… TAMBAHKAN: TCP handling
-                match = parser.OFPMatch(
-                    in_port=in_port,
-                    eth_dst=dst,
-                    eth_type=0x0800,
-                    ip_proto=6,
-                    ipv4_src=ip_pkt.src,
-                    ipv4_dst=ip_pkt.dst,
-                    tcp_dst=tcp_pkt.dst_port
                 )
             elif ip_pkt:
                 match = parser.OFPMatch(
