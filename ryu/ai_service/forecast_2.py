@@ -25,7 +25,7 @@ TARGET                 = "throughput_bps"
 BURST_THRESHOLD_BPS    = 40_000_000   # 40 Mbps
 PREDICTION_HORIZON_SEC = 10           # Prediksi 10 detik ke depan
 TRAIN_INTERVAL_SEC     = 1800         # Re-train tiap 30 menit
-LOOP_INTERVAL_SEC      = 5.0          # Prediksi tiap 1 detik (selaras resolusi data)
+LOOP_INTERVAL_SEC      = 5.0          # Prediksi tiap 1 detik (selaras resolusi data)s
 
 # ── Fitur yang dipakai — harus SAMA antara train & predict ──────────────────
 FEATURES = [
