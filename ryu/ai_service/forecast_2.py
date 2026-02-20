@@ -32,11 +32,6 @@ engine = create_engine(DB_URI)
 # 1. FETCH DATA (Flexible)
 # =========================
 def get_data(hours=1):
-    """
-    Mengambil data traffic.
-    - hours=6 untuk Training (agar pola siklus 30 menit terlihat)
-    - hours=1.5 untuk Prediction (agar query super cepat)
-    """
     query = f"""
         with x as (
             SELECT 
@@ -52,7 +47,7 @@ def get_data(hours=1):
             total_bytes * 8 as throughput_bps 
         FROM x 
         WHERE dpid = 5 
-        
+          AND total_bytes > 0        -- ✅ Buang nilai 0 dari sumber
         ORDER BY ts ASC
     """
 
@@ -67,8 +62,11 @@ def get_data(hours=1):
     df['ts'] = pd.to_datetime(df['ts'])
     df = df.set_index('ts')
 
-    # Resample ke 1 detik, isi bolong dengan nilai sebelumnya (ffill)
-    df = df.resample('1s').max().ffill().fillna(0)
+    # Resample ke 1 detik
+    # ✅ Ganti .ffill().fillna(0) → ffill saja, lalu bfill sebagai fallback
+    # Jadi gap/bolong diisi nilai detik sebelumnya, bukan 0
+    df = df.resample('1s').max()
+    df[TARGET] = df[TARGET].ffill().bfill()
     
     return df
 
