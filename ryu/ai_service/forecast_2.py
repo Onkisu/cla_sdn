@@ -18,7 +18,7 @@ TABLE_FORECAST = "forecast_1h"
 
 # Konfigurasi Target
 TARGET = "throughput_bps"
-BURST_THRESHOLD_BPS = ? 
+BURST_THRESHOLD_BPS = 40000000
 PREDICTION_HORIZON_SEC = 10 
 TRAIN_INTERVAL_SEC = 1800  # Train ulang setiap 30 menit
 
