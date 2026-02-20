@@ -183,7 +183,7 @@ def run_prediction():
     steady_sec = last_row['consecutive_steady_sec'].values[0]
     status = "⚠️ DANGER" if pred_val > BURST_THRESHOLD_BPS else "SAFE"
     
-    print(f"[{ts_now.strftime('%H:%M:%S')}] Steady: {steady_sec:.0f}s | Pred (+10s): {pred_val:,.0f} bps [{status}]", end='\r')
+    print(f"[{ts_created.strftime('%H:%M:%S')}] Steady: {steady_sec:.0f}s | Pred (+10s): {pred_val:,.0f} bps [{status}]", end='\r')
 
     # Simpan ke Database dengan 2 timestamp
     try:
