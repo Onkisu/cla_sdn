@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 """
 forecast_2.py — Real-time Traffic Burst Forecasting (FIXED VERSION)
