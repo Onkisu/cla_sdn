@@ -244,4 +244,3 @@ if __name__=="__main__":
         run_prediction()
 
         time.sleep(LOOP_INTERVAL_SEC)
-```
