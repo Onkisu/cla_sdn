@@ -175,8 +175,9 @@ def run_prediction():
     pred_val = TRAINED_MODEL.predict(last_row[features])[0]
     
     # --- UPDATE LOGIC DISINI ---
-    ts_now = pd.Timestamp.now() # Waktu Dibuat (Created At)
-    ts_future = ts_now + timedelta(seconds=PREDICTION_HORIZON_SEC) # Waktu Prediksi (Target Time)
+    ts_data = last_row.index[-1]
+    ts_created = ts_data
+    ts_future = ts_created + timedelta(seconds=PREDICTION_HORIZON_SEC) # Waktu Prediksi (Target Time)
     
     # Log ke Layar
     steady_sec = last_row['consecutive_steady_sec'].values[0]
@@ -187,7 +188,7 @@ def run_prediction():
     # Simpan ke Database dengan 2 timestamp
     try:
         res_df = pd.DataFrame([{
-            'ts_created': ts_now,   # <--- Kolom Baru: Kapan prediksi dibuat
+            'ts_created': ts_created,   # <--- Kolom Baru: Kapan prediksi dibuat
             'ts': ts_future,        # <--- Kolom Lama: Untuk jam berapa prediksi ini
             'y_pred': pred_val
         }])
