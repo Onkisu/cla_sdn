@@ -481,7 +481,7 @@ def run():
 
             #net.addLink(l, s, bw=1000, delay='1ms')
 
-            net.addLink(l, s, bw=100, delay='1ms', max_queue_size=10, use_htb=True)
+            net.addLink(l, s, bw=55, delay='1ms', max_queue_size=10, use_htb=True)
 
 
 
