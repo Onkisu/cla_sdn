@@ -39,9 +39,12 @@ def send_tcp(rate, duration):
         bitrate = rate * 1400 * 8
         subprocess.run([
             "mnexec", "-a", h3_pid,
-            "iperf3", "-c", DST_IP, "-p", str(PORT),
-            "-b", str(bitrate), "-t", str(duration)
-        ], timeout=duration + 5)
+            "iperf3",
+            "-c", DST_IP,
+            "-p", str(PORT),
+            "-b", str(bitrate),
+            "-t", str(duration)
+        ])
     except Exception as e:
         print(f"[TCP] Error: {e}")
 
