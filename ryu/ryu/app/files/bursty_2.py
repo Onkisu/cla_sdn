@@ -60,10 +60,18 @@ DIURNAL_BASELINE = [
 ]
 
 def get_baseline_for_hour(hour):
-    """Interpolasi smooth antar jam supaya tidak step function"""
-    h0 = DIURNAL_BASELINE[hour % 24]
-    h1 = DIURNAL_BASELINE[(hour + 1) % 24]
-    frac = random.random()   # posisi dalam jam ini
+    """
+    Interpolasi smooth antar jam (mendukung hour float).
+    """
+    hour = hour % 24  # wrap-around kalau negatif / >24
+
+    h_int = int(math.floor(hour))        # jam bawah
+    h_next = (h_int + 1) % 24            # jam berikutnya
+    frac = hour - h_int                  # fraksi antar jam
+
+    h0 = DIURNAL_BASELINE[h_int]
+    h1 = DIURNAL_BASELINE[h_next]
+
     return h0 + (h1 - h0) * frac
 
 def natural_noise(base, day_factor=1.0):
