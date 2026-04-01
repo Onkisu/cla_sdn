@@ -49,7 +49,19 @@ def check_ditg():
     return subprocess.run(['which', 'ITGSend'], capture_output=True).returncode == 0
 
 
-
+def iperf3_watchdog(host, ports=[9001, 9003], interval=5):
+    """Restart iperf3 servers on host if they die."""
+    while True:
+        time.sleep(interval)
+        try:
+            for port in ports:
+                running = host.cmd(f"pgrep -f 'iperf3 -s -p {port}'").strip()
+                if not running:
+                    info(f"*** [WATCHDOG] Restarting iperf3 server on port {port}\n")
+                    host.cmd(f"iperf3 -s -p {port} -D")
+                    time.sleep(0.5)
+        except Exception as e:
+            info(f"*** [WATCHDOG] Error: {e}\n")
 
 
 def save_itg_session_to_db(log_file="/tmp/recv_steady.log"):
@@ -481,7 +493,7 @@ def run():
 
             #net.addLink(l, s, bw=1000, delay='1ms')
 
-            net.addLink(l, s, bw=20, delay='1ms', max_queue_size=10, use_htb=True)
+            net.addLink(l, s, bw=55, delay='1ms', max_queue_size=10, use_htb=True)
 
 
 
@@ -513,6 +525,11 @@ def run():
     h2.cmd("iperf3 -s -p 9003 -D")
     time.sleep(1)
 
+
+    wd = threading.Thread(target=iperf3_watchdog, args=(h2,))
+    wd.daemon = True
+    wd.start()
+    
     if check_ditg():
 
         # Kita tidak perlu start ITGRecv manual di sini lagi, 
