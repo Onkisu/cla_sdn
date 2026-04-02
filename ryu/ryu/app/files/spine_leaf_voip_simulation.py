@@ -280,8 +280,9 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
             with traffic_lock:
                 src_host.cmd("pkill -f 'ITGSend' 2>/dev/null; true")
                 time.sleep(1)
-                dst_host.cmd("pkill -f 'ITGRecv' 2>/dev/null; true")
-                time.sleep(0.5)
+                # Ganti baris pkill ITGRecv dengan ini:
+                dst_host.cmd("pgrep -f ITGRecv | xargs -r kill -9 2>/dev/null; true")
+                time.sleep(1)
                 dst_host.cmd(f"ITGRecv -l {logfile} &")
                 time.sleep(1)
 
@@ -292,7 +293,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
                 pid = dst_host.cmd("pgrep -f 'ITGRecv'").strip()
 
-                if pid:
+                if pid and '\n' not in pid: 
 
                     info(f"*** ITGRecv 9003 ready (PID {pid})\n")
 
