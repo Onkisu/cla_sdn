@@ -49,19 +49,27 @@ def check_ditg():
     return subprocess.run(['which', 'ITGSend'], capture_output=True).returncode == 0
 
 
-def iperf3_watchdog(host, ports=[9001, 9003], interval=5):
+def iperf3_watchdog(host, ports=[9001, 9003], interval=15):  # interval 15s
     while True:
         time.sleep(interval)
         try:
             for port in ports:
-                with traffic_lock:                    # ← tambah ini
-                    running = host.cmd(f"pgrep -f 'iperf3 -s -p {port}'").strip()
+                acquired = traffic_lock.acquire(timeout=3)   # ← tidak nunggu selamanya
+                if not acquired:
+                    info(f"*** [WATCHDOG] Lock busy, skip port {port}\n")
+                    continue
+                try:
+                    running = host.cmd(
+                        f"pgrep -f 'iperf3 -s -p {port}'"
+                    ).strip()
                     if not running:
                         info(f"*** [WATCHDOG] Restarting iperf3 on port {port}\n")
                         host.cmd(f"iperf3 -s -p {port} -D")
                         time.sleep(0.5)
+                finally:
+                    traffic_lock.release()
         except Exception as e:
-            info(f"*** [WATCHDOG] Error: {e}\n")
+            info(f"*** [WATCHDOG] Error: {type(e).__name__}: {e!r}\n")
 
 
 def save_itg_session_to_db(log_file="/tmp/recv_steady.log"):
