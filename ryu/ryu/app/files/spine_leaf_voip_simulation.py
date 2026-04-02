@@ -50,16 +50,16 @@ def check_ditg():
 
 
 def iperf3_watchdog(host, ports=[9001, 9003], interval=5):
-    """Restart iperf3 servers on host if they die."""
     while True:
         time.sleep(interval)
         try:
             for port in ports:
-                running = host.cmd(f"pgrep -f 'iperf3 -s -p {port}'").strip()
-                if not running:
-                    info(f"*** [WATCHDOG] Restarting iperf3 server on port {port}\n")
-                    host.cmd(f"iperf3 -s -p {port} -D")
-                    time.sleep(0.5)
+                with traffic_lock:                    # ← tambah ini
+                    running = host.cmd(f"pgrep -f 'iperf3 -s -p {port}'").strip()
+                    if not running:
+                        info(f"*** [WATCHDOG] Restarting iperf3 on port {port}\n")
+                        host.cmd(f"iperf3 -s -p {port} -D")
+                        time.sleep(0.5)
         except Exception as e:
             info(f"*** [WATCHDOG] Error: {e}\n")
 
@@ -279,6 +279,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
           # Di keep_steady_traffic, ganti bagian with traffic_lock:
             with traffic_lock:
                 src_host.cmd("pkill -9 ITGSend")
+                time.sleep(1)
                 dst_host.cmd("pkill -9 ITGRecv")
                 time.sleep(0.5)
                 dst_host.cmd(f"ITGRecv -l {logfile} &")
@@ -349,7 +350,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
                         f'-c {packet_size} -C {burst_rate} '
 
-                        f'-t 3000 -l /dev/null'
+                        f'-t 3000 -l /dev/null &'
 
                     )
 
