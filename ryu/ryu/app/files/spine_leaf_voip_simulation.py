@@ -278,9 +278,9 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
           # Di keep_steady_traffic, ganti bagian with traffic_lock:
             with traffic_lock:
-                src_host.cmd("pkill -9 ITGSend")
+                src_host.cmd("pkill -f 'ITGSend' 2>/dev/null; true")
                 time.sleep(1)
-                dst_host.cmd("pkill -9 ITGRecv")
+                dst_host.cmd("pkill -f 'ITGRecv' 2>/dev/null; true")
                 time.sleep(0.5)
                 dst_host.cmd(f"ITGRecv -l {logfile} &")
                 time.sleep(1)
