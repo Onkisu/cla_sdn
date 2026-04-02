@@ -439,7 +439,7 @@ def keep_steady_traffic(src_host, dst_host, dst_ip):
 
         except Exception as e:
 
-            info(f"*** Traffic loop error: {e}\n")
+            info(f"*** Traffic loop error: {type(e).__name__}: {e!r}\n")
 
             break
 
