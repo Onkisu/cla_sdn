@@ -1,27 +1,21 @@
 #!/usr/bin/env python3
 """
-Structured Stochastic Traffic Generator
-Target throughput ~55 Mbps (bottleneck link spine-leaf).
-  - Packet size  : 1400 bytes  (fixed di send_tcp)
-  - 55 Mbps      : 55_000_000 / (1400*8) ≈ 4910 pps  → kita pakai 4500 pps sebagai "full load"
-  - Noise        : ±8% Gaussian (bukan ±18%)
-  - Event        : masih ada, tapi dibatasi supaya tidak melewati 4800 pps
-  - Diurnal      : peak sore/malam ~4200–4500 pps, offpeak ~1200–1800 pps
+Burst Traffic Generator - Dataset 2
+Karakteristik berbeda dari Dataset 1:
+  - Pola asimetris: naik cepat, turun lambat
+  - Multi-peak dalam 1 siklus
+  - Idle bervariasi (bukan fixed)
+  - Siklus lebih pendek tapi lebih sering
 """
 import time
 import subprocess
 import json
 import random
-import math
 
 H3 = "h3"
 DST_IP = "10.0.0.2"
 PORT = 9001
 STATE_FILE = '/tmp/controller_state.json'
-
-# ─── Batas keras agar tidak meledak melebihi kapasitas link ─────────────────
-LINK_CAP_PPS = 4800   # ~53.8 Mbps  — hard ceiling
-FLOOR_PPS    = 400    # minimum bermakna agar koneksi tetap hidup
 
 def check_controller_state():
     try:
@@ -48,208 +42,141 @@ def send_tcp(rate, duration):
         bitrate = rate * 1400 * 8
         subprocess.run([
             "mnexec", "-a", h3_pid,
-            "iperf3",
-            "-c", DST_IP,
-            "-p", str(PORT),
-            "-b", str(bitrate),
-            "-t", str(duration)
-        ], timeout=duration + 10)  # tambah buffer 10 detik
-    except subprocess.TimeoutExpired:
-        print(f"[TCP] ⚠️ iperf3 timeout (dur={duration}s), skipping")
+            "iperf3", "-c", DST_IP, "-p", str(PORT),
+            "-b", str(bitrate), "-t", str(duration)
+        ], timeout=duration + 5)
     except Exception as e:
         print(f"[TCP] Error: {e}")
 
+def run_bursts(burst_list, label=""):
+    for rate, duration in burst_list:
+        if not check_controller_state():
+            time.sleep(5)
+            continue
+        mbps = rate * 1400 * 8 / 1e6
+        if rate >= 6000:
+            print(f"[TCP] 🔥 PEAK   {label} rate={rate}  ({mbps:.1f} Mbps)  dur={duration}s")
+        elif rate >= 2000:
+            print(f"[TCP] ⚡ MID    {label} rate={rate}  ({mbps:.1f} Mbps)  dur={duration}s")
+        else:
+            print(f"[TCP] 🌊 LOW    {label} rate={rate}  ({mbps:.1f} Mbps)  dur={duration}s")
+        send_tcp(rate, duration)
+
 # ─────────────────────────────────────────────────────────────────────────────
-#  DIURNAL BASELINE  (pps)
-#
-#  Skala ulang dari versi lama ke range 400–4500 pps.
-#  Peak sore = 4500 pps ≈ 50.4 Mbps  (sengaja sedikit di bawah 55 Mbps)
-#  Offpeak dini hari = 400 pps ≈ 4.5 Mbps
-#
-#  Mapping kasar lama→baru:
-#    lama 4000 pps → baru 4500 pps  (peak sore)
-#    lama  150 pps → baru  400 pps  (dini hari)
+#  SIKLUS — setiap siklus punya "bentuk" berbeda
+#  Dataset 1: 1 gunung simetris, idle 500 detik
+#  Dataset 2: multi-peak asimetris, idle variatif 60–200 detik
 # ─────────────────────────────────────────────────────────────────────────────
-DIURNAL_BASELINE = [
-     400,   350,   320,   300,   # 00–03 dini hari
-     320,   480,   800,  1400,   # 04–07 mulai naik
-    2200,  3000,  3600,  4000,   # 08–11 rampup pagi
-    4200,  4400,  3800,  4000,   # 12–15 peak siang
-    4300,  4500,  4200,  3600,   # 16–19 peak sore ← target ~55 Mbps
-    2800,  2000,  1200,   700,   # 20–23 turun malam
+
+# Siklus A: Naik CEPAT → 2 peak → turun LAMBAT bertahap
+CYCLE_A = [
+    (800,  10),   # naik cepat
+    (3500, 10),
+    (7200, 25),   # peak 1
+    (6800, 20),
+    (8500, 30),   # peak 2 lebih tinggi
+    (6000, 20),   # turun lambat
+    (4200, 25),
+    (2800, 30),
+    (1500, 35),
+    (700,  40),
+    (300,  50),   # ekor panjang
 ]
 
-def get_baseline_for_hour(hour):
-    """Interpolasi smooth antar jam (mendukung hour float)."""
-    hour = hour % 24
-    h_int  = int(math.floor(hour))
-    h_next = (h_int + 1) % 24
-    frac   = hour - h_int
-    h0 = DIURNAL_BASELINE[h_int]
-    h1 = DIURNAL_BASELINE[h_next]
-    return h0 + (h1 - h0) * frac
-
-def natural_noise(base, day_factor=1.0):
-    """
-    Gaussian noise ±8% (dikurangi dari ±18% agar tidak terlalu liar).
-    day_factor tidak mengubah std, hanya menggeser mean.
-    """
-    std = base * 0.08 * day_factor
-    val = int(random.gauss(base * day_factor, std))
-    return max(FLOOR_PPS, min(val, LINK_CAP_PPS))
-
-def occasional_event():
-    """
-    Kejadian tak terduga — probabilitas diperkecil dan multiplier diklem
-    agar tidak melewati LINK_CAP_PPS.
-    """
-    roll = random.random()
-    if roll < 0.04:       # 4% — flash crowd / viral content
-        print("[TCP] 🚨 EVENT: Flash crowd!")
-        # multiplier dikecilkan: maks 1.06 agar pps tidak melebihi cap
-        return (random.uniform(1.02, 1.06), random.randint(20, 40))
-    elif roll < 0.07:     # 3% — batch job burst
-        print("[TCP] 🔧 EVENT: Batch job burst!")
-        return (random.uniform(1.01, 1.04), random.randint(15, 30))
-    elif roll < 0.10:     # 3% — traffic drop partial outage
-        print("[TCP] 📉 EVENT: Partial drop!")
-        return (random.uniform(0.30, 0.55), random.randint(10, 25))
-    return None           # 90% — normal
-
-def build_period(hour, n_bursts, day_factor=1.0):
-    """
-    Buat satu period traffic berdasarkan jam.
-    Tiap burst masih punya noise, tapi tetap terkontrol di sekitar baseline.
-    """
-    base = get_baseline_for_hour(hour)
-    bursts = []
-
-    for i in range(n_bursts):
-        rate = natural_noise(base, day_factor)
-
-        # Micro-trend dalam 1 period — bounded ±10%
-        trend = random.choice(['up', 'down', 'flat', 'flat'])
-        if trend == 'up':
-            base = min(base * random.uniform(1.02, 1.08), LINK_CAP_PPS)
-        elif trend == 'down':
-            base = max(base * random.uniform(0.92, 0.98), FLOOR_PPS)
-
-        # Duration stochastic tapi lebih stabil (gauss 30±6, clamp 12–55)
-        dur = int(random.gauss(30, 6))
-        dur = max(12, min(dur, 55))
-
-        # Check occasional event
-        event = occasional_event()
-        if event:
-            mult, event_dur = event
-            rate = int(min(rate * mult, LINK_CAP_PPS))
-            dur  = event_dur
-
-        bursts.append((rate, dur))
-
-    return bursts
-
-def simulate_day_type():
-    """
-    Pilih tipe hari — mempengaruhi overall traffic level.
-    Factor dikurangi range-nya agar tidak drop/spike terlalu jauh.
-    """
-    roll = random.random()
-    if roll < 0.08:
-        print("[TCP] 📅 Day type: HOLIDAY (traffic rendah)")
-        return 0.55, "HOLIDAY"
-    elif roll < 0.22:
-        print("[TCP] 📅 Day type: WEEKEND")
-        return 0.72, "WEEKEND"
-    elif roll < 0.38:
-        print("[TCP] 📅 Day type: LIGHT WEEKDAY")
-        return 0.88, "LIGHT_WEEKDAY"
-    elif roll < 0.85:
-        print("[TCP] 📅 Day type: NORMAL WEEKDAY")
-        return 1.00, "NORMAL_WEEKDAY"
-    else:
-        print("[TCP] 📅 Day type: BUSY DAY (event/promo)")
-        return 1.12, "BUSY_DAY"   # dikurangi dari 1.35 → 1.12
-
-# Period schedule — jam berapa, berapa burst, nama label
-PERIOD_SCHEDULE = [
-    (0,   4,  "offpeak"),
-    (2,   4,  "offpeak"),
-    (5,   5,  "earlymorning"),
-    (7,   5,  "rampup"),
-    (9,   6,  "morning_peak"),
-    (11,  6,  "midday"),
-    (13,  5,  "lunch"),
-    (14,  6,  "afternoon"),
-    (16,  7,  "evening_peak"),
-    (18,  6,  "after_work"),
-    (20,  5,  "night"),
-    (22,  4,  "latenight"),
+# Siklus B: Plateau tinggi → drop tiba-tiba → recovery kecil
+CYCLE_B = [
+    (1200, 15),
+    (4500, 15),
+    (7800, 40),   # naik ke plateau
+    (8200, 35),
+    (8000, 30),   # plateau
+    (7500, 25),
+    (900,  10),   # drop tiba-tiba
+    (2200, 20),   # recovery kecil
+    (1800, 25),
+    (600,  30),
 ]
 
-# Batas display untuk label pps
-PEAK_THRESHOLD = int(LINK_CAP_PPS * 0.80)   # ≥ 3840 pps → PEAK
-MID_THRESHOLD  = int(LINK_CAP_PPS * 0.35)   # ≥ 1680 pps → MID
+# Siklus C: 3 peak berbeda tinggi, tidak simetris
+CYCLE_C = [
+    (500,  15),
+    (3800, 20),   # peak 1 sedang
+    (2000, 15),   # valley
+    (6500, 25),   # peak 2 tinggi
+    (3500, 15),   # valley
+    (5200, 20),   # peak 3 medium
+    (2500, 20),
+    (1200, 30),
+    (400,  40),
+]
+
+# Siklus D: Naik LAMBAT → peak singkat → turun CEPAT
+CYCLE_D = [
+    (300,  30),
+    (600,  25),
+    (1100, 20),
+    (2000, 20),
+    (3500, 15),
+    (5500, 15),
+    (7800, 20),   # peak singkat
+    (8800, 15),
+    (3000, 10),   # turun cepat
+    (800,  10),
+    (250,  15),
+]
+
+# Siklus E: Double spike pendek-pendek (bursty agresif)
+CYCLE_E = [
+    (400,  20),
+    (8000, 12),   # spike 1 cepat
+    (500,  15),   # drop
+    (7500, 12),   # spike 2
+    (600,  15),   # drop
+    (6800, 15),   # spike 3 lebih lama
+    (1500, 20),
+    (500,  25),
+]
+
+ALL_CYCLES = [
+    ("A - FastRise DualPeak SlowFall", CYCLE_A),
+    ("B - Plateau SuddenDrop",         CYCLE_B),
+    ("C - TriplePeak Asymmetric",      CYCLE_C),
+    ("D - SlowRise FastFall",          CYCLE_D),
+    ("E - AggressiveSpike",            CYCLE_E),
+]
 
 if __name__ == "__main__":
-    print("[TCP] 🌐 Structured Stochastic Traffic Generator Started")
-    print(f"[TCP] 🎯 Target link cap  : {LINK_CAP_PPS} pps  "
-          f"({LINK_CAP_PPS * 1400 * 8 / 1e6:.1f} Mbps)")
-    print(f"[TCP] 🎯 Peak diurnal     : {max(DIURNAL_BASELINE)} pps  "
-          f"({max(DIURNAL_BASELINE) * 1400 * 8 / 1e6:.1f} Mbps)")
+    print("[TCP] 🎯 Burst Generator Dataset 2 Started")
+    print("[TCP] Pola: multi-peak asimetris, idle variatif")
     time.sleep(600)
 
-    day = 0
+    cycle_num = 0
     while True:
-        day += 1
-        day_factor, day_label = simulate_day_type()
+        # Pilih siklus — tidak selalu urut, bisa acak
+        # Tapi tidak mengulang siklus yang sama 2x berturut-turut
+        prev = cycle_num % len(ALL_CYCLES)
+        choices = [i for i in range(len(ALL_CYCLES)) if i != prev]
+        idx = random.choice(choices)
+        cycle_num += 1
 
-        print(f"\n{'='*60}")
-        print(f"[TCP] 📅 Day #{day} | {day_label} | factor={day_factor:.2f}")
-        print(f"{'='*60}")
+        label, bursts = ALL_CYCLES[idx]
+        print(f"\n{'='*55}")
+        print(f"[TCP] 🔁 Cycle #{cycle_num} | {label}")
+        print(f"{'='*55}")
 
-        # Geser waktu tiap period ±20 menit (dikurangi dari ±30)
-        schedule = list(PERIOD_SCHEDULE)
-        schedule = [(h + random.uniform(-0.33, 0.33), n, name)
-                    for h, n, name in schedule]
+        run_bursts(bursts, label=f"[{label}]")
 
-        for hour, n_bursts, period_name in schedule:
-            if not check_controller_state():
-                time.sleep(5)
-                continue
+        # Idle variatif — bukan fixed 500 detik
+        # Kadang pendek (recovery cepat), kadang panjang (network idle)
+        roll = random.random()
+        if roll < 0.30:
+            idle = random.randint(60, 100)    # 30% — idle pendek
+            print(f"[TCP] 💤 Short idle {idle}s")
+        elif roll < 0.75:
+            idle = random.randint(120, 180)   # 45% — idle medium
+            print(f"[TCP] 💤 Medium idle {idle}s")
+        else:
+            idle = random.randint(200, 300)   # 25% — idle panjang
+            print(f"[TCP] 💤 Long idle {idle}s")
 
-            print(f"\n[TCP] 🕐 Period: {period_name.upper()} (~hour {hour:.1f})")
-            bursts = build_period(hour, n_bursts, day_factor)
-
-            for rate, dur in bursts:
-                if not check_controller_state():
-                    time.sleep(5)
-                    continue
-
-                mbps = rate * 1400 * 8 / 1e6
-                if rate >= PEAK_THRESHOLD:
-                    print(f"[TCP] 🔥 PEAK   rate={rate} pps  ({mbps:.1f} Mbps)  dur={dur}s")
-                elif rate >= MID_THRESHOLD:
-                    print(f"[TCP] ⚡ MID    rate={rate} pps  ({mbps:.1f} Mbps)  dur={dur}s")
-                else:
-                    print(f"[TCP] 🌊 LOW    rate={rate} pps  ({mbps:.1f} Mbps)  dur={dur}s")
-
-                send_tcp(rate, dur)
-
-                # Gap antar burst: lebih kecil variasinya (gauss 4±1.5)
-                gap = max(1, int(random.gauss(4, 1.5)))
-                time.sleep(gap)
-
-            # Jeda antar period
-            if hour >= 22 or hour <= 4:
-                rest = random.gauss(180, 20)
-            elif hour >= 16:
-                rest = random.gauss(60, 10)
-            else:
-                rest = random.gauss(45, 8)
-
-            rest = max(10, int(rest))
-            print(f"[TCP] 💤 Rest {rest}s after {period_name}")
-            time.sleep(rest)
-
-        print(f"\n[TCP] 🔁 Day #{day} done\n")
+        time.sleep(idle)
