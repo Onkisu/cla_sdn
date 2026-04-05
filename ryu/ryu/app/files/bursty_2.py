@@ -53,7 +53,9 @@ def send_tcp(rate, duration):
             "-p", str(PORT),
             "-b", str(bitrate),
             "-t", str(duration)
-        ])
+        ], timeout=duration + 10)  # tambah buffer 10 detik
+    except subprocess.TimeoutExpired:
+        print(f"[TCP] ⚠️ iperf3 timeout (dur={duration}s), skipping")
     except Exception as e:
         print(f"[TCP] Error: {e}")
 
