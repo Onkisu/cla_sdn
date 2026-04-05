@@ -1,21 +1,116 @@
 #!/usr/bin/env python3
 """
-Burst Traffic Generator - Dataset 2
-Karakteristik berbeda dari Dataset 1:
-  - Pola asimetris: naik cepat, turun lambat
-  - Multi-peak dalam 1 siklus
-  - Idle bervariasi (bukan fixed)
-  - Siklus lebih pendek tapi lebih sering
+Burst Traffic Generator - Dataset 2 (Scheduled)
+Perubahan dari versi random:
+  - TIDAK random — pakai jadwal tetap (scheduled)
+  - 1 jam = 2–4 burst saja, tersebar merata
+  - Idle dihitung otomatis agar burst berikutnya tepat waktu
+  - Urutan siklus sudah ditentukan (deterministik)
 """
 import time
 import subprocess
 import json
-import random
 
 H3 = "h3"
 DST_IP = "10.0.0.2"
 PORT = 9001
 STATE_FILE = '/tmp/controller_state.json'
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  JADWAL BURST — offset dalam detik dari awal jam (00:00)
+#  Pilih salah satu pola, uncomment yang diinginkan
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Pola 2x per jam — burst di menit 5 dan 35
+# BURST_OFFSETS = [5*60, 35*60]
+
+# Pola 3x per jam — burst di menit 5, 25, 48
+# BURST_OFFSETS = [5*60, 25*60, 48*60]
+
+# Pola 4x per jam — burst di menit 2, 17, 35, 50
+BURST_OFFSETS = [2*60, 17*60, 35*60, 50*60]
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SIKLUS — urutan tetap, tidak diacak
+# ─────────────────────────────────────────────────────────────────────────────
+
+CYCLE_A = [
+    (800,  10),
+    (3500, 10),
+    (7200, 25),
+    (6800, 20),
+    (8500, 30),
+    (6000, 20),
+    (4200, 25),
+    (2800, 30),
+    (1500, 35),
+    (700,  40),
+    (300,  50),
+]
+
+CYCLE_B = [
+    (1200, 15),
+    (4500, 15),
+    (7800, 40),
+    (8200, 35),
+    (8000, 30),
+    (7500, 25),
+    (900,  10),
+    (2200, 20),
+    (1800, 25),
+    (600,  30),
+]
+
+CYCLE_C = [
+    (500,  15),
+    (3800, 20),
+    (2000, 15),
+    (6500, 25),
+    (3500, 15),
+    (5200, 20),
+    (2500, 20),
+    (1200, 30),
+    (400,  40),
+]
+
+CYCLE_D = [
+    (300,  30),
+    (600,  25),
+    (1100, 20),
+    (2000, 20),
+    (3500, 15),
+    (5500, 15),
+    (7800, 20),
+    (8800, 15),
+    (3000, 10),
+    (800,  10),
+    (250,  15),
+]
+
+CYCLE_E = [
+    (400,  20),
+    (8000, 12),
+    (500,  15),
+    (7500, 12),
+    (600,  15),
+    (6800, 15),
+    (1500, 20),
+    (500,  25),
+]
+
+ALL_CYCLES = [
+    ("A - FastRise DualPeak SlowFall", CYCLE_A),
+    ("B - Plateau SuddenDrop",         CYCLE_B),
+    ("C - TriplePeak Asymmetric",      CYCLE_C),
+    ("D - SlowRise FastFall",          CYCLE_D),
+    ("E - AggressiveSpike",            CYCLE_E),
+]
+
+def burst_duration(cycle):
+    """Hitung total durasi burst dalam detik."""
+    return sum(d for _, d in cycle)
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 def check_controller_state():
     try:
@@ -63,120 +158,71 @@ def run_bursts(burst_list, label=""):
         send_tcp(rate, duration)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SIKLUS — setiap siklus punya "bentuk" berbeda
-#  Dataset 1: 1 gunung simetris, idle 500 detik
-#  Dataset 2: multi-peak asimetris, idle variatif 60–200 detik
+#  SCHEDULER UTAMA
+#  Logika:
+#    1. Catat waktu mulai jam ini (epoch rounded ke jam)
+#    2. Hitung kapan setiap burst harus mulai (epoch absolut)
+#    3. Tidur sampai waktu burst berikutnya
+#    4. Jalankan burst, lalu tunggu burst berikutnya, dst.
+#    5. Di akhir jam, reset ke jam berikutnya
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Siklus A: Naik CEPAT → 2 peak → turun LAMBAT bertahap
-CYCLE_A = [
-    (800,  10),   # naik cepat
-    (3500, 10),
-    (7200, 25),   # peak 1
-    (6800, 20),
-    (8500, 30),   # peak 2 lebih tinggi
-    (6000, 20),   # turun lambat
-    (4200, 25),
-    (2800, 30),
-    (1500, 35),
-    (700,  40),
-    (300,  50),   # ekor panjang
-]
-
-# Siklus B: Plateau tinggi → drop tiba-tiba → recovery kecil
-CYCLE_B = [
-    (1200, 15),
-    (4500, 15),
-    (7800, 40),   # naik ke plateau
-    (8200, 35),
-    (8000, 30),   # plateau
-    (7500, 25),
-    (900,  10),   # drop tiba-tiba
-    (2200, 20),   # recovery kecil
-    (1800, 25),
-    (600,  30),
-]
-
-# Siklus C: 3 peak berbeda tinggi, tidak simetris
-CYCLE_C = [
-    (500,  15),
-    (3800, 20),   # peak 1 sedang
-    (2000, 15),   # valley
-    (6500, 25),   # peak 2 tinggi
-    (3500, 15),   # valley
-    (5200, 20),   # peak 3 medium
-    (2500, 20),
-    (1200, 30),
-    (400,  40),
-]
-
-# Siklus D: Naik LAMBAT → peak singkat → turun CEPAT
-CYCLE_D = [
-    (300,  30),
-    (600,  25),
-    (1100, 20),
-    (2000, 20),
-    (3500, 15),
-    (5500, 15),
-    (7800, 20),   # peak singkat
-    (8800, 15),
-    (3000, 10),   # turun cepat
-    (800,  10),
-    (250,  15),
-]
-
-# Siklus E: Double spike pendek-pendek (bursty agresif)
-CYCLE_E = [
-    (400,  20),
-    (8000, 12),   # spike 1 cepat
-    (500,  15),   # drop
-    (7500, 12),   # spike 2
-    (600,  15),   # drop
-    (6800, 15),   # spike 3 lebih lama
-    (1500, 20),
-    (500,  25),
-]
-
-ALL_CYCLES = [
-    ("A - FastRise DualPeak SlowFall", CYCLE_A),
-    ("B - Plateau SuddenDrop",         CYCLE_B),
-    ("C - TriplePeak Asymmetric",      CYCLE_C),
-    ("D - SlowRise FastFall",          CYCLE_D),
-    ("E - AggressiveSpike",            CYCLE_E),
-]
-
 if __name__ == "__main__":
-    print("[TCP] 🎯 Burst Generator Dataset 2 Started")
-    print("[TCP] Pola: multi-peak asimetris, idle variatif")
-    time.sleep(600)
+    print("[TCP] 🎯 Burst Generator Dataset 2 — SCHEDULED MODE")
+    print(f"[TCP] Jadwal burst per jam (offset): {[f'{o//60}m{o%60:02d}s' for o in BURST_OFFSETS]}")
+    print(f"[TCP] Total burst per jam: {len(BURST_OFFSETS)}x")
+    time.sleep(600)   # warm-up awal sama seperti versi asli
 
-    cycle_num = 0
+    global_cycle = 0   # indeks siklus — berurutan, tidak acak
+
     while True:
-        # Pilih siklus — tidak selalu urut, bisa acak
-        # Tapi tidak mengulang siklus yang sama 2x berturut-turut
-        prev = cycle_num % len(ALL_CYCLES)
-        choices = [i for i in range(len(ALL_CYCLES)) if i != prev]
-        idx = random.choice(choices)
-        cycle_num += 1
+        # ── Tentukan awal jam sekarang ──────────────────────────────────────
+        now = time.time()
+        hour_start = now - (now % 3600)   # epoch awal jam ini
 
-        label, bursts = ALL_CYCLES[idx]
         print(f"\n{'='*55}")
-        print(f"[TCP] 🔁 Cycle #{cycle_num} | {label}")
+        print(f"[TCP] 🕐 Jam baru mulai, {len(BURST_OFFSETS)} burst dijadwalkan")
         print(f"{'='*55}")
 
-        run_bursts(bursts, label=f"[{label}]")
+        for slot_idx, offset in enumerate(BURST_OFFSETS):
+            target_time = hour_start + offset
 
-        # Idle variatif — bukan fixed 500 detik
-        # Kadang pendek (recovery cepat), kadang panjang (network idle)
-        roll = random.random()
-        if roll < 0.30:
-            idle = random.randint(60, 100)    # 30% — idle pendek
-            print(f"[TCP] 💤 Short idle {idle}s")
-        elif roll < 0.75:
-            idle = random.randint(120, 180)   # 45% — idle medium
-            print(f"[TCP] 💤 Medium idle {idle}s")
-        else:
-            idle = random.randint(200, 300)   # 25% — idle panjang
-            print(f"[TCP] 💤 Long idle {idle}s")
+            # Hitung siklus yang akan dipakai (berurutan, wrap-around)
+            label, bursts = ALL_CYCLES[global_cycle % len(ALL_CYCLES)]
+            burst_dur = burst_duration(bursts)
 
-        time.sleep(idle)
+            # Pastikan burst selesai sebelum slot berikutnya
+            if slot_idx + 1 < len(BURST_OFFSETS):
+                next_offset = BURST_OFFSETS[slot_idx + 1]
+                gap = next_offset - offset
+                if burst_dur > gap * 0.85:
+                    print(f"[TCP] ⚠️  Burst terlalu panjang ({burst_dur}s) untuk gap {gap}s, dipangkas")
+                    # Pangkas ekor burst agar muat
+                    trimmed, total = [], 0
+                    for r, d in bursts:
+                        if total + d > gap * 0.80:
+                            break
+                        trimmed.append((r, d))
+                        total += d
+                    bursts = trimmed
+
+            # ── Tunggu sampai waktu burst ───────────────────────────────────
+            wait = target_time - time.time()
+            if wait > 0:
+                print(f"\n[TCP] ⏳ Slot {slot_idx+1}/{len(BURST_OFFSETS)} — "
+                      f"tunggu {wait:.0f}s → mulai jam+{offset//60}m{offset%60:02d}s")
+                time.sleep(wait)
+            else:
+                print(f"\n[TCP] ⚠️  Slot {slot_idx+1} terlambat {-wait:.0f}s, langsung jalan")
+
+            # ── Jalankan burst ──────────────────────────────────────────────
+            print(f"[TCP] 🔁 Cycle #{global_cycle+1} | {label}")
+            run_bursts(bursts, label=f"[{label}]")
+            global_cycle += 1
+
+        # ── Tunggu sampai awal jam berikutnya ──────────────────────────────
+        next_hour = hour_start + 3600
+        wait_next = next_hour - time.time()
+        if wait_next > 0:
+            print(f"\n[TCP] 💤 Selesai semua slot, tunggu {wait_next:.0f}s ke jam berikutnya")
+            time.sleep(wait_next)
