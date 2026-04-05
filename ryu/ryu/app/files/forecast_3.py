@@ -64,7 +64,7 @@ def get_data(hours: float = 6):
             SELECT
                 date_trunc('second', timestamp) AS ts,
                 MAX(bytes_tx) AS total_bytes
-            FROM traffic.flow_stats_
+            FROM traffic.flow_stats_1
             WHERE timestamp >= NOW() - INTERVAL '{hours} hours'
               AND dpid = 5
               AND bytes_tx > 0

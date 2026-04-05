@@ -338,7 +338,7 @@ class VoIPForecastController(app_manager.RyuApp):
                         date_trunc('second', timestamp) AS detik,
                         dpid,
                         sum(bytes_tx) AS total_bytes
-                    FROM traffic.flow_stats_
+                    FROM traffic.flow_stats_1
                     WHERE timestamp >= NOW() - INTERVAL '10 seconds'
                     GROUP BY detik, dpid
                 )
@@ -1172,7 +1172,7 @@ class VoIPForecastController(app_manager.RyuApp):
             
             cur = conn.cursor()
             cur.execute("""
-                INSERT INTO traffic.flow_stats_
+                INSERT INTO traffic.flow_stats_1
                 (timestamp, dpid, src_ip, dst_ip, src_mac, dst_mac,
                  ip_proto, tp_src, tp_dst, bytes_tx, bytes_rx,
                  pkts_tx, pkts_rx, duration_sec, traffic_label)
