@@ -239,7 +239,7 @@ if __name__ == "__main__":
     print("[TCP] Burst Generator Dataset 2 — SCHEDULED + SMOOTH BACKGROUND")
     print(f"[TCP] Jadwal: {[f'{o//60}m{o%60:02d}s' for o in BURST_OFFSETS]}")
     print("[TCP] Background: smooth 15-40 Mbps, segmen 60-120s")
-    time.sleep(600)
+    # Tidak ada warm-up — background langsung jalan
 
     global_cycle = 0
     bg_thread, bg_stop = None, None
@@ -247,6 +247,23 @@ if __name__ == "__main__":
     while True:
         now = time.time()
         hour_start = now - (now % 3600)
+
+        # Hitung slot burst berikutnya yang belum lewat
+        next_burst_time = None
+        for offset in BURST_OFFSETS:
+            t = hour_start + offset
+            if t > now + BG_STOP_PRE:
+                next_burst_time = t
+                break
+        # Kalau semua slot jam ini sudah lewat, pakai jam berikutnya
+        if next_burst_time is None:
+            next_burst_time = hour_start + 3600 + BURST_OFFSETS[0]
+
+        # Mulai background SEKARANG sampai BG_STOP_PRE sebelum burst pertama
+        bg_stop_at = next_burst_time - BG_STOP_PRE
+        if bg_stop_at - time.time() > BG_SEGMENT_MIN + 5:
+            print(f"[TCP] Background langsung dimulai, berhenti {BG_STOP_PRE}s sebelum burst pertama")
+            bg_thread, bg_stop = start_background(bg_stop_at)
 
         print(f"\n{'='*55}")
         print(f"[TCP] Jam baru — {len(BURST_OFFSETS)} burst dijadwalkan")
