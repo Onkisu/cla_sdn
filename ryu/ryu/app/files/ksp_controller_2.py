@@ -37,9 +37,9 @@ DB_CONFIG = {
 
 # Forecast Configuration
 FORECAST_CHECK_INTERVAL = 3         # Check forecast setiap 3 detik
-FORECAST_THRESHOLD_BPS = 15000000     # 15 mbps threshold untuk reroute
+FORECAST_THRESHOLD_BPS = 30000000     # 15 mbps threshold untuk reroute
 FORECAST_LEAD_TIME_SEC = 10         # Reroute 10 detik sebelum predicted congestion
-REVERT_THRESHOLD_BPS = 5000000        # Revert jika forecast < 5 mbps
+REVERT_THRESHOLD_BPS = 15000000        # Revert jika forecast < 5 mbps
 
 # Stability
 STABILITY_CYCLES_REQUIRED = 8      # Butuh 8 cycle stabil sebelum revert
