@@ -1,7 +1,4 @@
 #!/bin/bash
-"""
-Installation script for VoIP Simulation dependencies
-"""
 
 echo "================================================================"
 echo "      VoIP Simulation - Installation Script"
