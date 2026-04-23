@@ -400,11 +400,13 @@ class VoIPForecastController(app_manager.RyuApp):
            # Baris 400-406 — sama, harus difix juga
             mod = parser.OFPFlowMod(
                 datapath=dp,
-                command=ofproto.OFPFC_DELETE,      # ← harus STRICT
+                command=ofproto.OFPFC_DELETE_STRICT,   # ← ganti
+                priority=PRIORITY_REROUTE,              # ← tambah
+                cookie=COOKIE_REROUTE,                  # ← tambah
+                cookie_mask=0xFFFFFFFFFFFFFFFF,         # ← tambah
                 out_port=ofproto.OFPP_ANY,
                 out_group=ofproto.OFPG_ANY,
                 match=match
-                # ← tidak ada cookie & priority
             )
             
             dp.send_msg(mod)
