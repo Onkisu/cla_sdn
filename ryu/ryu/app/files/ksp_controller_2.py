@@ -397,12 +397,14 @@ class VoIPForecastController(app_manager.RyuApp):
                 udp_dst=9000
             )
             
+           # Baris 400-406 — sama, harus difix juga
             mod = parser.OFPFlowMod(
                 datapath=dp,
-                command=ofproto.OFPFC_DELETE,
+                command=ofproto.OFPFC_DELETE,      # ← harus STRICT
                 out_port=ofproto.OFPP_ANY,
                 out_group=ofproto.OFPG_ANY,
                 match=match
+                # ← tidak ada cookie & priority
             )
             
             dp.send_msg(mod)
@@ -442,7 +444,10 @@ class VoIPForecastController(app_manager.RyuApp):
             
             mod = parser.OFPFlowMod(
                 datapath=dp,
-                command=ofproto.OFPFC_DELETE,
+                command=ofproto.OFPFC_DELETE_STRICT,   # ← ganti ke STRICT
+                priority=PRIORITY_REROUTE,              # ← tambah priority 30000
+                cookie=COOKIE_REROUTE,                  # ← tambah 0xdeadbeef
+                cookie_mask=0xFFFFFFFFFFFFFFFF,         # ← mask penuh
                 out_port=ofproto.OFPP_ANY,
                 out_group=ofproto.OFPG_ANY,
                 match=match
@@ -751,6 +756,8 @@ class VoIPForecastController(app_manager.RyuApp):
             return
         
         # === H1->H2: Via Spine 2 (default, can be rerouted) ===
+        self._delete_all_h1_h2_flows()
+        hub.sleep(1)  # tunggu deletion propagate
         self._install_h1_h2_flow_on_spine(2)
         self._update_leaf1_output_port(2)
         self.logger.info("âœ… H1->H2 path: Leaf1 â†’ Spine2 â†’ Leaf2")
