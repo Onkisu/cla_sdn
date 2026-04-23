@@ -22,7 +22,7 @@ DB_URI                 = "postgresql://dev_one:hijack332.@127.0.0.1:5432/develop
 TABLE_FORECAST         = "forecast_1h"
 
 TARGET                 = "throughput_bps"
-BURST_THRESHOLD_BPS    = 30_000_000          # updated dari dev: 30 Mbps
+BURST_THRESHOLD_BPS    = 15_000_000          # updated dari dev: 30 Mbps
 PREDICTION_HORIZON_SEC = 10
 TRAIN_INTERVAL_SEC     = 1800
 LOOP_INTERVAL_SEC      = 5.0
