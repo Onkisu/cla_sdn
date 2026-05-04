@@ -429,8 +429,6 @@ class VoIPForecastController(app_manager.RyuApp):
         self.logger.info(f"ðŸ—‘ï¸ Complete: Deleted flows from {deleted_count} switches")
 
     def _delete_h1_h2_flows_on_spine(self, spine_dpid):
-        """Delete H1->H2 flows on SPECIFIC spine AND Leaf 1"""
-        # Delete from spine
         if spine_dpid in self.datapaths:
             dp = self.datapaths[spine_dpid]
             parser = dp.ofproto_parser
@@ -444,19 +442,30 @@ class VoIPForecastController(app_manager.RyuApp):
                 udp_dst=9000
             )
             
+            # Hapus flow priority 30000 (reroute flow)
             mod = parser.OFPFlowMod(
                 datapath=dp,
-                command=ofproto.OFPFC_DELETE_STRICT,   # ← ganti ke STRICT
-                priority=PRIORITY_REROUTE,              # ← tambah priority 30000
-                cookie=COOKIE_REROUTE,                  # ← tambah 0xdeadbeef
-                cookie_mask=0xFFFFFFFFFFFFFFFF,         # ← mask penuh
+                command=ofproto.OFPFC_DELETE_STRICT,
+                priority=PRIORITY_REROUTE,
+                cookie=COOKIE_REROUTE,
+                cookie_mask=0xFFFFFFFFFFFFFFFF,
                 out_port=ofproto.OFPP_ANY,
                 out_group=ofproto.OFPG_ANY,
                 match=match
             )
-            
             dp.send_msg(mod)
-            self.logger.info(f"ðŸ—‘ï¸ Deleted H1->H2 flows on Spine {spine_dpid}")
+            
+              # Hapus SEMUA flow H1->H2 di spine ini, apapun priority-nya
+            mod = parser.OFPFlowMod(
+                datapath=dp,
+                command=ofproto.OFPFC_DELETE,   # tanpa STRICT
+                cookie=0,
+                cookie_mask=0,                  # ignore cookie
+                out_port=ofproto.OFPP_ANY,
+                out_group=ofproto.OFPG_ANY,
+                match=match
+            )
+            dp.send_msg(mod)
         
         # CRITICAL: Also delete LOW PRIORITY flows from Leaf 1
         if 4 in self.datapaths:
