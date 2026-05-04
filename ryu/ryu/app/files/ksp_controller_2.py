@@ -375,10 +375,9 @@ class VoIPForecastController(app_manager.RyuApp):
         return min(available, key=lambda s: self.spine_traffic.get(s, 0))
     
     def _delete_all_h1_h2_flows(self):
-        """Delete ALL H1->H2 flows from ALL switches (for complete cleanup)"""
-        self.logger.info("ðŸ—‘ï¸ DELETING ALL H1->H2 flows from ALL switches...")
+        self.logger.info("🗑️ DELETING ALL H1->H2 flows from ALL switches...")
         
-        switches_to_clean = [1, 2, 3]
+        switches_to_clean = [1, 2, 3, 4, 5]
         deleted_count = 0
         
         for dpid in switches_to_clean:
@@ -397,26 +396,24 @@ class VoIPForecastController(app_manager.RyuApp):
                 udp_dst=9000
             )
             
-           # Baris 400-406 — sama, harus difix juga
+            # Hapus semua priority, semua cookie
             mod = parser.OFPFlowMod(
                 datapath=dp,
-                command=ofproto.OFPFC_DELETE_STRICT,   # ← ganti
-                priority=PRIORITY_REROUTE,              # ← tambah
-                cookie=COOKIE_REROUTE,                  # ← tambah
-                cookie_mask=0xFFFFFFFFFFFFFFFF,         # ← tambah
+                command=ofproto.OFPFC_DELETE,  # tanpa STRICT
+                cookie=0,
+                cookie_mask=0,
                 out_port=ofproto.OFPP_ANY,
                 out_group=ofproto.OFPG_ANY,
                 match=match
             )
-            
             dp.send_msg(mod)
             deleted_count += 1
-            self.logger.info(f"  âœ“ DPID {dpid}: Deleted H1->H2 flows")
+            self.logger.info(f"  ✔ DPID {dpid}: Deleted H1->H2 flows")
         
-        # Reset counters
+        # ✅ FIX: unpack 5 element, bukan 4
         keys_to_reset = []
         for key in list(self.last_bytes.keys()):
-            dpid, src_ip, dst_ip, udp_dst = key
+            dpid, src_ip, dst_ip, ip_proto, tp_dst = key  # ← fix di sini
             if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
                 keys_to_reset.append(key)
         
@@ -425,8 +422,8 @@ class VoIPForecastController(app_manager.RyuApp):
             self.last_bytes_timestamp.pop(key, None)
             self.last_packets.pop(key, None)
         
-        self.logger.info(f"  âœ“ Reset {len(keys_to_reset)} traffic counters")
-        self.logger.info(f"ðŸ—‘ï¸ Complete: Deleted flows from {deleted_count} switches")
+        self.logger.info(f"  ✔ Reset {len(keys_to_reset)} traffic counters")
+        self.logger.info(f"🗑️ Complete: Deleted flows from {deleted_count} switches")
 
     def _delete_h1_h2_flows_on_spine(self, spine_dpid):
         if spine_dpid in self.datapaths:
@@ -1363,7 +1360,7 @@ class VoIPForecastController(app_manager.RyuApp):
             if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
                 # CRITICAL: Skip flow installation during reroute
                 if self.reroute_stage in ['INSTALLING_NEW_PATH', 'TRAFFIC_SWITCHING', 'DELETING_OLD_FLOWS',
-                                        'REVERT_INSTALLING', 'REVERT_DELETING']:
+                                        'REVERT_INSTALLING', 'REVERT_DELETING','REVERT_DELETING_ALL']:
                     spine_to_port = {1: 1, 2: 2, 3: 3}
                     out_port = spine_to_port.get(self.current_spine, 2)
                     actions = [
