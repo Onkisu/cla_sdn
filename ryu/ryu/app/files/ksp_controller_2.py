@@ -378,7 +378,7 @@ class VoIPForecastController(app_manager.RyuApp):
         """Delete ALL H1->H2 flows from ALL switches (for complete cleanup)"""
         self.logger.info("ðŸ—‘ï¸ DELETING ALL H1->H2 flows from ALL switches...")
         
-        switches_to_clean = [1, 2, 3, 4, 5]
+        switches_to_clean = [1, 2, 3]
         deleted_count = 0
         
         for dpid in switches_to_clean:
