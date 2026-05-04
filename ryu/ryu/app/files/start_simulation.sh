@@ -22,7 +22,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Check if Ryu venv exists
-RYU_VENV="/home/takemi/ryu-env"
+RYU_VENV="/home/takemi/ryu-env39"
 
 if [ ! -d "$RYU_VENV" ]; then
     echo -e "${RED}Error: Ryu virtual environment not found at $RYU_VENV${NC}"
