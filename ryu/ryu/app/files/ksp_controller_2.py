@@ -513,7 +513,7 @@ class VoIPForecastController(app_manager.RyuApp):
         )
         
         actions = [
-            parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
+            #parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
             parser.OFPActionOutput(out_port)
         ]
 
@@ -557,7 +557,7 @@ class VoIPForecastController(app_manager.RyuApp):
         )
         
         actions = [
-            parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
+            #parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
             parser.OFPActionOutput(out_port)
         ]
 
@@ -1364,7 +1364,7 @@ class VoIPForecastController(app_manager.RyuApp):
                     spine_to_port = {1: 1, 2: 2, 3: 3}
                     out_port = spine_to_port.get(self.current_spine, 2)
                     actions = [
-                        parser.OFPActionSetQueue(1),
+                        #parser.OFPActionSetQueue(1),
                         parser.OFPActionOutput(out_port)
                     ]
                     data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
@@ -1380,7 +1380,7 @@ class VoIPForecastController(app_manager.RyuApp):
                 out_port = spine_to_port.get(self.current_spine, 2)
                 
                 actions = [
-                    parser.OFPActionSetQueue(1),
+                    #parser.OFPActionSetQueue(1),
                     parser.OFPActionOutput(out_port)
                 ]
                 
@@ -1581,7 +1581,7 @@ class VoIPForecastController(app_manager.RyuApp):
                 actions.append(parser.OFPActionOutput(ofproto.OFPP_FLOOD))
         else:
             actions = [
-                parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
+                #parser.OFPActionSetQueue(1),   # queue 1 = VoIP high priority
                 parser.OFPActionOutput(out_port)
             ]
 

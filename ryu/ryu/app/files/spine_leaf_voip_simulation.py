@@ -261,9 +261,13 @@ def keep_steady_traffic(h1_name, h2_name, dst_ip):
                 continue
 
             # ── Parameter sesi ───────────────────────────────────────────────
-            base_rate    = 50
-            current_rate = max(30, base_rate + random.randint(-10, 15))
-            packet_size  = random.randint(140, 200)
+            # base_rate    = 50
+            # current_rate = max(30, base_rate + random.randint(-10, 15))
+            # packet_size  = random.randint(140, 200)
+
+            base_rate    = 150   # atau 200 kalau mau lebih brutal
+            current_rate = max(80, base_rate + random.randint(-20, 30))
+            packet_size  = random.randint(200, 300)
             duration     = STEADY_DURATION_MS + random.randint(-5000, 5000)
 
             # Silence simulasi
