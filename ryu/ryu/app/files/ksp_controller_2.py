@@ -124,7 +124,8 @@ class VoIPForecastController(app_manager.RyuApp):
         # Threads
         self.monitor_thread = hub.spawn(self._monitor_traffic)
         hub.spawn_after(15, self._start_forecast)  # Tunggu lebih lama, pastikan default flows selesai
-        self.topology_thread = hub.spawn(self._discover_topology)
+        # self.topology_thread = hub.spawn(self._discover_topology)
+        hub.spawn_after(3, self._discover_topology)
         
         self.logger.info("ðŸŸ¢ VoIP Forecast Controller Started")
         self.logger.info("ðŸ“Š Forecast source: forecast_1h.y_pred (DPID 5)")
@@ -367,11 +368,20 @@ class VoIPForecastController(app_manager.RyuApp):
         # FAIL-SAFE: Kalau error/null, anggap MACET (999999) biar GAK REVERT.
         return None  
     
-    def _get_alternative_spine(self, avoid_spine): 
-        """Get alternative spine (avoiding current one)"""
+    # def _get_alternative_spine(self, avoid_spine): 
+    #     """Get alternative spine (avoiding current one)"""
+    #     available = [1, 2, 3]
+    #     available.remove(avoid_spine)
+    #     # Choose spine with lowest traffic
+    #     return min(available, key=lambda s: self.spine_traffic.get(s, 0))
+
+    def _get_alternative_spine(self, avoid_spine):
+        spine = self._get_best_path_spine(avoid_spine=avoid_spine)
+        if spine:
+            return spine
+        # Fallback ke logic lama kalau topology belum ready
         available = [1, 2, 3]
         available.remove(avoid_spine)
-        # Choose spine with lowest traffic
         return min(available, key=lambda s: self.spine_traffic.get(s, 0))
     
     def _delete_all_h1_h2_flows(self):
@@ -533,6 +543,28 @@ class VoIPForecastController(app_manager.RyuApp):
         self.logger.info(f"âœ… Spine {spine_dpid}: Installed H1->H2 flow (port {out_port})")
         return True
     
+
+
+    def _get_k_shortest_paths(self, src_dpid, dst_dpid, k=3):
+        try:
+            paths = list(nx.shortest_simple_paths(self.net, src_dpid, dst_dpid))
+            return paths[:k]
+        except nx.NetworkXNoPath:
+            return []
+
+    def _get_best_path_spine(self, avoid_spine=None):
+        """Pilih spine terbaik dari KSP Leaf1(4) -> Leaf2(5)"""
+        paths = self._get_k_shortest_paths(4, 5, k=3)
+        self.logger.info(f"🗺️ KSP paths found: {paths}")
+        
+        for path in paths:
+            # Path bentuknya: [4, spine_dpid, 5]
+            if len(path) == 3:
+                spine = path[1]
+                if spine != avoid_spine:
+                    return spine
+        
+        return None  # fallback
     
     def _update_leaf1_output_port(self, target_spine):
         """Update Leaf 1 to forward H1->H2 to target spine"""
