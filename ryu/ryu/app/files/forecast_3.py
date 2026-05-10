@@ -13,6 +13,8 @@ from sqlalchemy import create_engine
 from datetime import timedelta
 import time
 import warnings
+import optuna
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
@@ -147,12 +149,68 @@ def create_features(df, for_training=False):
     return data
 
 
+
+#TUNING HYPERPARAMETER DENGAN OPTUNA 
+def objective(trial):
+    df = get_data(12)
+    if df is None or len(df) < 2000:
+        raise optuna.exceptions.TrialPruned()
+    
+    df_train = create_features(df, True)
+    X = df_train[FEATURES]
+    y = df_train['target_future']
+    
+    val_size = int(len(X) * 0.1)
+    X_tr, X_val = X.iloc[:-val_size], X.iloc[-val_size:]
+    y_tr, y_val = y.iloc[:-val_size], y.iloc[-val_size:]
+    
+    params = {
+        'n_estimators':      1000,
+        'max_depth':         trial.suggest_int('max_depth', 3, 8),
+        'learning_rate':     trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+        'subsample':         trial.suggest_float('subsample', 0.6, 1.0),
+        'colsample_bytree':  trial.suggest_float('colsample_bytree', 0.5, 1.0),
+        'min_child_weight':  trial.suggest_int('min_child_weight', 1, 20),
+        'gamma':             trial.suggest_float('gamma', 0.0, 2.0),
+        'reg_alpha':         trial.suggest_float('reg_alpha', 0.0, 1.0),
+        'reg_lambda':        trial.suggest_float('reg_lambda', 0.5, 3.0),
+        'early_stopping_rounds': 40,
+        'objective': 'reg:squarederror',
+        'n_jobs': -1,
+        'random_state': 42,
+    }
+    
+    model = xgb.XGBRegressor(**params)
+    model.fit(
+        X_tr, y_tr,
+        eval_set=[(X_val, y_val)],
+        verbose=False
+    )
+    
+    pred = model.predict(X_val)
+    rmse = np.sqrt(np.mean((pred - y_val.values) ** 2))
+    return rmse
+
+
+def run_tuning(n_trials=50):
+    print(f"\n🔍 Starting Optuna tuning ({n_trials} trials)...")
+    
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    
+    print(f"\n✅ Best RMSE: {study.best_value:,.0f} bps")
+    print(f"✅ Best params: {study.best_params}")
+    
+    return study.best_params
+
 # ==============================================================================
 # TRAIN MODEL — UPDATED hyperparameter + early stopping dari forecast_development
 # ==============================================================================
-def train_model():
 
-    global TRAINED_MODEL, LAST_TRAIN_TIME
+BEST_PARAMS = None  # tambah di global, sejajar dengan TRAINED_MODEL dan LAST_TRAIN_TIME
+
+def train_model(use_best_params=True):
+    global TRAINED_MODEL, LAST_TRAIN_TIME, BEST_PARAMS
 
     print("\nTraining model...")
 
@@ -167,29 +225,29 @@ def train_model():
     X = df_train[FEATURES]
     y = df_train['target_future']
 
-    # split 10% akhir untuk validasi / early stopping
     val_size = int(len(df_train) * 0.1)
     X_tr, X_val = X.iloc[:-val_size], X.iloc[-val_size:]
     y_tr, y_val = y.iloc[:-val_size], y.iloc[-val_size:]
 
+    # Pakai best params kalau sudah ada, fallback ke default kalau belum
+    params = BEST_PARAMS if (use_best_params and BEST_PARAMS) else {
+        'max_depth': 5,
+        'learning_rate': 0.04,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'min_child_weight': 5,
+        'gamma': 0.5,
+        'reg_alpha': 0.05,
+        'reg_lambda': 1.0,
+    }
+
     model = xgb.XGBRegressor(
         n_estimators=1000,
-        max_depth=5,
-        learning_rate=0.04,
-
-        subsample=0.8,
-        colsample_bytree=0.8,
-
-        min_child_weight=5,
-        gamma=0.5,
-        reg_alpha=0.05,
-        reg_lambda=1.0,
-
         early_stopping_rounds=40,
-
-        objective="reg:squarederror",
+        objective='reg:squarederror',
         n_jobs=-1,
-        random_state=42
+        random_state=42,
+        **params  # unpack params di sini
     )
 
     model.fit(
@@ -202,6 +260,7 @@ def train_model():
     LAST_TRAIN_TIME = time.time()
 
     print(f"Training complete: {len(X_tr):,} samples | Best round: {model.best_iteration}")
+    print(f"Params used: {'OPTUNA best' if (use_best_params and BEST_PARAMS) else 'DEFAULT'}")
 
 
 # ==============================================================================
@@ -253,11 +312,26 @@ if __name__ == "__main__":
 
     print("Forecaster started")
 
+    # Tunggu data cukup dulu sebelum tuning
+    print("⏳ Waiting for enough data before tuning...")
     while True:
+        df = get_data(12)
+        count = len(df) if df is not None else 0
+        print(f"  Data: {count}/2000 rows")
+        if count >= 2000:
+            break
+        time.sleep(30)
 
-        if TRAINED_MODEL is None or time.time() - LAST_TRAIN_TIME > TRAIN_INTERVAL_SEC:
-            train_model()
+    # Tuning sekali di awal
+    BEST_PARAMS = run_tuning(n_trials=50)
+
+    # Training pertama pakai best params
+    train_model()
+
+    # Loop prediksi
+    while True:
+        if time.time() - LAST_TRAIN_TIME > TRAIN_INTERVAL_SEC:
+            train_model()  # retrain pakai best params yang sama, tidak tuning ulang
 
         run_prediction()
-
         time.sleep(LOOP_INTERVAL_SEC)
