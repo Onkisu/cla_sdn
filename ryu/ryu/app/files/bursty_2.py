@@ -142,7 +142,7 @@ def send_tcp_once(rate, duration):
         subprocess.run([
             "mnexec", "-a", h3_pid,
             "iperf3", "-c", DST_IP, "-p", str(PORT),
-            "-P", "20",
+            # "-P", "20",
             "-t", str(duration),
             "-b", str(rate * 1400 * 8), 
         ], timeout=duration + 5)
