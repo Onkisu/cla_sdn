@@ -26,8 +26,10 @@ BURST_OFFSETS = [2*60, 17*60, 35*60, 50*60]
 # Background config — smooth & stabil
 BG_SEGMENT_MIN = 60    # detik per segmen (lebih panjang = lebih smooth)
 BG_SEGMENT_MAX = 120
-BG_RATE_MIN    = 1340  # ~15 Mbps
-BG_RATE_MAX    = 3571  # ~40 Mbps
+# BG_RATE_MIN    = 1340  # ~15 Mbps
+# BG_RATE_MAX    = 3571  # ~40 Mbps
+BG_RATE_MIN = 300   # ~3 Mbps
+BG_RATE_MAX = 800   # ~9 Mbps
 BG_RAMP_STEP   = 3     # detik per ramp step (transisi antar rate)
 BG_STOP_PRE    = 15    # berhenti N detik sebelum burst
 
