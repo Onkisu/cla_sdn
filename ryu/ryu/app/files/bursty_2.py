@@ -252,7 +252,7 @@ if __name__ == "__main__":
 
         # Hitung slot burst berikutnya yang belum lewat
         next_burst_time = None
-        for offset in BURST_OFFSETS:
+        for offset in BURST_OFFSETS:    
             t = hour_start + offset
             if t > now + BG_STOP_PRE:
                 next_burst_time = t

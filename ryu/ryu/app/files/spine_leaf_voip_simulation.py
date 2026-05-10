@@ -353,7 +353,7 @@ def run():
         for s in spines:
             # net.addLink(l, s, bw=30, delay='1ms', max_queue_size=10, use_htb=True)
             # net.addLink(l, s, delay='1ms', max_queue_size=5)
-            net.addLink(l, s, bw=50, delay='1ms', max_queue_size=5, use_htb=True)
+            net.addLink(l, s, bw=100, delay='1ms', max_queue_size=5, use_htb=True)
 
     h1 = net.addHost('h1', ip='10.0.0.1/24')
     h2 = net.addHost('h2', ip='10.0.0.2/24')
