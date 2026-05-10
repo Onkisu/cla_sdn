@@ -265,8 +265,8 @@ def keep_steady_traffic(h1_name, h2_name, dst_ip):
             # current_rate = max(30, base_rate + random.randint(-10, 15))
             # packet_size  = random.randint(140, 200)
 
-            base_rate    = 150   # atau 200 kalau mau lebih brutal
-            current_rate = max(80, base_rate + random.randint(-20, 30))
+            base_rate    = 500   # atau 200 kalau mau lebih brutal
+            current_rate = max(300, base_rate + random.randint(-50, 100))
             packet_size  = random.randint(200, 300)
             duration     = STEADY_DURATION_MS + random.randint(-5000, 5000)
 
@@ -353,7 +353,7 @@ def run():
         for s in spines:
             # net.addLink(l, s, bw=30, delay='1ms', max_queue_size=10, use_htb=True)
             # net.addLink(l, s, delay='1ms', max_queue_size=5)
-            net.addLink(l, s, bw=30, delay='1ms', max_queue_size=50, use_htb=True)
+            net.addLink(l, s, bw=20, delay='10ms', max_queue_size=20, use_htb=True)
 
     h1 = net.addHost('h1', ip='10.0.0.1/24')
     h2 = net.addHost('h2', ip='10.0.0.2/24')
