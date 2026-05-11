@@ -42,7 +42,7 @@ def send_tcp(rate, duration):
         subprocess.run([
             "mnexec", "-a", h3_pid,
             "iperf3", "-c", DST_IP, "-p", str(PORT),
-            "-P 4",
+            "-P 3",
             "-b", str(bitrate), "-u","-t", str(duration), "-l", "1400"
         ], timeout=duration + 5)
     except Exception as e:
