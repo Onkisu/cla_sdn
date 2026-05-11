@@ -359,9 +359,9 @@ def run():
     h2 = net.addHost('h2', ip='10.0.0.2/24')
     h3 = net.addHost('h3', ip='10.0.0.3/24')
 
-    net.addLink(h1, leaves[0], bw=400, delay='1ms', max_queue_size=40000)
-    net.addLink(h2, leaves[1], bw=400, delay='1ms', max_queue_size=40000)
-    net.addLink(h3, leaves[2], bw=400, delay='1ms', max_queue_size=40000)
+    net.addLink(h1, leaves[0], bw=400, delay='1ms', max_queue_size=200)
+    net.addLink(h2, leaves[1], bw=400, delay='1ms', max_queue_size=200)
+    net.addLink(h3, leaves[2], bw=400, delay='1ms', max_queue_size=200)
 
     net.start()
 
