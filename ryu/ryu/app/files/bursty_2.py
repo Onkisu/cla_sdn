@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """
-Burst Traffic Generator - Dataset 2 (Scheduled + Background Traffic)
-v3 fixes:
-  - Background lebih smooth: rate berubah LAMBAT (segmen panjang 60-120s)
-  - Transisi background naik/turun gradual (ramp), bukan loncat
-  - Durasi tiap step burst dipanjangin 2x
-  - Burst peak lebih lama dan dominan
+Burst Traffic Generator - UDP FLOOD (No Congestion Control)
+============================================================
+KENAPA UDP, BUKAN TCP:
+- TCP punya congestion control (CUBIC/BBR) → dia BACK OFF sendiri saat congestion
+  → hasilnya throttled, bukan real packet loss
+- UDP TIDAK peduli congestion → terus kirim paksa → buffer penuh → REAL PACKET DROP
+- Ini yang bikin VoIP (juga UDP) benar-benar experience loss & delay tinggi
+
+CARA KERJA:
+- Burst pakai iperf3 UDP (-u) dengan bandwidth target jauh di atas link capacity
+- Multi-stream (-P) untuk saturate lebih agresif
+- Background juga UDP (lebih stabil, tidak interfere dengan VoIP testing)
+
+PENTING:
+- Di topology, pastikan link spine-leaf TIDAK ada bw= limit DAN max_queue_size kecil
+  (lihat komentar di bawah tentang patch topology)
+- Atau jalankan patch_queue.sh sebelum simulasi untuk shrink queue OVS
 """
+
 import time
 import subprocess
 import json
@@ -18,87 +30,98 @@ DST_IP = "10.0.0.2"
 PORT = 9001
 STATE_FILE = '/tmp/controller_state.json'
 
-# Jadwal burst
-# BURST_OFFSETS = [5*60, 35*60]
-# BURST_OFFSETS = [5*60, 25*60, 48*60]
+# ─── PATCH HELPER ────────────────────────────────────────────────────────────
+# Sebelum burst: shrink TX queue interface agar packet drop lebih cepat terjadi
+# (kalau queue besar, packet cuma di-buffer → delay, bukan drop)
+SPINE_LEAF_IFACES = [
+    # Format: (host_namespace, interface_name)
+    # Sesuaikan dengan interface yang dipakai di topologi lo
+    # Kosongkan list ini kalau tidak mau patch otomatis
+]
+
+# ─── JADWAL BURST ────────────────────────────────────────────────────────────
 BURST_OFFSETS = [2*60, 17*60, 35*60, 50*60]
 
-# Background config — smooth & stabil
-BG_SEGMENT_MIN = 60    # detik per segmen (lebih panjang = lebih smooth)
+# ─── BACKGROUND CONFIG ───────────────────────────────────────────────────────
+BG_SEGMENT_MIN = 60
 BG_SEGMENT_MAX = 120
-# BG_RATE_MIN    = 1340  # ~15 Mbps
-# BG_RATE_MAX    = 3571  # ~40 Mbps
-BG_RATE_MIN = 300   # ~3 Mbps
-BG_RATE_MAX = 800   # ~9 Mbps
-BG_RAMP_STEP   = 3     # detik per ramp step (transisi antar rate)
-BG_STOP_PRE    = 15    # berhenti N detik sebelum burst
+BG_RATE_MBPS_MIN = 3     # Mbps
+BG_RATE_MBPS_MAX = 9     # Mbps
+BG_RAMP_STEP    = 3      # detik per ramp step
+BG_STOP_PRE     = 15     # berhenti N detik sebelum burst
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SIKLUS BURST — durasi dipanjangin 2x biar lebih dominan di grafik
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── SIKLUS BURST (dalam Mbps) ───────────────────────────────────────────────
+# Rate dalam Mbps — sengaja di atas link capacity supaya BUFFER OVERFLOW
+# Link spine-leaf lo tidak punya bw= limit → physical bottleneck ada di NIC virtual
+# Tapi queue kecil (max_queue_size rendah) → drop terjadi saat buffer full
 
+# Profil A: FastRise DualPeak SlowFall
 CYCLE_A = [
-    (800,  20),
-    (3500, 25),
-    (7200, 50),   # peak 1
-    (6800, 45),
-    (8500, 60),   # peak 2 (lebih tinggi, lebih lama)
-    (6000, 45),
-    (4200, 50),
-    (2800, 55),
-    (1500, 60),
-    (700,  70),
-    (300,  80),   # ekor panjang
+    (30,  20),   # warm up — sudah mulai saturasi
+    (80,  25),
+    (150, 50),   # peak 1 — way above link capacity → CONGESTION
+    (130, 45),
+    (180, 60),   # peak 2 — lebih tinggi, buffer meluap
+    (120, 45),
+    (90,  50),
+    (60,  55),
+    (35,  60),
+    (15,  70),
+    (8,   80),
 ]
 
+# Profil B: Plateau SuddenDrop
 CYCLE_B = [
-    (1200, 30),
-    (4500, 30),
-    (7800, 75),   # naik ke plateau
-    (8200, 70),
-    (8000, 65),   # plateau panjang
-    (7500, 55),
-    (900,  20),   # drop tiba-tiba
-    (2200, 40),
-    (1800, 45),
-    (600,  50),
+    (40,  30),
+    (100, 30),
+    (160, 75),   # naik ke plateau → heavy congestion
+    (170, 70),
+    (165, 65),   # plateau panjang
+    (155, 55),
+    (20,  20),   # drop tiba-tiba
+    (50,  40),
+    (40,  45),
+    (12,  50),
 ]
 
+# Profil C: TriplePeak Asymmetric
 CYCLE_C = [
-    (500,  30),
-    (3800, 45),   # peak 1
-    (2000, 30),
-    (6500, 55),   # peak 2 tinggi
-    (3500, 35),
-    (5200, 45),   # peak 3
-    (2500, 45),
-    (1200, 55),
-    (400,  65),
+    (12,  30),
+    (90,  45),   # peak 1
+    (45,  30),
+    (140, 55),   # peak 2 tinggi → congestion berat
+    (80,  35),
+    (110, 45),   # peak 3
+    (55,  45),
+    (25,  55),
+    (8,   65),
 ]
 
+# Profil D: SlowRise FastFall
 CYCLE_D = [
-    (300,  55),
-    (600,  50),
-    (1100, 45),
-    (2000, 40),
-    (3500, 35),
-    (5500, 30),
-    (7800, 45),   # peak
-    (8800, 35),
-    (3000, 20),
-    (800,  20),
-    (250,  25),
+    (8,   55),
+    (15,  50),
+    (25,  45),
+    (45,  40),
+    (80,  35),
+    (120, 30),
+    (170, 45),   # peak → congestion ekstrem
+    (185, 35),
+    (65,  20),
+    (18,  20),
+    (6,   25),
 ]
 
+# Profil E: AggressiveSpike (paling brutal — spike mendadak)
 CYCLE_E = [
-    (400,  40),
-    (8000, 30),   # spike 1
-    (500,  30),
-    (7500, 30),   # spike 2
-    (600,  30),
-    (6800, 35),   # spike 3
-    (1500, 40),
-    (500,  45),
+    (10,  40),
+    (200, 30),   # spike 1 → instant congestion
+    (12,  30),
+    (190, 30),   # spike 2
+    (15,  30),
+    (175, 35),   # spike 3
+    (35,  40),
+    (12,  45),
 ]
 
 ALL_CYCLES = [
@@ -112,7 +135,7 @@ ALL_CYCLES = [
 def burst_duration(cycle):
     return sum(d for _, d in cycle)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── STATE CHECK ──────────────────────────────────────────────────────────────
 
 def check_controller_state():
     try:
@@ -120,8 +143,8 @@ def check_controller_state():
             state = json.load(f)
         current_state = state.get('state', 'IDLE')
         transition_states = [
-            'DELETING_ALL_FLOWS','WAITING_SETTLE','INSTALLING_NEW_PATH',
-            'REVERT_DELETING','REVERT_SETTLE','REVERT_INSTALLING'
+            'DELETING_ALL_FLOWS', 'WAITING_SETTLE', 'INSTALLING_NEW_PATH',
+            'REVERT_DELETING', 'REVERT_SETTLE', 'REVERT_INSTALLING'
         ]
         if current_state in transition_states:
             print(f"[BURST] Controller in {current_state}")
@@ -130,60 +153,91 @@ def check_controller_state():
             print("[BURST] Reroute active, waiting 3s...")
             time.sleep(3)
         return True
-    except:
+    except Exception:
         return True
 
 def get_h3_pid():
     return subprocess.check_output(["pgrep", "-n", "-f", H3]).decode().strip()
 
-def send_tcp_once(rate, duration):
+# ─── UDP FLOOD (Core Function) ────────────────────────────────────────────────
+
+def send_udp_flood(rate_mbps, duration, parallel=4):
+    """
+    Kirim UDP flood dengan iperf3 -u.
+    
+    KENAPA INI BEKERJA (tidak throttle):
+    - iperf3 -u: UDP mode, TIDAK ada congestion control
+    - iperf3 akan kirim sebesar -b yang diminta, tidak peduli loss
+    - Kalau link tidak kuat → router drop → VoIP juga kena drop
+    - Parallel streams (-P) untuk saturasi lebih agresif
+    
+    PENTING: rate_mbps SENGAJA jauh di atas kapasitas link spine-leaf
+    supaya queue overflow → real packet loss.
+    """
     try:
         h3_pid = get_h3_pid()
+        bw_bps = int(rate_mbps * 1_000_000)
+        
+        print(f"[UDP] Sending {rate_mbps} Mbps UDP flood x{parallel} streams for {duration}s")
+        
         subprocess.run([
             "mnexec", "-a", h3_pid,
-            "iperf3", "-c", DST_IP, "-p", str(PORT),
-            "-P", "3",
-            # "-P", "20",
+            "iperf3",
+            "-c", DST_IP,
+            "-p", str(PORT),
+            "-u",                          # ← UDP mode! tidak ada congestion control
+            "-b", str(bw_bps),             # target bandwidth (akan dicoba terus walau loss)
+            "-P", str(parallel),           # parallel streams → lebih agresif
             "-t", str(duration),
-            "-b", str(rate * 1400 * 8), 
-        ], timeout=duration + 5)
+            "--length", "1400",            # ukuran paket besar → lebih efisien saturasi
+        ], timeout=duration + 10)
+    except subprocess.TimeoutExpired:
+        print(f"[UDP] Timeout (normal jika burst selesai)")
     except Exception as e:
-        print(f"[TCP] Error: {e}")
+        print(f"[UDP] Error: {e}")
 
 def run_bursts(burst_list, label=""):
-    for rate, duration in burst_list:
+    for rate_mbps, duration in burst_list:
         if not check_controller_state():
             time.sleep(5)
             continue
-        mbps = rate * 1400 * 8 / 1e6
-        tag = "PEAK" if rate >= 6000 else ("MID" if rate >= 2000 else "LOW")
-        print(f"[TCP] {tag:4s} {label} {mbps:.1f} Mbps  {duration}s")
-        send_tcp_once(rate, duration)
+        
+        tag = "PEAK" if rate_mbps >= 100 else ("MID" if rate_mbps >= 40 else "LOW")
+        print(f"[UDP] {tag:4s} {label} {rate_mbps} Mbps  {duration}s")
+        
+        # Parallel streams: lebih tinggi rate → lebih banyak stream untuk saturasi
+        parallel = 6 if rate_mbps >= 100 else (4 if rate_mbps >= 40 else 2)
+        send_udp_flood(rate_mbps, duration, parallel=parallel)
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  BACKGROUND — smooth ramp antar segmen, bukan loncat tiba-tiba
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── BACKGROUND (juga UDP, lebih ringan) ─────────────────────────────────────
 
-def ramp_send(h3_pid, from_rate, to_rate, steps=5):
-    """Kirim beberapa segmen pendek untuk transisi halus antar rate."""
-    if from_rate == to_rate or steps <= 1:
+def send_bg_udp(h3_pid, rate_mbps, duration):
+    """Background traffic: UDP tapi rate rendah (tidak dimaksudkan untuk congestion)."""
+    try:
+        bw_bps = int(rate_mbps * 1_000_000)
+        subprocess.run([
+            "mnexec", "-a", h3_pid,
+            "iperf3", "-c", DST_IP, "-p", str(PORT),
+            "-u",
+            "-b", str(bw_bps),
+            "-P", "1",
+            "-t", str(duration),
+        ], timeout=duration + 5)
+    except Exception:
+        pass
+
+def ramp_send(h3_pid, from_mbps, to_mbps, steps=5):
+    if from_mbps == to_mbps or steps <= 1:
         return
     for i in range(1, steps):
-        if abs(to_rate - from_rate) < 100:
+        if abs(to_mbps - from_mbps) < 1:
             break
-        r = int(from_rate + (to_rate - from_rate) * i / steps)
-        try:
-            subprocess.run([
-                "mnexec", "-a", h3_pid,
-                "iperf3", "-c", DST_IP, "-p", str(PORT),
-                "-b", str(r * 1400 * 8), "-t", str(BG_RAMP_STEP)
-            ], timeout=BG_RAMP_STEP + 3)
-        except:
-            pass
+        r = from_mbps + (to_mbps - from_mbps) * i / steps
+        send_bg_udp(h3_pid, r, BG_RAMP_STEP)
 
 def background_worker(stop_event, stop_at):
-    print(f"[BG] Background traffic dimulai (smooth 15-40 Mbps)")
-    prev_rate = random.randint(BG_RATE_MIN, BG_RATE_MAX)
+    print(f"[BG] UDP background traffic dimulai ({BG_RATE_MBPS_MIN}-{BG_RATE_MBPS_MAX} Mbps)")
+    prev_rate = random.uniform(BG_RATE_MBPS_MIN, BG_RATE_MBPS_MAX)
 
     while not stop_event.is_set():
         now = time.time()
@@ -196,28 +250,19 @@ def background_worker(stop_event, stop_at):
         if seg <= BG_RAMP_STEP * 2:
             break
 
-        # Rate baru tidak terlalu jauh dari sebelumnya (max ±30%)
-        delta = int((BG_RATE_MAX - BG_RATE_MIN) * 0.30)
-        lo = max(BG_RATE_MIN, prev_rate - delta)
-        hi = min(BG_RATE_MAX, prev_rate + delta)
-        new_rate = random.randint(lo, hi)
+        delta = (BG_RATE_MBPS_MAX - BG_RATE_MBPS_MIN) * 0.30
+        lo = max(BG_RATE_MBPS_MIN, prev_rate - delta)
+        hi = min(BG_RATE_MBPS_MAX, prev_rate + delta)
+        new_rate = random.uniform(lo, hi)
 
-        mbps_prev = prev_rate * 1400 * 8 / 1e6
-        mbps_new  = new_rate  * 1400 * 8 / 1e6
-        print(f"[BG] {mbps_prev:.1f} -> {mbps_new:.1f} Mbps  seg={seg}s")
+        print(f"[BG] {prev_rate:.1f} -> {new_rate:.1f} Mbps  seg={seg}s")
 
         try:
             h3_pid = get_h3_pid()
-            # Ramp transisi
             ramp_send(h3_pid, prev_rate, new_rate)
-            # Segmen utama (sisa setelah ramp)
             main_dur = seg - BG_RAMP_STEP * 4
             if main_dur > 5:
-                subprocess.run([
-                    "mnexec", "-a", h3_pid,
-                    "iperf3", "-c", DST_IP, "-p", str(PORT),
-                    "-b", str(new_rate * 1400 * 8), "-t", str(main_dur)
-                ], timeout=main_dur + 5)
+                send_bg_udp(h3_pid, new_rate, main_dur)
         except Exception as e:
             print(f"[BG] Error: {e}")
             time.sleep(3)
@@ -236,15 +281,19 @@ def stop_background(t, stop_event):
     stop_event.set()
     t.join(timeout=BG_SEGMENT_MAX + 15)
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SCHEDULER UTAMA
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── MAIN SCHEDULER ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("[TCP] Burst Generator Dataset 2 — SCHEDULED + SMOOTH BACKGROUND")
-    print(f"[TCP] Jadwal: {[f'{o//60}m{o%60:02d}s' for o in BURST_OFFSETS]}")
-    print("[TCP] Background: smooth 15-40 Mbps, segmen 60-120s")
-    # Tidak ada warm-up — background langsung jalan
+    print("[UDP] Burst Generator — UDP FLOOD MODE (Real Congestion, No Throttle)")
+    print(f"[UDP] Jadwal: {[f'{o//60}m{o%60:02d}s' for o in BURST_OFFSETS]}")
+    print("[UDP] Mode: iperf3 UDP (-u), tidak ada congestion control → real packet loss")
+    print()
+    print("[UDP] CATATAN PENTING:")
+    print("      Pastikan di spine_leaf_voip_simulation.py:")
+    print("      - Link spine-leaf: max_queue_size=8 (atau lebih kecil)")
+    print("      - TIDAK ada bw= limit di link spine-leaf")
+    print("      Ini yang bikin buffer overflow → real drop (bukan shape/throttle)")
+    print()
 
     global_cycle = 0
     bg_thread, bg_stop = None, None
@@ -253,25 +302,22 @@ if __name__ == "__main__":
         now = time.time()
         hour_start = now - (now % 3600)
 
-        # Hitung slot burst berikutnya yang belum lewat
         next_burst_time = None
-        for offset in BURST_OFFSETS:    
+        for offset in BURST_OFFSETS:
             t = hour_start + offset
             if t > now + BG_STOP_PRE:
                 next_burst_time = t
                 break
-        # Kalau semua slot jam ini sudah lewat, pakai jam berikutnya
         if next_burst_time is None:
             next_burst_time = hour_start + 3600 + BURST_OFFSETS[0]
 
-        # Mulai background SEKARANG sampai BG_STOP_PRE sebelum burst pertama
         bg_stop_at = next_burst_time - BG_STOP_PRE
         if bg_stop_at - time.time() > BG_SEGMENT_MIN + 5:
-            print(f"[TCP] Background langsung dimulai, berhenti {BG_STOP_PRE}s sebelum burst pertama")
+            print(f"[UDP] Background langsung dimulai, berhenti {BG_STOP_PRE}s sebelum burst pertama")
             bg_thread, bg_stop = start_background(bg_stop_at)
 
         print(f"\n{'='*55}")
-        print(f"[TCP] Jam baru — {len(BURST_OFFSETS)} burst dijadwalkan")
+        print(f"[UDP] Jam baru — {len(BURST_OFFSETS)} burst dijadwalkan")
         print(f"{'='*55}")
 
         for slot_idx, offset in enumerate(BURST_OFFSETS):
@@ -279,7 +325,6 @@ if __name__ == "__main__":
             label, bursts = ALL_CYCLES[global_cycle % len(ALL_CYCLES)]
             burst_dur = burst_duration(bursts)
 
-            # Pangkas burst kalau tidak muat
             if slot_idx + 1 < len(BURST_OFFSETS):
                 gap = BURST_OFFSETS[slot_idx + 1] - offset
                 if burst_dur > gap * 0.85:
@@ -290,39 +335,34 @@ if __name__ == "__main__":
                         trimmed.append((r, d))
                         total += d
                     bursts = trimmed
-                    print(f"[TCP] Burst dipangkas agar muat dalam gap {gap}s")
+                    print(f"[UDP] Burst dipangkas agar muat dalam gap {gap}s")
 
-            # Mulai background sampai BG_STOP_PRE detik sebelum burst
             bg_stop_at = target_time - BG_STOP_PRE
             if bg_stop_at - time.time() > BG_SEGMENT_MIN + 10:
                 if bg_thread and bg_thread.is_alive():
                     stop_background(bg_thread, bg_stop)
                 bg_thread, bg_stop = start_background(bg_stop_at)
 
-            # Tunggu sampai waktu burst
             wait = target_time - time.time()
             if wait > 0:
-                print(f"\n[TCP] Slot {slot_idx+1}/{len(BURST_OFFSETS)} — "
+                print(f"\n[UDP] Slot {slot_idx+1}/{len(BURST_OFFSETS)} — "
                       f"burst +{offset//60}m{offset%60:02d}s (tunggu {wait:.0f}s)")
                 time.sleep(wait)
             else:
-                print(f"\n[TCP] Slot {slot_idx+1} terlambat {-wait:.0f}s")
+                print(f"\n[UDP] Slot {slot_idx+1} terlambat {-wait:.0f}s")
 
-            # Stop background sebelum burst
             if bg_thread and bg_thread.is_alive():
                 stop_background(bg_thread, bg_stop)
                 bg_thread, bg_stop = None, None
 
-            # Jalankan burst
-            print(f"[TCP] === Cycle #{global_cycle+1} | {label} | {burst_dur}s total ===")
+            print(f"[UDP] === Cycle #{global_cycle+1} | {label} | {burst_dur}s total ===")
             run_bursts(bursts, label=f"[{label}]")
             global_cycle += 1
 
-        # Background sampai akhir jam
         next_hour = hour_start + 3600
         bg_stop_at = next_hour - BG_STOP_PRE
         if bg_stop_at - time.time() > BG_SEGMENT_MIN + 10:
-            print(f"\n[TCP] Background traffic sampai akhir jam")
+            print(f"\n[UDP] Background traffic sampai akhir jam")
             if bg_thread and bg_thread.is_alive():
                 stop_background(bg_thread, bg_stop)
             bg_thread, bg_stop = start_background(bg_stop_at)
