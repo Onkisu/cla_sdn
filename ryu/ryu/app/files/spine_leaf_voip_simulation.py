@@ -360,8 +360,8 @@ def run():
     h3 = net.addHost('h3', ip='10.0.0.3/24')
 
     net.addLink(h1, leaves[0], bw=100, delay='1ms')
-    net.addLink(h2, leaves[1], bw=100, delay='1ms')
-    net.addLink(h3, leaves[2], bw=50, delay='1ms')
+    net.addLink(h2, leaves[1], bw=300, delay='1ms')
+    net.addLink(h3, leaves[2], bw=100, delay='1ms')
 
     net.start()
 
