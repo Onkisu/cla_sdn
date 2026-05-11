@@ -60,56 +60,97 @@ BG_STOP_PRE     = 15     # berhenti N detik sebelum burst
 # - Grafik harusnya: _____/\___________/\___________/\______
 #                         burst  idle       burst  idle
 
-# Profil A: Single burst 2 menit, idle panjang
+# Profil A: Ramp up pelan, plateau dengan noise, drop cepat
 CYCLE_A = [
     (0,   300),  # idle 5 menit
-    (150, 30),   # naik
-    (180, 60),   # peak
-    (160, 50),   # sustain
-    (150, 40),   # turun pelan
-    (0,   300),  # idle 5 menit
-]
-
-# Profil B: Burst 3 menit, idle sangat panjang
-CYCLE_B = [
+    (40,  20),   # ramp up mulai
+    (90,  20),
+    (140, 25),
+    (170, 30),   # mendekati peak
+    (185, 40),   # peak dengan sedikit variasi
+    (175, 25),
+    (190, 35),   # naik lagi (noise)
+    (165, 20),
+    (180, 30),
+    (160, 25),   # mulai turun
+    (120, 20),   # ramp down
+    (70,  15),
+    (30,  15),
     (0,   360),  # idle 6 menit
-    (200, 40),   # langsung tinggi
-    (180, 60),   # sustain
-    (200, 50),   # naik lagi
-    (160, 30),   # turun
+]
+
+# Profil B: Langsung agresif, plateau panjang bergelombang, turun bertahap
+CYCLE_B = [
+    (0,   420),  # idle 7 menit
+    (60,  15),   # ramp up cepat
+    (130, 15),
+    (190, 35),   # peak
+    (175, 30),   # noise turun
+    (195, 40),   # balik naik
+    (180, 35),
+    (170, 30),   # mulai ramp down
+    (130, 20),
+    (80,  20),
+    (40,  15),
     (0,   300),  # idle 5 menit
 ]
 
-# Profil C: Dua burst, masing2 ~2 menit, idle panjang di antara
+# Profil C: Dua burst berbeda karakter, idle panjang di antara
 CYCLE_C = [
     (0,   300),  # idle 5 menit
-    (160, 40),   # burst 1 naik
-    (190, 50),   # burst 1 peak
-    (160, 30),   # burst 1 turun
+    (50,  20),   # burst 1 ramp up
+    (110, 20),
+    (160, 30),
+    (175, 35),   # burst 1 peak
+    (155, 25),
+    (170, 30),
+    (100, 20),   # ramp down burst 1
+    (50,  15),
     (0,   360),  # idle 6 menit
-    (180, 40),   # burst 2
-    (200, 50),   # burst 2 peak
-    (170, 30),   # burst 2 turun
+    (80,  15),   # burst 2 ramp up lebih cepat
+    (150, 20),
+    (195, 45),   # burst 2 peak lebih tinggi & lama
+    (185, 35),
+    (200, 40),   # noise naik
+    (170, 25),
+    (120, 20),   # ramp down
+    (60,  15),
     (0,   300),  # idle 5 menit
 ]
 
-# Profil D: Burst naik pelan 4 menit, idle panjang
+# Profil D: Slow build sangat pelan, peak lama, turun cepat
 CYCLE_D = [
-    (0,   420),  # idle 7 menit
-    (80,  40),   # naik pelan
-    (120, 40),
-    (160, 40),
-    (190, 50),   # peak
-    (200, 50),   # sustain peak
+    (0,   480),  # idle 8 menit
+    (20,  25),   # ramp up sangat pelan
+    (40,  25),
+    (70,  25),
+    (100, 25),
+    (130, 25),
+    (155, 30),
+    (175, 35),   # peak
+    (185, 40),
+    (180, 35),   # plateau bergelombang
+    (190, 30),
+    (175, 25),
+    (80,  15),   # drop cepat
+    (30,  10),
     (0,   300),  # idle 5 menit
 ]
 
-# Profil E: Burst pendek 2 menit, idle sangat panjang
+# Profil E: Spiky — naik turun tidak beraturan selama burst
 CYCLE_E = [
-    (0,   480),  # idle 8 menit
-    (200, 50),   # langsung spike tinggi
-    (190, 40),   # sustain
-    (180, 30),   # turun
+    (0,   360),  # idle 6 menit
+    (70,  15),   # ramp up
+    (160, 20),
+    (120, 15),   # dip
+    (190, 25),   # spike
+    (140, 20),   # dip lagi
+    (200, 30),   # peak tertinggi
+    (160, 25),
+    (185, 20),   # naik lagi
+    (130, 20),
+    (80,  15),   # ramp down
+    (40,  15),
     (0,   420),  # idle 7 menit
 ]
 
