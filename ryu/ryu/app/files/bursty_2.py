@@ -51,77 +51,66 @@ BG_RAMP_STEP    = 3      # detik per ramp step
 BG_STOP_PRE     = 15     # berhenti N detik sebelum burst
 
 # ─── SIKLUS BURST (dalam Mbps) ───────────────────────────────────────────────
-# Rate dalam Mbps — sengaja di atas link capacity supaya BUFFER OVERFLOW
-# Link spine-leaf lo tidak punya bw= limit → physical bottleneck ada di NIC virtual
-# Tapi queue kecil (max_queue_size rendah) → drop terjadi saat buffer full
+# Format: (rate_mbps, durasi_detik)
+# rate=0 → IDLE murni (time.sleep), tidak ada iperf3 sama sekali
+#
+# FILOSOFI:
+# - Burst harus PENDEK (10-20 detik) dan TINGGI (>>50 Mbps)
+# - Idle harus PANJANG (60-120 detik) dan benar-benar 0
+# - Grafik harusnya: _____/\___________/\___________/\______
+#                         burst  idle       burst  idle
 
-# Profil A: FastRise DualPeak SlowFall
+# Profil A: Single burst 2 menit, idle panjang
 CYCLE_A = [
-    (30,  20),   # warm up — sudah mulai saturasi
-    (80,  25),
-    (150, 50),   # peak 1 — way above link capacity → CONGESTION
-    (130, 45),
-    (180, 60),   # peak 2 — lebih tinggi, buffer meluap
-    (120, 45),
-    (90,  50),
-    (60,  55),
-    (35,  60),
-    (15,  70),
-    (8,   80),
+    (0,   300),  # idle 5 menit
+    (150, 30),   # naik
+    (180, 60),   # peak
+    (160, 50),   # sustain
+    (150, 40),   # turun pelan
+    (0,   300),  # idle 5 menit
 ]
 
-# Profil B: Plateau SuddenDrop
+# Profil B: Burst 3 menit, idle sangat panjang
 CYCLE_B = [
-    (40,  30),
-    (100, 30),
-    (160, 75),   # naik ke plateau → heavy congestion
-    (170, 70),
-    (165, 65),   # plateau panjang
-    (155, 55),
-    (20,  20),   # drop tiba-tiba
-    (50,  40),
-    (40,  45),
-    (12,  50),
+    (0,   360),  # idle 6 menit
+    (200, 40),   # langsung tinggi
+    (180, 60),   # sustain
+    (200, 50),   # naik lagi
+    (160, 30),   # turun
+    (0,   300),  # idle 5 menit
 ]
 
-# Profil C: TriplePeak Asymmetric
+# Profil C: Dua burst, masing2 ~2 menit, idle panjang di antara
 CYCLE_C = [
-    (12,  30),
-    (90,  45),   # peak 1
-    (45,  30),
-    (140, 55),   # peak 2 tinggi → congestion berat
-    (80,  35),
-    (110, 45),   # peak 3
-    (55,  45),
-    (25,  55),
-    (8,   65),
+    (0,   300),  # idle 5 menit
+    (160, 40),   # burst 1 naik
+    (190, 50),   # burst 1 peak
+    (160, 30),   # burst 1 turun
+    (0,   360),  # idle 6 menit
+    (180, 40),   # burst 2
+    (200, 50),   # burst 2 peak
+    (170, 30),   # burst 2 turun
+    (0,   300),  # idle 5 menit
 ]
 
-# Profil D: SlowRise FastFall
+# Profil D: Burst naik pelan 4 menit, idle panjang
 CYCLE_D = [
-    (8,   55),
-    (15,  50),
-    (25,  45),
-    (45,  40),
-    (80,  35),
-    (120, 30),
-    (170, 45),   # peak → congestion ekstrem
-    (185, 35),
-    (65,  20),
-    (18,  20),
-    (6,   25),
+    (0,   420),  # idle 7 menit
+    (80,  40),   # naik pelan
+    (120, 40),
+    (160, 40),
+    (190, 50),   # peak
+    (200, 50),   # sustain peak
+    (0,   300),  # idle 5 menit
 ]
 
-# Profil E: AggressiveSpike (paling brutal — spike mendadak)
+# Profil E: Burst pendek 2 menit, idle sangat panjang
 CYCLE_E = [
-    (10,  40),
-    (200, 30),   # spike 1 → instant congestion
-    (12,  30),
-    (190, 30),   # spike 2
-    (15,  30),
-    (175, 35),   # spike 3
-    (35,  40),
-    (12,  45),
+    (0,   480),  # idle 8 menit
+    (200, 50),   # langsung spike tinggi
+    (190, 40),   # sustain
+    (180, 30),   # turun
+    (0,   420),  # idle 7 menit
 ]
 
 ALL_CYCLES = [
@@ -198,13 +187,19 @@ def send_udp_flood(rate_mbps, duration, parallel=4):
 
 def run_bursts(burst_list, label=""):
     for rate_mbps, duration in burst_list:
+        # rate=0 → IDLE MURNI, tidak ada iperf3, tidak ada traffic dari H3
+        if rate_mbps == 0:
+            print(f"[UDP] IDLE  {duration}s — no burst, background takes over")
+            time.sleep(duration)
+            continue
+
         if not check_controller_state():
             time.sleep(5)
             continue
-        
+
         tag = "PEAK" if rate_mbps >= 100 else ("MID" if rate_mbps >= 40 else "LOW")
         print(f"[UDP] {tag:4s} {label} {rate_mbps} Mbps  {duration}s")
-        
+
         # Parallel streams: lebih tinggi rate → lebih banyak stream untuk saturasi
         parallel = 6 if rate_mbps >= 100 else (4 if rate_mbps >= 40 else 2)
         send_udp_flood(rate_mbps, duration, parallel=parallel)
