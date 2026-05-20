@@ -357,6 +357,10 @@ def run_topology():
     net.waitConnected(timeout=30)
     info("All switches connected\n")
 
+    time.sleep(3)
+    net.pingAll()
+    time.sleep(2)
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def run():
     # STEP 0: bersihkan state lama sebelum apapun
@@ -364,9 +368,7 @@ def run():
 
     run_topology()
 
-    time.sleep(3)
-    net.pingAll()
-    time.sleep(2)
+
 
     # STEP 2: start iperf3 server di h2 via host.cmd() — AMAN karena di main thread
     h2.cmd("iperf3 -s -p 9001 -D")
