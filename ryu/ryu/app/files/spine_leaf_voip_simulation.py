@@ -137,7 +137,7 @@ def save_itg_session_to_db(log_file):
     try:
         result = subprocess.check_output(["ITGDec", log_file], text=True)
     except Exception as e:
-        info(f"!!! ITGDec failed: {e}\n")
+        info(f"ITGDec failed: {e}\n")
         return
 
     data = {}
@@ -162,7 +162,7 @@ def save_itg_session_to_db(log_file):
         elif "Average packet rate" in line: data["pps"]       = float(line.split("=")[1].split()[0])
 
     if "total_packets" not in data:
-        info(f"!!! No flow from 10.0.0.1 in {log_file}, skipping DB save\n")
+        info(f"No flow from 10.0.0.1 in {log_file}, skipping DB save\n")
         return
 
     data["loss"] = (
@@ -224,28 +224,24 @@ def iperf3_watchdog(h2_name, ports=(9001, 9003), interval=10):
 
 # ─── Traffic loop — sepenuhnya via mnexec, ZERO host.cmd() ───────────────────
 def keep_steady_traffic(h1_name, h2_name, dst_ip):
-    """
-    VoIP steady traffic h1 → h2.
-    Semua command via mnexec dari subprocess biasa.
-    Tidak ada host.cmd(), tidak ada race condition.
-    """
+  
     for i in itertools.count(1):
         try:
             session_ts = int(time.time())
             logfile    = f"/tmp/recv_steady_{session_ts}.log"
 
-            info(f"*** [SESSION {i}] Starting ITGRecv -> {logfile}\n")
+            info(f"[SESSION {i}] Starting ITGRecv -> {logfile}\n")
 
-            # ── Teardown sisa sesi sebelumnya ────────────────────────────────
+            
             pkill_in_host(h1_name, "ITGSend")
             pkill_in_host(h2_name, "ITGRecv")
             time.sleep(1.0)
 
-            # ── Start ITGRecv di h2 ──────────────────────────────────────────
+           
             mnexec_run(h2_name, ["ITGRecv", "-l", logfile], background=True)
             time.sleep(1.5)
 
-            # ── Verifikasi ITGRecv jalan ─────────────────────────────────────
+            # ── Verifikasi ─────────────────────────────────────
             recv_ready = False
             for _ in range(10):
                 result = mnexec_run(h2_name, ["pgrep", "-f", "ITGRecv"], timeout=3)
@@ -256,30 +252,27 @@ def keep_steady_traffic(h1_name, h2_name, dst_ip):
                 time.sleep(0.5)
 
             if not recv_ready:
-                info("!!! ITGRecv failed to start — skipping session\n")
+                info("ITGRecv failed to start — skipping session\n")
                 time.sleep(RESTART_DELAY)
                 continue
 
-            # ── Parameter sesi ───────────────────────────────────────────────
-            # base_rate    = 50
-            # current_rate = max(30, base_rate + random.randint(-10, 15))
-            # packet_size  = random.randint(140, 200)
+          
 
-            base_rate    = 500   # atau 200 kalau mau lebih brutal
+            base_rate    = 500   
             current_rate = max(300, base_rate + random.randint(-50, 100))
             packet_size  = random.randint(200, 300)
             duration     = STEADY_DURATION_MS + random.randint(-5000, 5000)
 
-            # Silence simulasi
+           
             if random.random() < 0.25:
                 silence = random.uniform(0.5, 2.0)
-                info(f"*** Simulating silence {silence:.2f}s\n")
+                info(f"Simulating silence {silence:.2f}s\n")
                 time.sleep(silence)
 
             # Micro-burst sesekali (blocking 3s, tidak perlu lock)
             if random.random() < 0.15:
                 burst_rate = random.randint(80, 120)
-                info(f"*** Micro burst at {burst_rate} pps\n")
+                info(f"Micro burst at {burst_rate} pps\n")
                 mnexec_run(
                     h1_name,
                     ["ITGSend", "-T", "UDP", "-a", dst_ip,
@@ -288,13 +281,13 @@ def keep_steady_traffic(h1_name, h2_name, dst_ip):
                     timeout=6
                 )
 
-            info(f"*** Starting VoIP: {current_rate} pps | {packet_size} B\n")
+            info(f"Starting VoIP: {current_rate} pps | {packet_size} B\n")
 
             tcp_rate     = 260 + random.randint(-20, 20)
             tcp_pkt_size = 1200
             tcp_duration = STEADY_DURATION_MS
 
-            # ── Launch ITGSend (background) ──────────────────────────────────
+            #  ITGSend (background) ──────────────────────────────────
             mnexec_run(
                 h1_name,
                 ["ITGSend", "-T", "UDP", "-a", dst_ip,
@@ -304,7 +297,7 @@ def keep_steady_traffic(h1_name, h2_name, dst_ip):
                 background=True
             )
 
-            # ── Launch iperf3 background TCP (background) ────────────────────
+            #  iperf3 background TCP (background) ────────────────────
             mnexec_run(
                 h1_name,
                 ["iperf3", "-c", dst_ip, "-p", "9003",
@@ -315,7 +308,7 @@ def keep_steady_traffic(h1_name, h2_name, dst_ip):
 
             # ── Tunggu sesi selesai ──────────────────────────────────────────
             wait_sec = max(duration, tcp_duration) / 1000
-            info(f"*** Waiting {wait_sec:.0f}s for session to complete\n")
+            info(f"Waiting {wait_sec:.0f}s for session to complete\n")
             time.sleep(wait_sec)
 
             # ── Simpan ke DB ─────────────────────────────────────────────────
@@ -324,15 +317,11 @@ def keep_steady_traffic(h1_name, h2_name, dst_ip):
             time.sleep(RESTART_DELAY)
 
         except Exception as e:
-            info(f"*** [SESSION {i}] Error (retrying): {type(e).__name__}: {e}\n")
+            info(f"[SESSION {i}] Error (retrying): {type(e).__name__}: {e}\n")
             time.sleep(RESTART_DELAY * 2)
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
-def run():
-    # STEP 0: bersihkan state lama sebelum apapun
-    pre_cleanup()
 
-    info("*** Starting Spine-Leaf Topology\n")
+def run_topology():
 
     net = Mininet(
         controller=RemoteController,
@@ -351,8 +340,6 @@ def run():
 
     for l in leaves:
         for s in spines:
-            # net.addLink(l, s, bw=30, delay='1ms', max_queue_size=10, use_htb=True)
-            # net.addLink(l, s, delay='1ms', max_queue_size=5)
             net.addLink(l, s, bw=40, delay='2ms', max_queue_size=30, use_htb=True)
 
     h1 = net.addHost('h1', ip='10.0.0.1/24')
@@ -365,10 +352,17 @@ def run():
 
     net.start()
 
-    # STEP 1: tunggu semua switch benar-benar connected ke controller
-    info("*** Waiting for switches to connect...\n")
+# ─── Main ─────────────────────────────────────────────────────────────────────
+def run():
+    # STEP 0: bersihkan state lama sebelum apapun
+    pre_cleanup()
+
+    run_topology()
+
+    # tunggu semua switch benar-benar connected ke controller
+    info("Waiting for switches to connect...\n")
     net.waitConnected(timeout=30)
-    info("*** All switches connected\n")
+    info("All switches connected\n")
 
     time.sleep(3)
     net.pingAll()

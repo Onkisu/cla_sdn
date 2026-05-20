@@ -187,10 +187,7 @@ class VoIPForecastController(app_manager.RyuApp):
     # =================================================================
     
     def _get_latest_forecast(self):
-        """
-        Get latest forecast from forecast_1h table
-        Returns: predicted throughput (bps) for DPID 5
-        """
+     
         conn = self.get_db_connection()
         if not conn:
             return None
@@ -198,7 +195,6 @@ class VoIPForecastController(app_manager.RyuApp):
         try:
             cur = conn.cursor()
             
-            # Get latest forecast for DPID 5 (Leaf 2 - where H2 is connected)
             cur.execute("""
                 SELECT y_pred, ts_created
                 FROM forecast_1h
@@ -225,22 +221,20 @@ class VoIPForecastController(app_manager.RyuApp):
             return None
             
         except Exception as e:
-            self.logger.error(f"âŒ Forecast query error: {e}")
+            self.logger.error(f"Forecast query error: {e}")
             return None
         finally:
             self.return_db_connection(conn)
     
 
     def _forecast_monitor(self):
-        """
-        Monitor forecast and trigger proactive rerouting
-        """
+       
         while True:
             hub.sleep(FORECAST_CHECK_INTERVAL)
             
             try:
                 with self.lock:
-                    # Skip if not in stable state
+                    
                     if self.reroute_stage not in ['IDLE', 'ACTIVE_REROUTE']:
                         continue
                     
@@ -254,7 +248,7 @@ class VoIPForecastController(app_manager.RyuApp):
                     
                     # Only use recent forecasts (< 60 seconds old)
                     if forecast_age > 60:
-                        self.logger.debug(f"â° Forecast too old ({forecast_age:.0f}s), skipping")
+                        self.logger.debug(f"Forecast too old ({forecast_age:.0f}s), skipping")
                         continue
                     
                     self.last_forecast_value = predicted_bps
@@ -264,7 +258,7 @@ class VoIPForecastController(app_manager.RyuApp):
                     if int(time.time()) % 10 == 0:  # Every 10 seconds
                         self.logger.info(f"ðŸ“Š Forecast: {predicted_bps:.0f} bps (age: {forecast_age:.1f}s)")
                     
-                    # === TRIGGER PROACTIVE REROUTE ===
+                    # TRIGGER PROACTIVE REROUTE 
                     if ( self.reroute_stage == 'IDLE' and
                         predicted_bps > FORECAST_THRESHOLD_BPS and
                         time.time() - self.last_revert_time > REVERT_COOLDOWN_SEC):
@@ -285,8 +279,8 @@ class VoIPForecastController(app_manager.RyuApp):
                             self.logger.error("âŒ Proactive reroute failed")
                             self.reroute_stage = 'IDLE'
                     
-                    # === TRIGGER REVERT ===
-                    # === TRIGGER REVERT (DENGAN CEK SPINE 2) ===
+                   
+                    #  TRIGGER REVERT (DENGAN CEK SPINE 2) 
                     elif (self.congestion_active and 
                           self.reroute_stage == 'ACTIVE_REROUTE' and
                           predicted_bps < REVERT_THRESHOLD_BPS):
@@ -297,8 +291,7 @@ class VoIPForecastController(app_manager.RyuApp):
                         if self.stability_counter >= STABILITY_CYCLES_REQUIRED:
                     
                           
-                            # spine2_load = self.get_spine2_load() or 999999  # â† tambah ini
-                            # self.logger.info(f"âœ… Forecast & Spine 2 ({spine2_load:.0f} bps) stable. Reverting...")
+                        
                             self.logger.info(f"âœ… Forecast stable. Reverting...")
                             self.stats['forecast_revert'] += 1
                             success = self._atomic_revert_to_original_spine()
@@ -385,7 +378,7 @@ class VoIPForecastController(app_manager.RyuApp):
         return min(available, key=lambda s: self.spine_traffic.get(s, 0))
     
     def _delete_all_h1_h2_flows(self):
-        self.logger.info("🗑️ DELETING ALL H1->H2 flows from ALL switches...")
+        self.logger.info("DELETING ALL H1->H2 flows from ALL switches")
         
         switches_to_clean = [1, 2, 3, 4, 5]
         deleted_count = 0
@@ -420,10 +413,10 @@ class VoIPForecastController(app_manager.RyuApp):
             deleted_count += 1
             self.logger.info(f"  ✔ DPID {dpid}: Deleted H1->H2 flows")
         
-        # ✅ FIX: unpack 5 element, bukan 4
+       
         keys_to_reset = []
         for key in list(self.last_bytes.keys()):
-            dpid, src_ip, dst_ip, ip_proto, tp_dst = key  # ← fix di sini
+            dpid, src_ip, dst_ip, ip_proto, tp_dst = key  
             if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2':
                 keys_to_reset.append(key)
         
@@ -432,8 +425,8 @@ class VoIPForecastController(app_manager.RyuApp):
             self.last_bytes_timestamp.pop(key, None)
             self.last_packets.pop(key, None)
         
-        self.logger.info(f"  ✔ Reset {len(keys_to_reset)} traffic counters")
-        self.logger.info(f"🗑️ Complete: Deleted flows from {deleted_count} switches")
+        self.logger.info(f"Reset {len(keys_to_reset)} traffic counters")
+        self.logger.info(f"Complete: Deleted flows from {deleted_count} switches")
 
     def _delete_h1_h2_flows_on_spine(self, spine_dpid):
         if spine_dpid in self.datapaths:
@@ -474,7 +467,7 @@ class VoIPForecastController(app_manager.RyuApp):
             )
             dp.send_msg(mod)
         
-        # CRITICAL: Also delete LOW PRIORITY flows from Leaf 1
+        # Also delete LOW PRIORITY flows from Leaf 1
         if 4 in self.datapaths:
             dp = self.datapaths[4]
             parser = dp.ofproto_parser
@@ -499,12 +492,12 @@ class VoIPForecastController(app_manager.RyuApp):
             )
             
             dp.send_msg(mod)
-            self.logger.info(f"ðŸ—‘ï¸ Deleted low-priority H1->H2 flows on Leaf 1")
+            self.logger.info(f"Deleted low-priority H1->H2 flows on Leaf 1")
     
     def _install_h1_h2_flow_on_spine(self, spine_dpid):
         """Install H1->H2 flow on specified spine"""
         if spine_dpid not in self.datapaths:
-            self.logger.warning(f"âš ï¸ Spine {spine_dpid} not available")
+            self.logger.warning(f"Spine {spine_dpid} not available")
             return False
         
         dp = self.datapaths[spine_dpid]
@@ -564,12 +557,12 @@ class VoIPForecastController(app_manager.RyuApp):
                 if spine != avoid_spine:
                     return spine
         
-        return None  # fallback
+        return None  
     
     def _update_leaf1_output_port(self, target_spine):
         """Update Leaf 1 to forward H1->H2 to target spine"""
         if 4 not in self.datapaths:
-            self.logger.warning("âš ï¸ Leaf 1 (DPID 4) not available")
+            self.logger.warning("Leaf 1 (DPID 4) not available")
             return False
         
         dp = self.datapaths[4]
@@ -606,14 +599,12 @@ class VoIPForecastController(app_manager.RyuApp):
         )
         
         dp.send_msg(mod)
-        self.logger.info(f"âœ… Leaf 1: Routing H1->H2 via Spine {target_spine} (port {out_port})")
+        self.logger.info(f"Leaf 1: Routing H1->H2 via Spine {target_spine} (port {out_port})")
         return True
 
     def _atomic_reroute_to_spine(self, target_spine):
-        """
-        MAKE-BEFORE-BREAK REROUTE: Zero packet loss
-        
-        Steps:
+        """  
+        Step2:
         1. Install NEW flows on target spine
         2. Update Leaf 1 routing
         3. Brief overlap (0.5s)
@@ -621,7 +612,7 @@ class VoIPForecastController(app_manager.RyuApp):
         """
         old_spine = self.current_spine
         
-        self.logger.info(f"ðŸ”„ MAKE-BEFORE-BREAK REROUTE: Spine {old_spine} â†’ Spine {target_spine}")
+        self.logger.info(f"REROUTE: Spine {old_spine}  Spine {target_spine}")
         
         # STEP 1: Install NEW path first
         self.reroute_stage = 'INSTALLING_NEW_PATH'
@@ -633,18 +624,18 @@ class VoIPForecastController(app_manager.RyuApp):
         
         success = self._install_h1_h2_flow_on_spine(target_spine)
         if not success:
-            self.logger.error("âŒ Failed to install on new spine")
+            self.logger.error("Failed to install on new spine")
             self.reroute_stage = 'IDLE'
             return False
         
         success = self._update_leaf1_output_port(target_spine)
         if not success:
-            self.logger.error("âŒ Failed to update Leaf 1")
+            self.logger.error("Failed to update Leaf 1")
             self.reroute_stage = 'IDLE'
             return False
 
         hub.sleep(0.1)
-        self.logger.info("âœ… New path installed")
+        self.logger.info("New path installed")
         
         # STEP 2: Brief overlap to allow traffic to switch
         self.reroute_stage = 'TRAFFIC_SWITCHING'
@@ -655,7 +646,7 @@ class VoIPForecastController(app_manager.RyuApp):
             'new_spine': target_spine
         })
         
-        self.logger.info("â³ Waiting 0.5s for traffic to switch...")
+        self.logger.info("Waiting 0.5s for traffic to switch...")
         hub.sleep(0.05)
         
         # STEP 3: Delete OLD flows
@@ -668,7 +659,7 @@ class VoIPForecastController(app_manager.RyuApp):
         
         self._delete_h1_h2_flows_on_spine(old_spine)
         
-        self.logger.info("â³ Waiting 0.3s for deletion to propagate...")
+        self.logger.info("Waiting 0.3s for deletion to propagate...")
         hub.sleep(0.05)
         
         # STEP 4: Complete
@@ -685,7 +676,7 @@ class VoIPForecastController(app_manager.RyuApp):
             'original_spine': self.original_spine
         })
         
-        self.logger.info(f"âœ… REROUTE COMPLETE: H1->H2 now via Spine {target_spine} (make-before-break)")
+        self.logger.info(f"REROUTE COMPLETE: H1->H2 now via Spine {target_spine} (make-before-break)")
         # Log ke database
         self._log_system_event(
             event_type='REROUTE',
@@ -757,14 +748,14 @@ class VoIPForecastController(app_manager.RyuApp):
     def _atomic_revert_to_original_spine(self):
 
         if not self.congestion_active or not self.original_spine:
-            self.logger.warning("⚠️ Cannot revert: not in rerouted state")
+            self.logger.warning("Cannot revert: not in rerouted state")
             return False
 
         target_spine = self.original_spine
 
-        self.logger.info(f"🔙 CLEAN REVERT: → Spine {target_spine}")
+        self.logger.info(f"CLEAN REVERT: → Spine {target_spine}")
 
-        # 💣 STEP 0: DELETE SEMUA FLOW H1→H2
+        # DELETE SEMUA FLOW H1→H2
         self.reroute_stage = 'REVERT_DELETING_ALL'
         write_state_file({
             'state': self.reroute_stage,
@@ -774,7 +765,7 @@ class VoIPForecastController(app_manager.RyuApp):
         self._delete_all_h1_h2_flows()
         hub.sleep(1)
 
-        # ✅ STEP 1: install ulang path normal
+        # install ulang path normal
         self.reroute_stage = 'REVERT_INSTALLING'
         write_state_file({
             'state': self.reroute_stage,
@@ -787,7 +778,7 @@ class VoIPForecastController(app_manager.RyuApp):
 
         hub.sleep(0.3)
 
-        # ✅ STEP 2: finalize
+        #finalize
         self.current_spine = target_spine
         self.original_spine = target_spine
         self.congestion_active = False
@@ -802,7 +793,7 @@ class VoIPForecastController(app_manager.RyuApp):
 
         self.last_revert_time = time.time()
 
-        self.logger.info(f"✅ CLEAN REVERT COMPLETE: H1->H2 via Spine {target_spine}")
+        self.logger.info(f"CLEAN REVERT COMPLETE: H1->H2 via Spine {target_spine}")
 
         self._log_system_event(
             event_type='REVERT',
@@ -1124,10 +1115,7 @@ class VoIPForecastController(app_manager.RyuApp):
     
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
-        """
-        Process flow stats with proper delta calculation
-        CRITICAL: Deltas prevent counter accumulation
-        """
+
         body = ev.msg.body
         dpid = ev.msg.datapath.id
         current_time = time.time()
@@ -1174,7 +1162,7 @@ class VoIPForecastController(app_manager.RyuApp):
                 # Calculate bps
                 bps = (delta_bytes * 8) / time_diff
                 
-                # âœ… UBAH: Update spine traffic HANYA untuk UDP:9000
+                # Update spine traffic hanya untuk UDP:9000
                 if (src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and 
                     tp_dst == 9000 and dpid in [1,2,3]):
                     self.spine_traffic[dpid] = bps
@@ -1184,21 +1172,21 @@ class VoIPForecastController(app_manager.RyuApp):
                 dst_mac = self.ip_to_mac.get(dst_ip)
                 
                 # Insert to DB
-                # âœ… H1->H2 UDP:9000: Always insert (for monitoring)
+                # H1->H2 UDP:9000: Always insert (for monitoring)
                 if src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and tp_dst == 9000:
                     self._insert_flow_stats(
                         dpid, src_ip, dst_ip, match,
                         delta_bytes, delta_packets,
                         src_mac, dst_mac, time_diff
                     )
-                # âœ… H3->H2 port 9001 (TCP/UDP): Always insert
+                # H3->H2 port 9001 (TCP/UDP): Always insert
                 elif src_ip == '10.0.0.3' and dst_ip == '10.0.0.2' and tp_dst == 9001:
                     self._insert_flow_stats(
                         dpid, src_ip, dst_ip, match,
                         delta_bytes, delta_packets,
                         src_mac, dst_mac, time_diff
                     )
-                 # âœ… H3->H2 port 9001 (TCP/UDP): Always insert
+                 # H3->H2 port 9001 (TCP/UDP): Always insert
                 elif src_ip == '10.0.0.1' and dst_ip == '10.0.0.2' and tp_dst == 9003:
                     self._insert_flow_stats(
                         dpid, src_ip, dst_ip, match,
@@ -1214,7 +1202,7 @@ class VoIPForecastController(app_manager.RyuApp):
                     )
         
         except Exception as e:
-            self.logger.error(f"âŒ Flow stats error: {e}")
+            self.logger.error(f"Flow stats error: {e}")
         finally:
             self.return_db_connection(conn)
     
@@ -1235,7 +1223,7 @@ class VoIPForecastController(app_manager.RyuApp):
             conn.commit()
             cur.close()
         except Exception as e:
-            self.logger.error(f"âŒ Failed to log system event: {e}")
+            self.logger.error(f"Failed to log system event: {e}")
         finally:
             self.return_db_connection(conn)
 
@@ -1261,7 +1249,7 @@ class VoIPForecastController(app_manager.RyuApp):
             return
         
         try:
-            # âœ… FIX: Extract protocol and ports correctly
+            # Extract protocol and ports correctly
             ip_proto = match.get('ip_proto', 0)
             
             # Get transport layer ports based on protocol
@@ -1296,7 +1284,7 @@ class VoIPForecastController(app_manager.RyuApp):
             conn.commit()
             cur.close()
         except Exception as e:
-            self.logger.error(f"âŒ DB insert error: {e}")
+            self.logger.error(f" DB insert error: {e}")
         finally:
             self.return_db_connection(conn)
 
