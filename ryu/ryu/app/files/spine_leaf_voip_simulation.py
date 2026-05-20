@@ -352,17 +352,17 @@ def run_topology():
 
     net.start()
 
+    # tunggu semua switch benar-benar connected ke controller
+    info("Waiting for switches to connect...\n")
+    net.waitConnected(timeout=30)
+    info("All switches connected\n")
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def run():
     # STEP 0: bersihkan state lama sebelum apapun
     pre_cleanup()
 
     run_topology()
-
-    # tunggu semua switch benar-benar connected ke controller
-    info("Waiting for switches to connect...\n")
-    net.waitConnected(timeout=30)
-    info("All switches connected\n")
 
     time.sleep(3)
     net.pingAll()
