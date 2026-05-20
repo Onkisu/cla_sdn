@@ -361,7 +361,7 @@ def run_topology():
     net.pingAll()
     time.sleep(2)
 
-    # start iperf3 server di h2 via host.cmd() — AMAN karena di main thread
+    # start iperf3 server di h2 via host.cmd() 
     h2.cmd("iperf3 -s -p 9001 -D")
     h2.cmd("iperf3 -s -p 9003 -D")
     time.sleep(2)
@@ -369,17 +369,6 @@ def run_topology():
     # invalidate PID cache dulu (host baru start)
     invalidate_pid_cache()
     time.sleep(1)
-
-# ─── Main ─────────────────────────────────────────────────────────────────────
-def run():
-    # STEP 0: bersihkan state lama sebelum apapun
-    pre_cleanup()
-
-    run_topology()
-
-
-
- 
 
     # start watchdog — pakai mnexec, thread-safe
     wd = threading.Thread(
@@ -410,6 +399,14 @@ def run():
     info("*** Running Mininet CLI\n")
     CLI(net)
     net.stop()
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+def run():
+    # STEP 0: bersihkan state lama sebelum apapun
+    pre_cleanup()
+
+    run_topology()
+
 
 
 if __name__ == '__main__':
