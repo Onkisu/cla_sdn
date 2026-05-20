@@ -361,6 +361,15 @@ def run_topology():
     net.pingAll()
     time.sleep(2)
 
+    # start iperf3 server di h2 via host.cmd() — AMAN karena di main thread
+    h2.cmd("iperf3 -s -p 9001 -D")
+    h2.cmd("iperf3 -s -p 9003 -D")
+    time.sleep(2)
+
+    # invalidate PID cache dulu (host baru start)
+    invalidate_pid_cache()
+    time.sleep(1)
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def run():
     # STEP 0: bersihkan state lama sebelum apapun
@@ -370,16 +379,9 @@ def run():
 
 
 
-    # STEP 2: start iperf3 server di h2 via host.cmd() — AMAN karena di main thread
-    h2.cmd("iperf3 -s -p 9001 -D")
-    h2.cmd("iperf3 -s -p 9003 -D")
-    time.sleep(2)
+ 
 
-    # STEP 3: invalidate PID cache dulu (host baru start)
-    invalidate_pid_cache()
-    time.sleep(1)
-
-    # STEP 4: start watchdog — pakai mnexec, thread-safe
+    # start watchdog — pakai mnexec, thread-safe
     wd = threading.Thread(
         target=iperf3_watchdog,
         args=("h2",),
@@ -387,7 +389,7 @@ def run():
     )
     wd.start()
 
-    # STEP 5: start traffic thread jika D-ITG tersedia
+    # start traffic thread jika D-ITG tersedia
     ditg_ok = subprocess.run(
         ['which', 'ITGSend'], capture_output=True
     ).returncode == 0
@@ -404,7 +406,7 @@ def run():
     else:
         info("!!! D-ITG not installed, VoIP traffic disabled\n")
 
-    # STEP 6: CLI — main thread, tidak terganggu apapun
+    # CLI — main thread, tidak terganggu apapun
     info("*** Running Mininet CLI\n")
     CLI(net)
     net.stop()
