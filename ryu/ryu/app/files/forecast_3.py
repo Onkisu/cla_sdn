@@ -45,7 +45,7 @@ FEATURES = [
 
     'ema_5s','ema_15s','ema_cross',
 
-    # time-of-day cyclical features (baru dari dev)
+    # time-of-day cyclical features
     'hour_sin','hour_cos',
     'min_sin','min_cos',
     'dow_sin','dow_cos',
@@ -125,14 +125,14 @@ def create_features(df, for_training=False):
     data['roll_max_10s']  = data[TARGET].rolling(10).max()
     data['roll_mean_30s'] = data[TARGET].rolling(30).mean()
     data['roll_std_30s']  = data[TARGET].rolling(30).std()
-    data['roll_mean_60s'] = data[TARGET].rolling(60).mean()   # NEW
-    data['roll_std_60s']  = data[TARGET].rolling(60).std()    # NEW
+    data['roll_mean_60s'] = data[TARGET].rolling(60).mean()   
+    data['roll_std_60s']  = data[TARGET].rolling(60).std()    
 
     data['ema_5s']    = data[TARGET].ewm(span=5).mean()
     data['ema_15s']   = data[TARGET].ewm(span=15).mean()
     data['ema_cross'] = data['ema_5s'] - data['ema_15s']
 
-    # cyclical time features (NEW)
+    # cyclical time features
     data['hour_sin'] = np.sin(2 * np.pi * data.index.hour / 24)
     data['hour_cos'] = np.cos(2 * np.pi * data.index.hour / 24)
     data['min_sin']  = np.sin(2 * np.pi * data.index.minute / 60)
@@ -198,8 +198,8 @@ def run_tuning(n_trials=50):
     study = optuna.create_study(direction='minimize')
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
     
-    print(f"\n✅ Best RMSE: {study.best_value:,.0f} bps")
-    print(f"✅ Best params: {study.best_params}")
+    print(f"\nBest RMSE: {study.best_value:,.0f} bps")
+    print(f"Best params: {study.best_params}")
     
     return study.best_params
 

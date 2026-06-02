@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 
-
 import pandas as pd
 import numpy as np
 import xgboost as xgb
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from sqlalchemy import create_engine
 from datetime import timedelta
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import sys
 import warnings
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -16,14 +15,14 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # ==============================================================================
 # CONFIG
 # ==============================================================================
-DB_URI                 = "postgresql://dev_one:hijack332.@192.168.1.23:5432/development"
+CSV_PATH               = "dataset_ta_2.csv"          # <-- ganti path CSV lo di sini
 
 TARGET                 = "throughput_bps"
 BURST_THRESHOLD_BPS    = 20_000_000
 PREDICTION_HORIZON_SEC = 10
 
-TRAIN_HOURS            = 3  # jam untuk training
-TEST_HOURS             = 1   # jam terakhir untuk testing
+TRAIN_HOURS            = 3
+TEST_HOURS             = 1
 
 FEATURES = [
     'throughput_bps', 'is_burst', 'consecutive_steady_sec',
@@ -39,32 +38,40 @@ FEATURES = [
     'dow_sin','dow_cos',
 ]
 
-engine = create_engine(DB_URI, pool_pre_ping=True)
 
-
-def get_data(hours):
-    query = f"""
-        WITH base AS (
-            SELECT
-                date_trunc('second', timestamp) AS ts,
-                MAX(bytes_tx) AS total_bytes
-            FROM traffic.flow_stats_1
-            WHERE timestamp >= NOW() - INTERVAL '{hours} hours'
-              AND dpid = 5
-              AND bytes_tx > 0
-            GROUP BY ts
-        )
-        SELECT ts, total_bytes * 8 AS throughput_bps
-        FROM base ORDER BY ts
+# ==============================================================================
+# DATA LOADING (dari CSV)
+# ==============================================================================
+def get_data(csv_path=CSV_PATH):
     """
-    df = pd.read_sql(query, engine)
+    Baca CSV dengan kolom: ts, throughput_bps
+    - ts bisa format apapun yang bisa di-parse pandas
+    - Resample ke 1s, interpolasi gap
+    """
+    df = pd.read_csv(csv_path)
+
+    # Pastikan kolom yang dibutuhkan ada
+    required_cols = {'ts', 'throughput_bps'}
+    missing = required_cols - set(df.columns)
+    if missing:
+        print(f"[ERROR] Kolom tidak ditemukan di CSV: {missing}")
+        print(f"  Kolom yang ada: {list(df.columns)}")
+        sys.exit(1)
+
     df['ts'] = pd.to_datetime(df['ts'])
-    df = df.set_index('ts').resample('1s').last()
+    df = df.set_index('ts')[['throughput_bps']]
+    df = df.sort_index()
+
+    # Resample ke 1 detik, ambil last, interpolasi gap
+    df = df.resample('1s').last()
     df[TARGET] = df[TARGET].interpolate()
+
     return df.dropna()
 
 
-
+# ==============================================================================
+# FEATURE ENGINEERING
+# ==============================================================================
 def create_features(df, for_training=False):
     data = df.copy()
     data['is_burst'] = (data[TARGET] > BURST_THRESHOLD_BPS).astype(int)
@@ -85,17 +92,13 @@ def create_features(df, for_training=False):
     data['roll_max_10s']  = data[TARGET].rolling(10).max()
     data['roll_mean_30s'] = data[TARGET].rolling(30).mean()
     data['roll_std_30s']  = data[TARGET].rolling(30).std()
-
-
     data['roll_mean_60s'] = data[TARGET].rolling(60).mean()
     data['roll_std_60s']  = data[TARGET].rolling(60).std()
-    data['lag_600']       = data[TARGET].shift(600)   # 10 menit lalu
-
+    data['lag_600']       = data[TARGET].shift(600)
 
     data['ema_5s']    = data[TARGET].ewm(span=5).mean()
     data['ema_15s']   = data[TARGET].ewm(span=15).mean()
     data['ema_cross'] = data['ema_5s'] - data['ema_15s']
-
 
     data['hour_sin'] = np.sin(2 * np.pi * data.index.hour / 24)
     data['hour_cos'] = np.cos(2 * np.pi * data.index.hour / 24)
@@ -103,7 +106,6 @@ def create_features(df, for_training=False):
     data['min_cos']  = np.cos(2 * np.pi * data.index.minute / 60)
     data['dow_sin']  = np.sin(2 * np.pi * data.index.dayofweek / 7)
     data['dow_cos']  = np.cos(2 * np.pi * data.index.dayofweek / 7)
-
 
     if for_training:
         data['target_future'] = data[TARGET].shift(-PREDICTION_HORIZON_SEC)
@@ -114,13 +116,12 @@ def create_features(df, for_training=False):
     return data
 
 
-
-
-
+# ==============================================================================
+# TRAINING
+# ==============================================================================
 def train_model(df_raw):
     df = create_features(df_raw, for_training=True)
 
-    #10% akhir untuk validasi
     val_size = int(len(df) * 0.1)
     df_tr  = df.iloc[:-val_size]
     df_val = df.iloc[-val_size:]
@@ -145,6 +146,9 @@ def train_model(df_raw):
     return model
 
 
+# ==============================================================================
+# EVALUATION
+# ==============================================================================
 def evaluate(model, df_raw):
     df = create_features(df_raw, for_training=True)
     y_pred = np.maximum(0, model.predict(df[FEATURES]))
@@ -181,6 +185,9 @@ def compute_metrics(res):
     )
 
 
+# ==============================================================================
+# PLOTTING
+# ==============================================================================
 def plot_results(res, m, train_period, test_period):
     fig, axes = plt.subplots(3, 1, figsize=(14, 12))
     thresh = BURST_THRESHOLD_BPS / 1e6
@@ -195,7 +202,6 @@ def plot_results(res, m, train_period, test_period):
         fontsize=12, fontweight='bold'
     )
 
-    # --- Plot 1: Actual vs Predicted ---
     ax = axes[0]
     ax.plot(idx, yt, label='Aktual', color='steelblue', lw=0.9, alpha=0.9)
     ax.plot(idx, yp, label='Prediksi', color='tomato', lw=0.9, alpha=0.8)
@@ -209,7 +215,6 @@ def plot_results(res, m, train_period, test_period):
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
     ax.grid(True, alpha=0.3)
 
-    # --- Plot 2: Error ---
     ax = axes[1]
     err = res['error'] / 1e6
     ax.fill_between(idx, err, 0, where=(err >= 0), color='tomato',    alpha=0.5, label='Overprediksi')
@@ -221,7 +226,6 @@ def plot_results(res, m, train_period, test_period):
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
     ax.grid(True, alpha=0.3)
 
-    # --- Plot 3: Confusion Matrix Burst ---
     ax = axes[2]
     labels = ['TN\n(Steady Benar)', 'FP\n(False Alarm)', 'FN\n(Miss Burst)', 'TP\n(Burst Benar)']
     values = [m['tn'], m['fp'], m['fn'], m['tp']]
@@ -240,21 +244,29 @@ def plot_results(res, m, train_period, test_period):
     plt.tight_layout()
     plt.show()
 
+
+# ==============================================================================
+# MAIN
+# ==============================================================================
 def main():
     print("=" * 55)
     print("  FORECAST MODEL EVALUATION")
     print("=" * 55)
 
-    print(f"\n[1] Ambil data {TRAIN_HOURS + TEST_HOURS} jam terakhir...")
-    df_all = get_data(TRAIN_HOURS + TEST_HOURS)
+    print(f"\n[1] Membaca data dari CSV: {CSV_PATH}")
+    df_all = get_data(CSV_PATH)
     print(f"  Total: {len(df_all):,} detik")
+    print(f"  Rentang: {df_all.index[0]} → {df_all.index[-1]}")
 
-    cutoff   = df_all.index[-1] - timedelta(hours=TEST_HOURS)
+    # Split train/test berdasarkan TRAIN_HOURS + TEST_HOURS terakhir
+    cutoff_start = df_all.index[-1] - timedelta(hours=TRAIN_HOURS + TEST_HOURS)
+    df_all = df_all[df_all.index >= cutoff_start]
+
+    cutoff = df_all.index[-1] - timedelta(hours=TEST_HOURS)
     df_train = df_all[df_all.index <= cutoff]
     df_test  = df_all[df_all.index >  cutoff]
     print(f"  Train: {len(df_train):,} detik  |  Test: {len(df_test):,} detik")
 
-    # Setelah baris cutoff di main():
     burst_train = (df_train[TARGET] > BURST_THRESHOLD_BPS).mean() * 100
     burst_test  = (df_test[TARGET]  > BURST_THRESHOLD_BPS).mean() * 100
     print(f"  Burst ratio — Train: {burst_train:.1f}%  |  Test: {burst_test:.1f}%")
@@ -267,24 +279,19 @@ def main():
     res = evaluate(model, df_test)
     m   = compute_metrics(res)
 
-    print(f"\n  MAE            : {m['mae']/1e6:.3f} Mbps")
+    print(f"\n  MAE              : {m['mae']/1e6:.3f} Mbps")
     print(f"  RMSE             : {m['rmse']/1e6:.3f} Mbps")
-    # print(f"  MAPE             : {m['mape']:.2f}%")
-    # print(f"  R²               : {m['r2']:.4f}")
     print(f"  Burst Accuracy   : {m['acc']:.1f}%")
     print(f"  Burst Precision  : {m['precision']:.1f}%")
-    # print(f"  Burst Recall     : {m['recall']:.1f}%")
-    # print(f"  Burst F1         : {m['f1']:.1f}%")
-
 
     print(f"\n[5] Threshold sweep burst detection...")
-    for thresh_pct in [0.7, 0.8, 0.9, 1.0, 1.2, 1.4 ,1.6 ,1.8 , 2]:
+    for thresh_pct in [0.7, 0.8, 0.9, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0]:
         thresh = BURST_THRESHOLD_BPS * thresh_pct
         res_t = evaluate(model, df_test)
         res_t['is_burst_pred'] = (res_t['y_pred'] > thresh).astype(int)
         m_t = compute_metrics(res_t)
-        #print(f"  thresh={thresh/1e6:.0f}Mbps | Prec={m_t['precision']:.1f}% | Recall={m_t['recall']:.1f}% | F1={m_t['f1']:.1f}%")
-        print(f"  thresh={thresh/1e6:.0f}Mbps | Acc={m_t['acc']:.1f}% | Prec={m_t['precision']:.1f}% | MAE={m['mae']/1e6:.3f} Mbps ")
+        print(f"  thresh={thresh/1e6:.0f}Mbps | Acc={m_t['acc']:.1f}% | Prec={m_t['precision']:.1f}% | MAE={m['mae']/1e6:.3f} Mbps")
+
     print(f"\n[4] Menampilkan plot...")
     plot_results(res, m,
                  train_period=(df_train.index[0], df_train.index[-1]),
