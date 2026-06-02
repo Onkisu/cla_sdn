@@ -9,13 +9,15 @@ from datetime import timedelta
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import sys
 import warnings
+import optuna
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ==============================================================================
 # CONFIG
 # ==============================================================================
-CSV_PATH               = "dataset_ta_2.csv"          # <-- ganti path CSV lo di sini
+CSV_PATH               = "dataset_ta_2.csv"
 
 TARGET                 = "throughput_bps"
 BURST_THRESHOLD_BPS    = 20_000_000
@@ -23,6 +25,8 @@ PREDICTION_HORIZON_SEC = 10
 
 TRAIN_HOURS            = 3
 TEST_HOURS             = 1
+
+OPTUNA_TRIALS          = 50   # jumlah trial optuna, kurangi kalau mau cepat
 
 FEATURES = [
     'throughput_bps', 'is_burst', 'consecutive_steady_sec',
@@ -40,17 +44,11 @@ FEATURES = [
 
 
 # ==============================================================================
-# DATA LOADING (dari CSV)
+# DATA LOADING
 # ==============================================================================
 def get_data(csv_path=CSV_PATH):
-    """
-    Baca CSV dengan kolom: ts, throughput_bps
-    - ts bisa format apapun yang bisa di-parse pandas
-    - Resample ke 1s, interpolasi gap
-    """
     df = pd.read_csv(csv_path)
 
-    # Pastikan kolom yang dibutuhkan ada
     required_cols = {'ts', 'throughput_bps'}
     missing = required_cols - set(df.columns)
     if missing:
@@ -61,8 +59,6 @@ def get_data(csv_path=CSV_PATH):
     df['ts'] = pd.to_datetime(df['ts'])
     df = df.set_index('ts')[['throughput_bps']]
     df = df.sort_index()
-
-    # Resample ke 1 detik, ambil last, interpolasi gap
     df = df.resample('1s').last()
     df[TARGET] = df[TARGET].interpolate()
 
@@ -117,32 +113,99 @@ def create_features(df, for_training=False):
 
 
 # ==============================================================================
-# TRAINING
+# OPTUNA TUNING
 # ==============================================================================
-def train_model(df_raw):
+def objective(trial, df_train_raw):
+    df = create_features(df_train_raw, for_training=True)
+
+    if len(df) < 500:
+        raise optuna.exceptions.TrialPruned()
+
+    X = df[FEATURES]
+    y = df['target_future']
+
+    val_size = int(len(X) * 0.1)
+    X_tr, X_val = X.iloc[:-val_size], X.iloc[-val_size:]
+    y_tr, y_val = y.iloc[:-val_size], y.iloc[-val_size:]
+
+    params = {
+        'n_estimators':         1000,
+        'max_depth':            trial.suggest_int('max_depth', 3, 8),
+        'learning_rate':        trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+        'subsample':            trial.suggest_float('subsample', 0.6, 1.0),
+        'colsample_bytree':     trial.suggest_float('colsample_bytree', 0.5, 1.0),
+        'min_child_weight':     trial.suggest_int('min_child_weight', 1, 20),
+        'gamma':                trial.suggest_float('gamma', 0.0, 2.0),
+        'reg_alpha':            trial.suggest_float('reg_alpha', 0.0, 1.0),
+        'reg_lambda':           trial.suggest_float('reg_lambda', 0.5, 3.0),
+        'tree_method':          'hist',
+        'device':               'cuda',
+        'early_stopping_rounds': 40,
+        'objective':            'reg:squarederror',
+        'n_jobs':               -1,
+        'random_state':         42,
+    }
+
+    model = xgb.XGBRegressor(**params)
+    model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+
+    pred = model.predict(X_val)
+    rmse = np.sqrt(np.mean((pred - y_val.values) ** 2))
+    return rmse
+
+
+def run_tuning(df_train_raw, n_trials=OPTUNA_TRIALS):
+    print(f"\n[2] Optuna hyperparameter tuning ({n_trials} trials)...")
+
+    study = optuna.create_study(direction='minimize')
+    study.optimize(
+        lambda trial: objective(trial, df_train_raw),
+        n_trials=n_trials,
+        show_progress_bar=True
+    )
+
+    print(f"  Best RMSE : {study.best_value/1e6:.4f} Mbps")
+    print(f"  Best params: {study.best_params}")
+
+    return study.best_params
+
+
+# ==============================================================================
+# TRAINING (pakai best params dari Optuna)
+# ==============================================================================
+def train_model(df_raw, best_params=None):
     df = create_features(df_raw, for_training=True)
 
     val_size = int(len(df) * 0.1)
     df_tr  = df.iloc[:-val_size]
     df_val = df.iloc[-val_size:]
 
+    # Pakai best params kalau ada, fallback ke default
+    params = best_params if best_params else {
+        'max_depth': 5, 'learning_rate': 0.04,
+        'subsample': 0.8, 'colsample_bytree': 0.8,
+        'min_child_weight': 5, 'gamma': 0.5,
+        'reg_alpha': 0.05, 'reg_lambda': 1.0,
+    }
+
     model = xgb.XGBRegressor(
-        tree_method="hist",
-        device="cuda",
         n_estimators=1000,
-        max_depth=5, learning_rate=0.04,
-        subsample=0.8, colsample_bytree=0.8,
-        min_child_weight=5, gamma=0.5,
-        reg_alpha=0.05, reg_lambda=1.0,
+        tree_method='hist',
+        device='cuda',
         early_stopping_rounds=40,
-        objective="reg:squarederror", n_jobs=-1, random_state=42
+        objective='reg:squarederror',
+        n_jobs=-1,
+        random_state=42,
+        **params
     )
     model.fit(
         df_tr[FEATURES], df_tr['target_future'],
         eval_set=[(df_val[FEATURES], df_val['target_future'])],
         verbose=False
     )
-    print(f"  Training selesai: {len(df_tr):,} sampel | Best round: {model.best_iteration}")
+
+    src = 'OPTUNA best' if best_params else 'DEFAULT'
+    print(f"  Training selesai: {len(df_tr):,} sampel | Best round: {model.best_iteration} | Params: {src}")
     return model
 
 
@@ -250,7 +313,7 @@ def plot_results(res, m, train_period, test_period):
 # ==============================================================================
 def main():
     print("=" * 55)
-    print("  FORECAST MODEL EVALUATION")
+    print("  FORECAST MODEL EVALUATION (+ OPTUNA TUNING)")
     print("=" * 55)
 
     print(f"\n[1] Membaca data dari CSV: {CSV_PATH}")
@@ -258,11 +321,11 @@ def main():
     print(f"  Total: {len(df_all):,} detik")
     print(f"  Rentang: {df_all.index[0]} → {df_all.index[-1]}")
 
-    # Split train/test berdasarkan TRAIN_HOURS + TEST_HOURS terakhir
+    # Ambil window TRAIN_HOURS + TEST_HOURS terakhir
     cutoff_start = df_all.index[-1] - timedelta(hours=TRAIN_HOURS + TEST_HOURS)
     df_all = df_all[df_all.index >= cutoff_start]
 
-    cutoff = df_all.index[-1] - timedelta(hours=TEST_HOURS)
+    cutoff   = df_all.index[-1] - timedelta(hours=TEST_HOURS)
     df_train = df_all[df_all.index <= cutoff]
     df_test  = df_all[df_all.index >  cutoff]
     print(f"  Train: {len(df_train):,} detik  |  Test: {len(df_test):,} detik")
@@ -272,17 +335,24 @@ def main():
     print(f"  Burst ratio — Train: {burst_train:.1f}%  |  Test: {burst_test:.1f}%")
     print(f"  Mean throughput — Train: {df_train[TARGET].mean()/1e6:.1f} Mbps  |  Test: {df_test[TARGET].mean()/1e6:.1f} Mbps")
 
-    print(f"\n[2] Training...")
-    model = train_model(df_train)
+    # Tuning — pakai df_train aja (bukan test, biar ga bocor)
+    best_params = run_tuning(df_train, n_trials=OPTUNA_TRIALS)
 
-    print(f"\n[3] Evaluasi...")
+    print(f"\n[3] Training dengan best params...")
+    model = train_model(df_train, best_params=best_params)
+
+    print(f"\n[4] Evaluasi...")
     res = evaluate(model, df_test)
     m   = compute_metrics(res)
 
     print(f"\n  MAE              : {m['mae']/1e6:.3f} Mbps")
     print(f"  RMSE             : {m['rmse']/1e6:.3f} Mbps")
+    print(f"  R²               : {m['r2']:.4f}")
+    print(f"  MAPE             : {m['mape']:.2f}%")
     print(f"  Burst Accuracy   : {m['acc']:.1f}%")
     print(f"  Burst Precision  : {m['precision']:.1f}%")
+    print(f"  Burst Recall     : {m['recall']:.1f}%")
+    print(f"  Burst F1         : {m['f1']:.1f}%")
 
     print(f"\n[5] Threshold sweep burst detection...")
     for thresh_pct in [0.7, 0.8, 0.9, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0]:
@@ -290,9 +360,9 @@ def main():
         res_t = evaluate(model, df_test)
         res_t['is_burst_pred'] = (res_t['y_pred'] > thresh).astype(int)
         m_t = compute_metrics(res_t)
-        print(f"  thresh={thresh/1e6:.0f}Mbps | Acc={m_t['acc']:.1f}% | Prec={m_t['precision']:.1f}% | MAE={m['mae']/1e6:.3f} Mbps")
+        print(f"  thresh={thresh/1e6:.0f}Mbps | Acc={m_t['acc']:.1f}% | Prec={m_t['precision']:.1f}% | Recall={m_t['recall']:.1f}% | F1={m_t['f1']:.1f}%")
 
-    print(f"\n[4] Menampilkan plot...")
+    print(f"\n[6] Menampilkan plot...")
     plot_results(res, m,
                  train_period=(df_train.index[0], df_train.index[-1]),
                  test_period =(df_test.index[0],  df_test.index[-1]))
