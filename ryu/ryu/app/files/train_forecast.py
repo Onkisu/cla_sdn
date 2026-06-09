@@ -366,6 +366,11 @@ def main():
     plot_results(res, m,
                  train_period=(df_train.index[0], df_train.index[-1]),
                  test_period =(df_test.index[0],  df_test.index[-1]))
+    
+    print(f"\n[7] Menyimpan model...")
+    model_path = "xgb_forecast_model.json"
+    model.save_model(model_path)
+    print(f"  Model tersimpan → {model_path}")
 
 
 if __name__ == "__main__":
