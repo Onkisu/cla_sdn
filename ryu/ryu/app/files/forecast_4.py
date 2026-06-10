@@ -24,7 +24,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # ==============================================================================
 DB_URI                 = "postgresql://dev_one:hijack332.@127.0.0.1:5432/development"
 TABLE_FORECAST         = "forecast_1h"
-MODEL_PATH             = "xgb_forecast_model.pkl"   # existing trained model path
+MODEL_PATH             = "xgb_forecast_model.json"   # existing trained model path
 
 TARGET                 = "throughput_bps"
 BURST_THRESHOLD_BPS    = 20_000_000          # updated dari dev: 30 Mbps

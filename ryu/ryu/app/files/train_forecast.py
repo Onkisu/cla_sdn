@@ -17,7 +17,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # ==============================================================================
 # CONFIG
 # ==============================================================================
-CSV_PATH               = "dataset_ta_2.csv"
+CSV_PATH               = "dataset_ta_3.csv"
 
 TARGET                 = "throughput_bps"
 BURST_THRESHOLD_BPS    = 20_000_000
