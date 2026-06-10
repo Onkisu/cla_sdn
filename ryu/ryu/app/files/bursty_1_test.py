@@ -90,17 +90,18 @@ if __name__ == "__main__":
         (500, 10),     # back to normal ≈ 5.6 Mbps
     ]
 
-    for rate, duration in bursts:
-        if not check_controller_state():
-            time.sleep(2)
+    while True:  
+        for rate, duration in bursts:
+            if not check_controller_state():
+                time.sleep(2)
 
-        if rate >= 3000:
-            print(f"\n[DEMO BURST] HIGH BURST {rate}")
-        elif rate >= 2000:
-            print(f"\n[DEMO BURST] ABOVE THRESHOLD {rate}")
-        else:
-            print(f"\n[DEMO BURST] NORMAL/MEDIUM {rate}")
+            if rate >= 3000:
+                print(f"\n[DEMO BURST] HIGH BURST {rate}")
+            elif rate >= 2000:
+                print(f"\n[DEMO BURST] ABOVE THRESHOLD {rate}")
+            else:
+                print(f"\n[DEMO BURST] NORMAL/MEDIUM {rate}")
 
-        send_udp(rate, duration)
+            send_udp(rate, duration)
 
-    print("\n[DEMO BURST] Demo burst finished")
+        print("\n[DEMO BURST] Demo burst finished")

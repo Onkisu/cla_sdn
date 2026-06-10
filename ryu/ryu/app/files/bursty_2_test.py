@@ -119,7 +119,8 @@ if __name__ == "__main__":
         (50, 10),     # ramp-down
         (0, 10),      # idle
     ]
+    
+    while True:
+        run_demo_burst(demo_pattern)
 
-    run_demo_burst(demo_pattern)
-
-    print("\n[DEMO UDP] Demo UDP flood finished")
+        print("\n[DEMO UDP] Demo UDP flood finished")
