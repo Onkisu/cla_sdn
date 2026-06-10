@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Short Burst Traffic Generator for Sidang Demo
+Bursty Traffic Generator - Sidang Demo Version (~10 min)
+Karakteristik sama dengan bursty.py tapi compressed
 H3 -> H2 using iperf3 UDP
 """
 
@@ -11,46 +12,34 @@ import json
 H3 = "h3"
 DST_IP = "10.0.0.2"
 PORT = 9001
-STATE_FILE = "/tmp/controller_state.json"
+STATE_FILE = '/tmp/controller_state.json'
 
 
 def check_controller_state():
     try:
-        with open(STATE_FILE, "r") as f:
+        with open(STATE_FILE, 'r') as f:
             state = json.load(f)
 
-        current_state = state.get("state", "IDLE")
-
+        current_state = state.get('state', 'IDLE')
         transition_states = [
-            "DELETING_ALL_FLOWS",
-            "WAITING_SETTLE",
-            "INSTALLING_NEW_PATH",
-            "REVERT_DELETING",
-            "REVERT_SETTLE",
-            "REVERT_INSTALLING",
+            'DELETING_ALL_FLOWS', 'WAITING_SETTLE', 'INSTALLING_NEW_PATH',
+            'REVERT_DELETING', 'REVERT_SETTLE', 'REVERT_INSTALLING'
         ]
 
         if current_state in transition_states:
-            print(f"[DEMO BURST] Controller in transition: {current_state}")
+            print(f"[BURST] Controller in {current_state}")
             return False
 
-        if state.get("congestion") is True and current_state == "ACTIVE_REROUTE":
-            print("[DEMO BURST] Reroute already active, waiting 3s...")
+        if state.get('congestion') is True and current_state == 'ACTIVE_REROUTE':
+            print("[BURST] Reroute active, waiting 3s...")
             time.sleep(3)
 
         return True
-
     except Exception:
         return True
 
 
 def send_udp(rate, duration):
-    """
-    rate value is converted to bitrate:
-    bitrate = rate * 1400 * 8
-    Example:
-    rate 2500 ≈ 28 Mbps
-    """
     try:
         h3_pid = subprocess.check_output(
             ["pgrep", "-n", "-f", H3]
@@ -58,7 +47,7 @@ def send_udp(rate, duration):
 
         bitrate = rate * 1400 * 8
 
-        print(f"[DEMO BURST] Sending UDP rate={rate}, bitrate≈{bitrate/1_000_000:.2f} Mbps, duration={duration}s")
+        print(f"[BURST] rate={rate} | ≈{bitrate/1_000_000:.1f} Mbps | {duration}s")
 
         subprocess.run([
             "mnexec", "-a", h3_pid,
@@ -72,36 +61,63 @@ def send_udp(rate, duration):
         ], timeout=duration + 5)
 
     except Exception as e:
-        print(f"[DEMO BURST] Error: {e}")
+        print(f"[BURST] Error: {e}")
 
 
 if __name__ == "__main__":
-    print("[DEMO BURST] Short demo burst started")
-    print("[DEMO BURST] Waiting 10 seconds for system stabilization...")
+    print("[BURST] Sidang Demo Burst Started (~10 min)")
+    print("[BURST] Waiting 10s for stabilization...")
     time.sleep(10)
 
+    # Total ≈ 590 detik + 10s stabilization = ~600s (10 menit)
+    # Karakteristik: normal → ramp up → above threshold → BURST PEAK → ramp down → normal
     bursts = [
-        # rate, duration
-        (500, 10),     # normal traffic ≈ 5.6 Mbps
-        (1200, 15),    # medium traffic ≈ 13.4 Mbps
-        (2200, 20),    # above threshold ≈ 24.6 Mbps
-        (3500, 20),    # high burst ≈ 39.2 Mbps
-        (1800, 15),    # decreasing traffic ≈ 20.1 Mbps
-        (500, 10),     # back to normal ≈ 5.6 Mbps
-    ]
+        # NORMAL (below threshold)
+        (250, 15),      # ≈ 2.8 Mbps
+        (500, 15),      # ≈ 5.6 Mbps
+        (1200, 15),     # ≈ 13.4 Mbps
 
-    while True:  
+        # ABOVE THRESHOLD — reroute mulai trigger di sini
+        (1800, 15),     # ≈ 20.2 Mbps  ← pas di threshold
+        (2500, 15),     # ≈ 28 Mbps
+        (4500, 10),     # ≈ 50 Mbps
+
+        # PEAK
+        (8750, 20),     # ≈ 98 Mbps
+        (7200, 15),     # ≈ 80 Mbps
+
+        # RAMP DOWN
+        (3200, 15),     # ≈ 35 Mbps
+        (1800, 10),     # ≈ 20 Mbps  ← revert zone
+        (900, 10),      # ≈ 10 Mbps
+
+        # NORMAL
+        (250, 15),      # ≈ 2.8 Mbps
+    ]
+    # Total: 170 detik ≈ ~2.8 menit per cycle
+    # 10 menit → bisa 3x cycle
+    # Total duration: 30+20+20+20+15+30+30+20+20+20+20+30+35 = 310s + 10s wait = 320s
+    # Kalau mau pas 10 menit, loop 1x lagi atau extend durasi phase normal
+
+    while True:
+        print("\n[BURST] === Cycle Start ===")
+        total = sum(d for _, d in bursts)
+        print(f"[BURST] Estimated cycle duration: {total}s ({total//60}m {total%60}s)")
+
         for rate, duration in bursts:
             if not check_controller_state():
                 time.sleep(2)
 
-            if rate >= 3000:
-                print(f"\n[DEMO BURST] HIGH BURST {rate}")
+            if rate >= 5000:
+                phase = "BURST PEAK"
             elif rate >= 2000:
-                print(f"\n[DEMO BURST] ABOVE THRESHOLD {rate}")
+                phase = "ABOVE THRESHOLD"
+            elif rate >= 1000:
+                phase = "RAMP"
             else:
-                print(f"\n[DEMO BURST] NORMAL/MEDIUM {rate}")
+                phase = "NORMAL"
 
+            print(f"\n[BURST] {phase} | rate={rate} | ≈{rate*1400*8/1_000_000:.1f} Mbps | {duration}s")
             send_udp(rate, duration)
 
-        print("\n[DEMO BURST] Demo burst finished")
+        print("\n[BURST] === Cycle Complete, Restarting ===\n")
