@@ -28,7 +28,7 @@ from mininet.node import OVSSwitch, RemoteController
 from mininet.cli import CLI
 from mininet.log import setLogLevel, info
 from mininet.link import TCLink, TCIntf
-
+import warnings
 import time
 import subprocess
 import threading
@@ -45,17 +45,12 @@ RESTART_DELAY      = 1
 _pid_cache = {}
 _pid_lock  = threading.Lock()
 
-class QuietTCIntf(TCIntf):
-    def tc(self, cmd, program='tc'):
-        """Override tc() untuk inject r2q=100 ke semua qdisc htb."""
-        if 'htb' in cmd and 'r2q' not in cmd:
-            cmd = cmd.replace('htb', 'htb r2q 100')
-        return super().tc(cmd, program)
-
-class HTBLink(TCLink):
-    def __init__(self, node1, node2, **kwargs):
-        TCLink.__init__(self, node1, node2,
-                        intf=QuietTCIntf, **kwargs)
+# Suppress sch_htb quantum warning
+_original_stderr_write = sys.stderr.write
+def _filtered_stderr(msg):
+    if 'quantum' not in msg and 'r2q' not in msg:
+        _original_stderr_write(msg)
+sys.stderr.write = _filtered_stderr
 
 def get_host_pid(hostname):
     """
@@ -338,8 +333,7 @@ def run_topology():
     net = Mininet(
         controller=RemoteController,
         switch=OVSSwitch,
-        #link=TCLink,
-        link=HTBLink,
+        link=TCLink,
         autoSetMacs=True,
     )
 
