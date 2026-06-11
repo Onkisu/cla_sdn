@@ -345,7 +345,7 @@ def run_topology():
     h1 = net.addHost('h1', ip='10.0.0.1/24')
     h2 = net.addHost('h2', ip='10.0.0.2/24')
     h3 = net.addHost('h3', ip='10.0.0.3/24')
-
+    # wkwkwkw
     net.addLink(h1, leaves[0], bw=100, delay='1ms', r2q=10)
     net.addLink(h2, leaves[1], bw=100, delay='1ms', r2q=10)
     net.addLink(h3, leaves[2], bw=100, delay='1ms', r2q=10)
