@@ -27,7 +27,7 @@ from mininet.net import Mininet
 from mininet.node import OVSSwitch, RemoteController
 from mininet.cli import CLI
 from mininet.log import setLogLevel, info
-from mininet.link import TCLink
+from mininet.link import TCLink, TCIntf
 
 import time
 import subprocess
@@ -44,6 +44,18 @@ RESTART_DELAY      = 1
 # ─── PID cache untuk mnexec ──────────────────────────────────────────────────
 _pid_cache = {}
 _pid_lock  = threading.Lock()
+
+class QuietTCIntf(TCIntf):
+    def tc(self, cmd, program='tc'):
+        """Override tc() untuk inject r2q=100 ke semua qdisc htb."""
+        if 'htb' in cmd and 'r2q' not in cmd:
+            cmd = cmd.replace('htb', 'htb r2q 100')
+        return super().tc(cmd, program)
+
+class HTBLink(TCLink):
+    def __init__(self, node1, node2, **kwargs):
+        TCLink.__init__(self, node1, node2,
+                        intf=QuietTCIntf, **kwargs)
 
 def get_host_pid(hostname):
     """
@@ -326,7 +338,8 @@ def run_topology():
     net = Mininet(
         controller=RemoteController,
         switch=OVSSwitch,
-        link=TCLink,
+        #link=TCLink,
+        link=HTBLink,
         autoSetMacs=True,
     )
 
@@ -340,15 +353,15 @@ def run_topology():
 
     for l in leaves:
         for s in spines:
-            net.addLink(l, s, bw=40, delay='2ms', max_queue_size=30, use_htb=True, r2q=10)
+            net.addLink(l, s, bw=40, delay='2ms', max_queue_size=30, use_htb=True)
 
     h1 = net.addHost('h1', ip='10.0.0.1/24')
     h2 = net.addHost('h2', ip='10.0.0.2/24')
     h3 = net.addHost('h3', ip='10.0.0.3/24')
     # wkwkwkw
-    net.addLink(h1, leaves[0], bw=100, delay='1ms', r2q=10)
-    net.addLink(h2, leaves[1], bw=100, delay='1ms', r2q=10)
-    net.addLink(h3, leaves[2], bw=100, delay='1ms', r2q=10)
+    net.addLink(h1, leaves[0], bw=100, delay='1ms')
+    net.addLink(h2, leaves[1], bw=100, delay='1ms')
+    net.addLink(h3, leaves[2], bw=100, delay='1ms')
 
     net.start()
 
