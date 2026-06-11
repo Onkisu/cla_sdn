@@ -42,19 +42,33 @@ STEADY_DURATION_MS = 60000
 RESTART_DELAY      = 1
 
 # ─── PID cache untuk mnexec ──────────────────────────────────────────────────
-# GANTI dengan ini:
-_host_map = {}
-_pid_lock = threading.Lock()
-
-def register_hosts(*hosts):
-    with _pid_lock:
-        for h in hosts:
-            _host_map[h.name] = h.pid
+_pid_cache = {}
+_pid_lock  = threading.Lock()
 
 def get_host_pid(hostname):
+    """
+    Ambil PID shell dari host Mininet via pgrep.
+    Di-cache agar tidak pgrep terus-terusan.
+    Ini cara yang sama seperti bursty_2.py — AMAN dari thread manapun.
+    """
     with _pid_lock:
-        pid = _host_map.get(hostname)
-        return str(pid) if pid else None
+        if hostname in _pid_cache:
+            return _pid_cache[hostname]
+        try:
+            pid = subprocess.check_output(
+                ["pgrep", "-n", "-f", hostname],
+                stderr=subprocess.DEVNULL
+            ).decode().strip()
+            if pid:
+                _pid_cache[hostname] = pid
+                return pid
+        except Exception:
+            pass
+        return None
+
+def invalidate_pid_cache():
+    with _pid_lock:
+        _pid_cache.clear()
 
 def mnexec_run(hostname, cmd, timeout=10, background=False):
     """
@@ -353,7 +367,8 @@ def run_topology():
     time.sleep(2)
 
     # invalidate PID cache dulu (host baru start)
-    register_hosts(h1, h2, h3)
+    invalidate_pid_cache()
+    time.sleep(1)
 
     # start watchdog — pakai mnexec, thread-safe
     wd = threading.Thread(
