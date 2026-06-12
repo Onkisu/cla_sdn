@@ -257,17 +257,18 @@ if __name__ == "__main__":
     print()
 
     while True:
+        start_time = time.time()  # ← reset tiap loop
+        bg_thread, bg_stop = None, None
+
         for slot_idx, (offset, (label, bursts)) in enumerate(BURST_SCHEDULE):
             burst_start = start_time + offset
             bg_stop_at  = burst_start - BG_STOP_PRE
 
-            # Start background sebelum burst
             if bg_stop_at - time.time() > 10:
                 if bg_thread and bg_thread.is_alive():
                     stop_background(bg_thread, bg_stop)
                 bg_thread, bg_stop = start_background(bg_stop_at)
 
-            # Tunggu sampai jadwal burst
             wait = burst_start - time.time()
             if wait > 0:
                 print(f"\n[UDP] Slot {slot_idx+1}/3 — {label} — mulai dalam {wait:.0f}s")
@@ -275,7 +276,6 @@ if __name__ == "__main__":
             else:
                 print(f"\n[UDP] Slot {slot_idx+1}/3 — {label} — mulai (terlambat {-wait:.0f}s)")
 
-            # Stop background sebelum burst
             if bg_thread and bg_thread.is_alive():
                 stop_background(bg_thread, bg_stop)
                 bg_thread, bg_stop = None, None
@@ -285,9 +285,9 @@ if __name__ == "__main__":
             run_bursts(bursts, label=f"[{label}]")
             global_cycle += 1
 
-        # Stop background kalau masih jalan
         if bg_thread and bg_thread.is_alive():
             stop_background(bg_thread, bg_stop)
 
         elapsed = time.time() - start_time
-        print(f"\n[UDP] Demo selesai. Total waktu: {elapsed:.0f}s ({elapsed/60:.1f} menit)")
+        print(f"\n[UDP] Loop selesai. {elapsed:.0f}s — jeda 10s")
+        time.sleep(10)
