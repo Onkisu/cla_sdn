@@ -256,37 +256,38 @@ if __name__ == "__main__":
     print(f"[UDP] Estimated finish: ~{time.strftime('%H:%M:%S', time.localtime(start_time + 450))}")
     print()
 
-    for slot_idx, (offset, (label, bursts)) in enumerate(BURST_SCHEDULE):
-        burst_start = start_time + offset
-        bg_stop_at  = burst_start - BG_STOP_PRE
+    while True:
+        for slot_idx, (offset, (label, bursts)) in enumerate(BURST_SCHEDULE):
+            burst_start = start_time + offset
+            bg_stop_at  = burst_start - BG_STOP_PRE
 
-        # Start background sebelum burst
-        if bg_stop_at - time.time() > 10:
+            # Start background sebelum burst
+            if bg_stop_at - time.time() > 10:
+                if bg_thread and bg_thread.is_alive():
+                    stop_background(bg_thread, bg_stop)
+                bg_thread, bg_stop = start_background(bg_stop_at)
+
+            # Tunggu sampai jadwal burst
+            wait = burst_start - time.time()
+            if wait > 0:
+                print(f"\n[UDP] Slot {slot_idx+1}/3 — {label} — mulai dalam {wait:.0f}s")
+                time.sleep(wait)
+            else:
+                print(f"\n[UDP] Slot {slot_idx+1}/3 — {label} — mulai (terlambat {-wait:.0f}s)")
+
+            # Stop background sebelum burst
             if bg_thread and bg_thread.is_alive():
                 stop_background(bg_thread, bg_stop)
-            bg_thread, bg_stop = start_background(bg_stop_at)
+                bg_thread, bg_stop = None, None
 
-        # Tunggu sampai jadwal burst
-        wait = burst_start - time.time()
-        if wait > 0:
-            print(f"\n[UDP] Slot {slot_idx+1}/3 — {label} — mulai dalam {wait:.0f}s")
-            time.sleep(wait)
-        else:
-            print(f"\n[UDP] Slot {slot_idx+1}/3 — {label} — mulai (terlambat {-wait:.0f}s)")
+            total_dur = sum(d for _, d in bursts)
+            print(f"[UDP] === Cycle #{global_cycle+1} | {label} | {total_dur}s total ===")
+            run_bursts(bursts, label=f"[{label}]")
+            global_cycle += 1
 
-        # Stop background sebelum burst
+        # Stop background kalau masih jalan
         if bg_thread and bg_thread.is_alive():
             stop_background(bg_thread, bg_stop)
-            bg_thread, bg_stop = None, None
 
-        total_dur = sum(d for _, d in bursts)
-        print(f"[UDP] === Cycle #{global_cycle+1} | {label} | {total_dur}s total ===")
-        run_bursts(bursts, label=f"[{label}]")
-        global_cycle += 1
-
-    # Stop background kalau masih jalan
-    if bg_thread and bg_thread.is_alive():
-        stop_background(bg_thread, bg_stop)
-
-    elapsed = time.time() - start_time
-    print(f"\n[UDP] Demo selesai. Total waktu: {elapsed:.0f}s ({elapsed/60:.1f} menit)")
+        elapsed = time.time() - start_time
+        print(f"\n[UDP] Demo selesai. Total waktu: {elapsed:.0f}s ({elapsed/60:.1f} menit)")
