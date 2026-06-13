@@ -50,7 +50,8 @@ def send_tcp(rate, duration):
 
 if __name__ == "__main__":
     print("[TCP] 🎯 iperf3 Burst Started")
-    time.sleep(600)
+    #time.sleep(600)
+    time.sleep(10)
     while True:
 
         bursts = [
