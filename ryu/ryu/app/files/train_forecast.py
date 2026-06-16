@@ -16,7 +16,7 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ==============================================================================
-# CONFIG
+# CONFIGS
 # ==============================================================================
 CSV_PATH               = "dataset_ta_3.csv"
 
