@@ -32,7 +32,7 @@ BG_STOP_PRE      = 5   # stop N detik sebelum burst
 # Asli: peak 30-45s   → di sini jadi 15-20s
 # Karakteristik shape tetap sama: ramp-up, plateau noise, ramp-down
 
-# Cycle A: FastRise DualPeak SlowFall
+# Cycle A: FastRise DualPeak SlowFalll
 CYCLE_A = [
     (0,   15),   # idle
     (40,  10),   # ramp up
