@@ -6,10 +6,11 @@ import xgboost as xgb
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import timedelta
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, confusion_matrix
 import sys
 import warnings
 import optuna
+import seaborn as sns
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -113,6 +114,37 @@ def create_features(df, for_training=False):
     return data
 
 
+
+def plot_feature_importance(model):
+    importance = pd.DataFrame({
+        'feature': FEATURES,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=True)
+
+    plt.figure(figsize=(10, 10))
+    plt.barh(importance['feature'], importance['importance'], color='steelblue')
+    plt.xlabel('Importance Score')
+    plt.title('Feature Importance (XGBoost)')
+    plt.tight_layout()
+    plt.show()
+
+    # Print juga ke terminal
+    print("\n  Feature Importance:")
+    for _, row in importance.sort_values('importance', ascending=False).iterrows():
+        print(f"  {row['feature']:<25} {row['importance']:.4f}")
+
+
+def plot_confusion_matrix(res):
+    cm = confusion_matrix(res['is_burst_actual'], res['is_burst_pred'])
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=['Steady', 'Burst'],
+                yticklabels=['Steady', 'Burst'])
+    plt.xlabel('Prediksi')
+    plt.ylabel('Aktual')
+    plt.title('Confusion Matrix')
+    plt.tight_layout()
+    plt.show()
 # ==============================================================================
 # OPTUNA TUNING
 # ==============================================================================
@@ -130,7 +162,7 @@ def objective(trial, df_train_raw):
     y_tr, y_val = y.iloc[:-val_size], y.iloc[-val_size:]
 
     params = {
-        'n_estimators':         1000,
+        'n_estimators':         trial.suggest_int('n_estimators', 100, 1000),
         'max_depth':            trial.suggest_int('max_depth', 3, 8),
         'learning_rate':        trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
         'subsample':            trial.suggest_float('subsample', 0.6, 1.0),
@@ -141,7 +173,7 @@ def objective(trial, df_train_raw):
         'reg_lambda':           trial.suggest_float('reg_lambda', 0.5, 3.0),
         'tree_method':          'hist',
         'device':               'cuda',
-        'early_stopping_rounds': 40,
+        'early_stopping_rounds': trial.suggest_int('early_stopping_rounds', 10, 50),
         'objective':            'reg:squarederror',
         'n_jobs':               -1,
         'random_state':         42,
@@ -183,6 +215,8 @@ def train_model(df_raw, best_params=None):
 
     # Pakai best params kalau ada, fallback ke default
     params = best_params if best_params else {
+        'n_estimators': 500,
+        'early_stopping_rounds': 20,
         'max_depth': 5, 'learning_rate': 0.04,
         'subsample': 0.8, 'colsample_bytree': 0.8,
         'min_child_weight': 5, 'gamma': 0.5,
@@ -190,10 +224,8 @@ def train_model(df_raw, best_params=None):
     }
 
     model = xgb.XGBRegressor(
-        n_estimators=1000,
         tree_method='hist',
         device='cuda',
-        early_stopping_rounds=40,
         objective='reg:squarederror',
         n_jobs=-1,
         random_state=42,
@@ -230,9 +262,9 @@ def compute_metrics(res):
     mae  = mean_absolute_error(yt, yp)
     rmse = np.sqrt(mean_squared_error(yt, yp))
     r2   = r2_score(yt, yp)
-    mask = yt > 15_000_000
+    mask = yt > 20_000_000
     mape = np.mean(np.abs((yt[mask] - yp[mask]) / yt[mask])) * 100 if mask.sum() > 0 else float('nan')
-
+    
     tp = ((res['is_burst_actual']==1) & (res['is_burst_pred']==1)).sum()
     tn = ((res['is_burst_actual']==0) & (res['is_burst_pred']==0)).sum()
     fp = ((res['is_burst_actual']==0) & (res['is_burst_pred']==1)).sum()
@@ -342,6 +374,9 @@ def main():
     print(f"\n[3] Training dengan best params...")
     model = train_model(df_train, best_params=best_params)
 
+    print(f"\n[3b] Feature Importance...")
+    plot_feature_importance(model)
+
     print(f"\n[4] Evaluasi...")
     res = evaluate(model, df_test)
     m   = compute_metrics(res)
@@ -368,6 +403,10 @@ def main():
                  train_period=(df_train.index[0], df_train.index[-1]),
                  test_period =(df_test.index[0],  df_test.index[-1]))
     
+
+    plot_confusion_matrix(res)
+
+
     print(f"\n[7] Menyimpan model...")
     model_path = "xgb_forecast_model.json"
     model.save_model(model_path)
