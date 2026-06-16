@@ -243,10 +243,12 @@ if __name__ == "__main__":
     # +310s burst C start  (~114s)
     # +430s selesai ≈ 7.2 menit, sisanya buffer
     BURST_SCHEDULE = [
-        (10,  ALL_CYCLES[0]),   # +10s  → Cycle A
-        (175, ALL_CYCLES[1]),   # +175s → Cycle B
-        (310, ALL_CYCLES[2]),   # +310s → Cycle C
+        # (10,  ALL_CYCLES[0]),   # +10s  → Cycle A
+        # (175, ALL_CYCLES[1]),   # +175s → Cycle B
+        # (310, ALL_CYCLES[2]),   # +310s → Cycle C
+        (10, ALL_CYCLES[2]),   # +10s → Cycle C
     ]
+    
 
     start_time = time.time()
     bg_thread, bg_stop = None, None
@@ -291,3 +293,4 @@ if __name__ == "__main__":
         elapsed = time.time() - start_time
         print(f"\n[UDP] Loop selesai. {elapsed:.0f}s — jeda 10s")
         time.sleep(10)
+        break;

@@ -121,3 +121,4 @@ if __name__ == "__main__":
             send_udp(rate, duration)
 
         print("\n[BURST] === Cycle Complete, Restarting ===\n")
+        break;  
