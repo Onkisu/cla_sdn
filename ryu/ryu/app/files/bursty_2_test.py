@@ -28,7 +28,7 @@ BG_RAMP_STEP     = 2
 BG_STOP_PRE      = 5   # stop N detik sebelum burst
 
 # ─── CYCLE PROFILES (compressed dari asli) ───────────────────────────────────
-# Asli: idle 300-480s → di sini jadi 15s
+# Asli: idle 300-480s → di sini jadi 15ss
 # Asli: peak 30-45s   → di sini jadi 15-20s
 # Karakteristik shape tetap sama: ramp-up, plateau noise, ramp-down
 
