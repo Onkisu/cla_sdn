@@ -74,6 +74,20 @@ class VoIPForecastController(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(VoIPForecastController, self).__init__(*args, **kwargs)
         
+        # Taruh ini di baris akhir di dalam def __init__(self, ...):
+        self.hardcoded_weights = {
+            (4, 1): 10, (1, 4): 10,
+            (5, 1): 10, (1, 5): 10,
+            (6, 1): 10, (1, 6): 10,
+
+            (4, 3): 20, (3, 4): 20,
+            (5, 3): 20, (3, 5): 20,
+            (6, 3): 20, (3, 6): 20,
+
+            (4, 2): 100, (2, 4): 100,  # Spine 2 dibuat paling berat
+            (5, 2): 100, (2, 5): 100,
+            (6, 2): 100, (2, 6): 100,
+        }
         # Thread safety
         self.lock = threading.RLock()
         
@@ -538,9 +552,17 @@ class VoIPForecastController(app_manager.RyuApp):
     
 
 
+    # def _get_k_shortest_paths(self, src_dpid, dst_dpid, k=3):
+    #     try:
+    #         paths = list(nx.shortest_simple_paths(self.net, src_dpid, dst_dpid))
+    #         return paths[:k]
+    #     except nx.NetworkXNoPath:
+    #         return []
+    
     def _get_k_shortest_paths(self, src_dpid, dst_dpid, k=3):
         try:
-            paths = list(nx.shortest_simple_paths(self.net, src_dpid, dst_dpid))
+            # UBAH BARIS INI: Tambahkan weight='weight'
+            paths = list(nx.shortest_simple_paths(self.net, src_dpid, dst_dpid, weight='weight'))
             return paths[:k]
         except nx.NetworkXNoPath:
             return []
@@ -818,9 +840,21 @@ class VoIPForecastController(app_manager.RyuApp):
                 for switch in switches:
                     self.net.add_node(switch.dp.id)
                 
+                # for link in links:
+                #     self.net.add_edge(link.src.dpid, link.dst.dpid, port=link.src.port_no)
+                #     self.net.add_edge(link.dst.dpid, link.src.dpid, port=link.dst.port_no)
                 for link in links:
-                    self.net.add_edge(link.src.dpid, link.dst.dpid, port=link.src.port_no)
-                    self.net.add_edge(link.dst.dpid, link.src.dpid, port=link.dst.port_no)
+                    # 1. Ambil dpid asal dan tujuan
+                    src = link.src.dpid
+                    dst = link.dst.dpid
+                    
+                    # 2. Cari bobotnya di hardcoded_weights, kalau gak ada beri default 1
+                    weight_src_dst = self.hardcoded_weights.get((src, dst), 1)
+                    weight_dst_src = self.hardcoded_weights.get((dst, src), 1)
+                    
+                    # 3. Masukkan ke NetworkX lengkap dengan port DAN weight
+                    self.net.add_edge(src, dst, port=link.src.port_no, weight=weight_src_dst)
+                    self.net.add_edge(dst, src, port=link.dst.port_no, weight=weight_dst_src)
             except:
                 pass
 
