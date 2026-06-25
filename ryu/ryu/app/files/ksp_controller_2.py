@@ -75,19 +75,53 @@ class VoIPForecastController(app_manager.RyuApp):
         super(VoIPForecastController, self).__init__(*args, **kwargs)
         
         # Taruh ini di baris akhir di dalam def __init__(self, ...):
-        self.hardcoded_weights = {
-            (4, 1): 10, (1, 4): 20,
-            (5, 1): 10, (1, 5): 20,
-            (6, 1): 10, (1, 6): 20,
+        # self.hardcoded_weights = {
+        #     (4, 1): 10, (1, 4): 20,
+        #     (5, 1): 10, (1, 5): 20,
+        #     (6, 1): 10, (1, 6): 20,
 
-            (4, 3): 20, (3, 4): 40,
-            (5, 3): 20, (3, 5): 40,
-            (6, 3): 20, (3, 6): 40,
+        #     (4, 3): 20, (3, 4): 40,
+        #     (5, 3): 20, (3, 5): 40,
+        #     (6, 3): 20, (3, 6): 40,
 
-            (4, 2): 100, (2, 4): 10,  
-            (5, 2): 100, (2, 5): 10,
-            (6, 2): 100, (2, 6): 10,
+        #     (4, 2): 100, (2, 4): 10,  
+        #     (5, 2): 100, (2, 5): 10,
+        #     (6, 2): 100, (2, 6): 10,
+        # }
+        
+        self.link_capacity = {
+
+            (4,1):20,
+            (1,4):20,
+
+            (5,1):20,
+            (1,5):20,
+
+            (6,1):20,
+            (1,6):20,
+
+
+            (4,2):40,
+            (2,4):40,
+
+            (5,2):40,
+            (2,5):40,
+
+            (6,2):40,
+            (2,6):40,
+
+
+            (4,3):10,
+            (3,4):10,
+
+            (5,3):10,
+            (3,5):10,
+
+            (6,3):10,
+            (3,6):10,
         }
+
+        self.link_costs = {}
         # Thread safety
         self.lock = threading.RLock()
         
@@ -144,11 +178,37 @@ class VoIPForecastController(app_manager.RyuApp):
         self.logger.info("ðŸŸ¢ VoIP Forecast Controller Started")
         self.logger.info("ðŸ“Š Forecast source: forecast_1h.y_pred (DPID 5)")
         
+        self.update_link_costs()
+        
+        path_costs = {}
+
+        for spine in [1,2,3]:
+
+            cost = (
+                self.link_costs.get(
+                    (4,spine),
+                    0
+                )
+                +
+                self.link_costs.get(
+                    (spine,5),
+                    0
+                )
+            )
+
+            path_costs[f"Spine{spine}"] = cost
+            
         write_state_file({
             'state': 'IDLE',
             'congestion': False,
             'current_spine': self.current_spine,
-            'forecast_mode': True
+            'forecast_mode': True,
+            'link_costs': {
+                f'{a}-{b}': c
+                for (a,b),c
+                in self.link_costs.items()
+            },
+            'path_costs': path_costs
         })
         
         # Install default flows
@@ -559,8 +619,51 @@ class VoIPForecastController(app_manager.RyuApp):
     #     except nx.NetworkXNoPath:
     #         return []
     
+    
+    def calculate_cost(self, src, dst):
+
+        capacity = self.link_capacity.get(
+            (src,dst),
+            100
+        )
+
+        if src in [1,2,3]:
+            usage = self.spine_traffic.get(src,0)
+        else:
+            usage = 0
+
+        usage = usage / 1000000
+
+        available = max(
+            capacity - usage,
+            1
+        )
+
+        return round(
+            capacity / available,
+            2
+        )
+        
+    def update_link_costs(self):
+
+        for src,dst in self.link_capacity:
+
+            self.link_costs[(src,dst)] = \
+                self.calculate_cost(
+                    src,
+                    dst
+                )
+        
     def _get_k_shortest_paths(self, src_dpid, dst_dpid, k=3):
+        self.update_link_costs()
         try:
+            for src,dst in self.net.edges():
+
+                self.net[src][dst]['weight'] = \
+                    self.link_costs.get(
+                        (src,dst),
+                        1
+                    )
             # UBAH BARIS INI: Tambahkan weight='weight'
             paths = list(nx.shortest_simple_paths(self.net, src_dpid, dst_dpid, weight='weight'))
             return paths[:k]
@@ -638,10 +741,36 @@ class VoIPForecastController(app_manager.RyuApp):
         
         # STEP 1: Install NEW path first
         self.reroute_stage = 'INSTALLING_NEW_PATH'
+        self.update_link_costs()
+        
+        path_costs = {}
+
+        for spine in [1,2,3]:
+
+            cost = (
+                self.link_costs.get(
+                    (4,spine),
+                    0
+                )
+                +
+                self.link_costs.get(
+                    (spine,5),
+                    0
+                )
+            )
+
+            path_costs[f"Spine{spine}"] = cost
+            
         write_state_file({
             'state': self.reroute_stage,
             'congestion': True,
-            'target_spine': target_spine
+            'target_spine': target_spine,
+            'link_costs': {
+                f'{a}-{b}': c
+                for (a,b),c
+                in self.link_costs.items()
+            },
+            'path_costs': path_costs
         })
         
         success = self._install_h1_h2_flow_on_spine(target_spine)
@@ -659,13 +788,40 @@ class VoIPForecastController(app_manager.RyuApp):
         hub.sleep(0.1)
         self.logger.info("New path installed")
         
+        self.update_link_costs()
+        
+        path_costs = {}
+
+        for spine in [1,2,3]:
+
+            cost = (
+                self.link_costs.get(
+                    (4,spine),
+                    0
+                )
+                +
+                self.link_costs.get(
+                    (spine,5),
+                    0
+                )
+            )
+
+            path_costs[f"Spine{spine}"] = cost
+        
         # STEP 2: Brief overlap to allow traffic to switch
         self.reroute_stage = 'TRAFFIC_SWITCHING'
         write_state_file({
             'state': self.reroute_stage,
             'congestion': True,
             'old_spine': old_spine,
-            'new_spine': target_spine
+            'new_spine': target_spine,
+            'link_costs': {
+                f'{a}-{b}': c
+                for (a,b),c
+                in self.link_costs.items()
+            },
+
+            'path_costs': path_costs
         })
         
         self.logger.info("Waiting 0.5s for traffic to switch...")
@@ -676,7 +832,14 @@ class VoIPForecastController(app_manager.RyuApp):
         write_state_file({
             'state': self.reroute_stage,
             'congestion': True,
-            'old_spine': old_spine
+            'old_spine': old_spine,
+            'link_costs': {
+                f'{a}-{b}': c
+                for (a,b),c
+                in self.link_costs.items()
+            },
+
+            'path_costs': path_costs
         })
         
         self._delete_h1_h2_flows_on_spine(old_spine)
@@ -691,11 +854,38 @@ class VoIPForecastController(app_manager.RyuApp):
         self.reroute_stage = 'ACTIVE_REROUTE'
         self.stats['total_reroutes'] += 1
         
+        self.update_link_costs()
+        
+        path_costs = {}
+
+        for spine in [1,2,3]:
+
+            cost = (
+                self.link_costs.get(
+                    (4,spine),
+                    0
+                )
+                +
+                self.link_costs.get(
+                    (spine,5),
+                    0
+                )
+            )
+
+            path_costs[f"Spine{spine}"] = cost
+        
         write_state_file({
             'state': 'ACTIVE_REROUTE',
             'congestion': True,
             'current_spine': self.current_spine,
-            'original_spine': self.original_spine
+            'original_spine': self.original_spine,
+            'link_costs': {
+                f'{a}-{b}': c
+                for (a,b),c
+                in self.link_costs.items()
+            },
+            'path_costs': path_costs
+            
         })
         
         self.logger.info(f"REROUTE COMPLETE: H1->H2 now via Spine {target_spine} (make-before-break)")
@@ -779,9 +969,36 @@ class VoIPForecastController(app_manager.RyuApp):
 
         # DELETE SEMUA FLOW H1→H2
         self.reroute_stage = 'REVERT_DELETING_ALL'
+        
+        self.update_link_costs()
+        
+        path_costs = {}
+
+        for spine in [1,2,3]:
+
+            cost = (
+                self.link_costs.get(
+                    (4,spine),
+                    0
+                )
+                +
+                self.link_costs.get(
+                    (spine,5),
+                    0
+                )
+            )
+
+            path_costs[f"Spine{spine}"] = cost
+            
         write_state_file({
             'state': self.reroute_stage,
-            'congestion': False
+            'congestion': False,
+            'link_costs': {
+                f'{a}-{b}': c
+                for (a,b),c
+                in self.link_costs.items()
+            },
+            'path_costs': path_costs
         })
 
         self._delete_all_h1_h2_flows()
@@ -789,10 +1006,37 @@ class VoIPForecastController(app_manager.RyuApp):
 
         # install ulang path normal
         self.reroute_stage = 'REVERT_INSTALLING'
+        
+        self.update_link_costs()
+        
+        path_costs = {}
+
+        for spine in [1,2,3]:
+
+            cost = (
+                self.link_costs.get(
+                    (4,spine),
+                    0
+                )
+                +
+                self.link_costs.get(
+                    (spine,5),
+                    0
+                )
+            )
+
+            path_costs[f"Spine{spine}"] = cost
+            
         write_state_file({
             'state': self.reroute_stage,
             'congestion': False,
-            'target_spine': target_spine
+            'target_spine': target_spine,
+            'link_costs': {
+                f'{a}-{b}': c
+                for (a,b),c
+                in self.link_costs.items()
+            },
+            'path_costs': path_costs
         })
 
         self._install_h1_h2_flow_on_spine(target_spine)
@@ -806,11 +1050,37 @@ class VoIPForecastController(app_manager.RyuApp):
         self.congestion_active = False
         self.reroute_stage = 'IDLE'
         self.stats['total_reverts'] += 1
+        
+        self.update_link_costs()
+        
+        path_costs = {}
+
+        for spine in [1,2,3]:
+
+            cost = (
+                self.link_costs.get(
+                    (4,spine),
+                    0
+                )
+                +
+                self.link_costs.get(
+                    (spine,5),
+                    0
+                )
+            )
+
+            path_costs[f"Spine{spine}"] = cost
 
         write_state_file({
             'state': 'IDLE',
             'congestion': False,
-            'current_spine': self.current_spine
+            'current_spine': self.current_spine,
+            'link_costs': {
+                f'{a}-{b}': c
+                for (a,b),c
+                in self.link_costs.items()
+            },
+            'path_costs': path_costs
         })
 
         self.last_revert_time = time.time()
@@ -849,8 +1119,21 @@ class VoIPForecastController(app_manager.RyuApp):
                     dst = link.dst.dpid
                     
                     # 2. Cari bobotnya di hardcoded_weights, kalau gak ada beri default 1
-                    weight_src_dst = self.hardcoded_weights.get((src, dst), 1)
-                    weight_dst_src = self.hardcoded_weights.get((dst, src), 1)
+                    # weight_src_dst = self.hardcoded_weights.get((src, dst), 1)
+                    # weight_dst_src = self.hardcoded_weights.get((dst, src), 1)
+                    self.update_link_costs()
+                    
+                    weight_src_dst = \
+                        self.link_costs.get(
+                            (src,dst),
+                            1
+                        )
+
+                    weight_dst_src = \
+                        self.link_costs.get(
+                            (dst,src),
+                            1
+                        )
                     
                     # 3. Masukkan ke NetworkX lengkap dengan port DAN weight
                     self.net.add_edge(src, dst, port=link.src.port_no, weight=weight_src_dst)

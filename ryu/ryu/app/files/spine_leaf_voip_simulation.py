@@ -346,9 +346,42 @@ def run_topology():
     for i in range(1, 4):
         leaves.append(net.addSwitch(f'l{i}', dpid=f'{i+3:016x}', protocols='OpenFlow13'))
 
+    # for l in leaves:
+    #     for s in spines:
+    #         net.addLink(l, s, bw=40, delay='2ms', max_queue_size=30, use_htb=True)
+            
+    # Spine1 = 100 Mbps
     for l in leaves:
-        for s in spines:
-            net.addLink(l, s, bw=40, delay='2ms', max_queue_size=30, use_htb=True)
+        net.addLink(
+            l,
+            spines[0],
+            bw=20,
+            delay='2ms',
+            max_queue_size=30,
+            use_htb=True
+        )
+
+    # Spine2 = 200 Mbps
+    for l in leaves:
+        net.addLink(
+            l,
+            spines[1],
+            bw=40,
+            delay='2ms',
+            max_queue_size=30,
+            use_htb=True
+        )
+
+    # Spine3 = 150 Mbps
+    for l in leaves:
+        net.addLink(
+            l,
+            spines[2],
+            bw=10,
+            delay='2ms',
+            max_queue_size=30,
+            use_htb=True
+        )
 
     h1 = net.addHost('h1', ip='10.0.0.1/24')
     h2 = net.addHost('h2', ip='10.0.0.2/24')
