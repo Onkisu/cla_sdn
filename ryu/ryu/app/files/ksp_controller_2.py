@@ -644,7 +644,7 @@ class VoIPForecastController(app_manager.RyuApp):
         )
 
         return round(
-            capacity / available,
+            100 / available,
             2
         )
         
