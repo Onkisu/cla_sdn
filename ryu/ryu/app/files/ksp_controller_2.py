@@ -631,6 +631,10 @@ class VoIPForecastController(app_manager.RyuApp):
             usage = self.spine_traffic.get(src,0)
         else:
             usage = 0
+        
+        self.logger.info(
+            f"src={src} usage_raw={usage}"
+        )
 
         usage = usage / 1000000
 
